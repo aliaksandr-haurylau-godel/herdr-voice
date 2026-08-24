@@ -9,6 +9,7 @@
 //! before the first feature lands.
 
 mod proto;
+mod transport;
 
 use std::process::ExitCode;
 
