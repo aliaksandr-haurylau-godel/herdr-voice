@@ -108,6 +108,26 @@ builds on Linux at all.
 
 A revised artifact needs a new verdict; the gate runs again.
 
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_8.md
+  reviewer: planner
+  verdict: READY
+  date: 2026-08-25
+  questions: []
+  blocker: null
+  notes:
+    - "The gate question is answered and the three places that had to agree now do. Section 2a makes the sample source event-carrying — a block of samples or a failure with its reason — and fixes the two consequences. Section 6 states the same interface with the same two events and both implementations, and its `capture` row now carries `a source that fails mid-take`. Section 8 maps AC-13 to 1, 2 and 2a, which is exactly its three clauses. The four `audio::*` tasks and the `capture` task can now be written independently, which is what was blocking."
+    - "Not a gate question: section 2a says the next `dictate` answers with the remembered reason and clears it, without saying whether that same invocation also starts a fresh take; I will plan it as report-and-clear only. And AC-8 says the mean volume is computed and reported while section 4 only states it is named in a refusal; I will plan the accepted-take reply to carry the path and the measured level."
+    - "Both earlier notes are closed in the artifact. Dependency graph comes out unambiguous: `audio::device`, `audio::level`, `audio::resample`, `audio::wav` in parallel, then `capture`, then `config` and `daemon`, with the CI step independent."
+```
+
+Both of the reviewer's readings are adopted rather than left to the plan's
+discretion, and they are what the plan will say: the `dictate` that reports a
+remembered failure only reports and clears it, and the reply for an accepted take
+carries the path and the measured level.
+
 ## Notes
 
 The probe used to establish the `cpal` facts was a throwaway crate outside the
