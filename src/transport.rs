@@ -71,6 +71,11 @@ impl Vars {
 
 #[derive(Debug)]
 pub enum TransportError {
+    /// Unix only: the socket is a path there, and without a state directory there
+    /// is nowhere to put it. On Windows the name lives in the pipe namespace and
+    /// needs no directory, so nothing constructs this and `-D warnings` rejects a
+    /// variant with no constructor.
+    #[cfg(unix)]
     NoStateDirectory,
     Name(io::Error),
     Io {
@@ -83,6 +88,7 @@ pub enum TransportError {
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(unix)]
             TransportError::NoStateDirectory => write!(
                 f,
                 "cannot tell where to put the socket: neither HERDR_PLUGIN_STATE_DIR, \
