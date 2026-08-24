@@ -1,0 +1,30 @@
+# Decisions
+
+Everything decided without the repository's owner. One line each, with the reason
+it was decided that way and where it happened, so any of it can be read in one
+sitting and any of it can be reversed.
+
+Each entry also lives in the `RUN_<issue>.md` of the run that took it, in context.
+This file is the list; the run file is the story.
+
+| Decision | Basis | Where |
+|---|---|---|
+| The stage reviewers are project agents in `.claude/agents/`, not additions to anyone's global agent set | A project agent travels with the repository and is reviewed in the pull request like any other file; the alternative changes a personal environment that has nothing to do with this repository | 2026-08-24, #3 |
+| `serde`, `serde_json` and `toml` are allowed; asynchronous runtimes are not, until a task appears that cannot be done without one | A hand-written JSON reader is a defect factory on escapes, unicode and nesting, and one such defect costs more than a line in `Cargo.toml`. A runtime, by contrast, buys nothing for a process that answers a few bytes for one person | 2026-08-24, #3 |
+| `interprocess` is the only transport crate, and it is visible in `src/transport.rs` alone | `std` has a Unix socket and no Windows named pipe. Confining it means replacing it later is a change to one file | 2026-08-24, #3 |
+| The machine-wide Windows pipe name is issue #6, not part of #3 | It is a real collision between two users on one machine, and it belongs neither to the frame nor to #1, which is about auto-repeat and audio capture | 2026-08-24, #3 |
+| The daemon connects before it listens | It is the only order that tells a live daemon from a dead one's leftovers; reclaiming the name first would take it from a running process | 2026-08-24, #3 |
+| There is no user-visible command to stop the daemon; `stop` exists only as a wire request the tests send | A new command is a new user-visible name, and names are the owner's decision. The tests needed a way to shut a listener down without signals; a person can use a signal | 2026-08-24, #3 |
+| The frame is a header line plus the context bytes copied without inspection; the client parses nothing | Holding a key starts the client about twelve times a second, and it has no use for the fields. The daemon is resident and parses instead | 2026-08-24, #3 |
+| The entrypoint travels as a fourth header token, with `-` for a variable that was not set | The daemon must name the entrypoint in what it records, and the variable reaches the client only. herdr does not set it for an action invoked from the command line, so the dash is the common case there | 2026-08-24, #3 |
+| The configuration file is `config.toml` in `HERDR_PLUGIN_CONFIG_DIR`, or the same directory herdr computes without it | `herdr plugin config-dir` prints that directory even for a plugin that is not installed, which is the case `doctor` meets from a plain terminal | 2026-08-24, #3 |
+| The minimum herdr version is a constant in the code, checked against the manifest by `scripts/check_manifest.py` | Two copies of one number drift. The check was verified by making them disagree | 2026-08-24, #3 |
+| A speech model lives in `<state>/models/` and counts as present when a filename contains the configured model name | Enough for a report that says "no model"; not enough to choose what to load, which the recognition task has to strengthen with an exact name and an integrity check | 2026-08-24, #3 |
+| `agent = "auto"` resolves against a candidate list of exactly one name, `claude` | It is the only agent command-line tool the prototype used and the only one every rewrite measurement was made with. A second name goes on the list when a second tool is measured | 2026-08-24, #3 |
+| A peer that connects and closes without sending is a liveness probe, not a broken request, and the daemon stays quiet about it | `doctor` and a second `daemon` start both do exactly that. Three alarming lines sat in a log that had answered two real requests | 2026-08-24, #3 |
+| The transport platform is chosen by `cfg(windows)`, never by `GenericNamespaced::is_supported()` | That predicate is true on macOS too, where a namespaced name resolves to a file under the temporary directory instead of the state directory | 2026-08-24, #3 |
+| CI caps the test job at ten minutes, runs single-threaded uncaptured tests on Windows only, and cancels superseded runs | A deadlocking test otherwise sits for six hours and says nothing about which test it was; the diagnostic slows the platforms that do not need it; and two runs per push competed for runners, making a cancelled run indistinguishable from a failure | 2026-08-24, #3 |
+| A pull request lands as one squashed commit | It is how #5 landed, and the history reads as one entry per piece of work | 2026-08-24, #3 |
+| The client waits two seconds for a reply, on another thread | A daemon answering a few bytes has no reason to take longer, and a hang is the failure the bound exists to prevent | 2026-08-24, #3 |
+| A take is driven by the `dictate` action the manifest already declares, not by a new subcommand | The issue asked for "a plain subcommand", which would be a new user-visible name — the owner's decision, not this stage's | 2026-08-25, #8 |
+| Device selection stays by name, although `cpal` 0.18 offers a stable device identifier | The identifier addresses exactly the failure the name rule was written against, but the rule lives in `CLAUDE.md` and changing it belongs to whoever owns that file | 2026-08-25, #8 |
