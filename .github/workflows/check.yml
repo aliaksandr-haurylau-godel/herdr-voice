@@ -5,6 +5,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Every push to a pull request starts this twice, once per trigger, and the two
+# runs compete for the same runners. Superseded runs are cancelled so a red result
+# always means a real failure rather than a race with a newer commit.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -32,9 +39,14 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: test
-        # One thread and no capture: if a test hangs, the last line of output names
-        # the test before it, which is the only way to identify the culprit from a
-        # timed-out job.
+        if: runner.os != 'Windows'
+        run: cargo test --all
+      - name: test (Windows)
+        # One thread and no capture on this platform only. Named pipes are where the
+        # platform differences live, and if a test hangs there the last line of
+        # output names the test before it — the only way to identify the culprit
+        # from a job that was killed by its timeout.
+        if: runner.os == 'Windows'
         run: cargo test --all -- --test-threads=1 --nocapture
 
   manifest:

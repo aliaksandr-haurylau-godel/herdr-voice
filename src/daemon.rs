@@ -291,9 +291,13 @@ mod tests {
     fn a_second_start_finds_the_first_and_a_stop_ends_it() {
         let address = crate::transport::tests_support::probe_address("daemon-start");
         let listener = crate::transport::listen(&address).expect("listen");
+        let (ended, has_ended) = std::sync::mpsc::channel();
         let served = {
             let address = address.clone();
-            std::thread::spawn(move || super::serve(listener, address))
+            std::thread::spawn(move || {
+                super::serve(listener, address);
+                let _ = ended.send(());
+            })
         };
 
         // A live daemon accepts a connection, which is what start() checks for.
@@ -312,6 +316,11 @@ mod tests {
         let reply = Reply::read_from(&mut client).expect("reply");
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
 
+        // A bounded wait, so a loop that will not stop fails this test in seconds
+        // instead of sitting until the CI job's cap kills the whole run.
+        has_ended
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the accept loop must end after a stop request");
         served.join().expect("the loop must end");
     }
 }

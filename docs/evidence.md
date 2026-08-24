@@ -140,3 +140,18 @@ as end of input. A disconnect further in, inside the body, stays a short body.
 
 Neither of these was found by reading the code, and neither could have been: the
 platform that shows them is the one this machine cannot build.
+
+The crate's own source settles why, and settles two related worries as well
+(`interprocess` 2.4.3, as vendored in the local registry):
+
+- `src/os/windows/named_pipe/listener.rs:154` — `accept` loops on `ERROR_NO_DATA`,
+  disconnects the instance and waits again. A connection whose client left without
+  writing is what that error is, and the crate calls it an empty connection and
+  discards it. That is the hang, exactly.
+- `src/os/windows/named_pipe/listener.rs:72` — `accept` creates the next instance
+  before it hands out the accepted one, so a request being served does not make the
+  next client queue. No work of ours is needed for that.
+- `src/os/windows/named_pipe/c_wrappers.rs:171` and
+  `src/os/windows/named_pipe/wait_timeout.rs:13` — a client meeting a busy pipe
+  waits rather than failing, but the wait is bounded: with both sides on the default
+  it is 50 milliseconds. So a liveness probe on Windows cannot block indefinitely.
