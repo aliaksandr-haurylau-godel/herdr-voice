@@ -8,6 +8,14 @@
 //! the crate, the manifest, the tests and the release pipeline can be exercised
 //! before the first feature lands.
 
+mod client;
+mod config;
+mod context;
+mod daemon;
+mod doctor;
+mod proto;
+mod transport;
+
 use std::process::ExitCode;
 
 /// What the binary was asked to do.
@@ -86,12 +94,24 @@ fn parse(args: &[String]) -> Command {
 /// code for an unknown command, so a caller can tell "not yet" from "never".
 const NOT_IMPLEMENTED: u8 = 69;
 
+/// The oldest herdr this plugin works with. `scripts/check_manifest.py` fails if
+/// this and `min_herdr_version` in `herdr-plugin.toml` disagree, so the number
+/// cannot drift between the two files.
+pub const MIN_HERDR_VERSION: &str = "0.8.0";
+
+/// The commands this build actually performs. Everything else reports
+/// `not implemented yet` and exits `NOT_IMPLEMENTED`. Test-only: a constant used
+/// nowhere else would trip `dead_code`, and CI runs clippy with `-D warnings`.
+#[cfg(test)]
+const IMPLEMENTED: &[&str] = &["daemon", "doctor", "cancel"];
+
 const USAGE: &str = "\
 herdr-voice — voice dictation for herdr
 
 usage:
   herdr-voice daemon     run the long-lived process
   herdr-voice doctor     report what is missing
+  herdr-voice cancel     stop and discard the current recording
   herdr-voice --version  print the version
 ";
 
@@ -106,11 +126,27 @@ fn main() -> ExitCode {
             println!("herdr-voice {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        other @ (Command::Daemon
-        | Command::Doctor
-        | Command::Dictate
+        Command::Daemon => match daemon::start() {
+            Ok(daemon::Outcome::AlreadyRunning(address)) => {
+                eprintln!("a daemon is already listening at {address}");
+                ExitCode::SUCCESS
+            }
+            Ok(daemon::Outcome::Served) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("cannot start the daemon: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Doctor => ExitCode::from(doctor::run()),
+        Command::Cancel => {
+            let outcome = client::send("cancel");
+            if let Some(message) = outcome.message {
+                eprintln!("{message}");
+            }
+            ExitCode::from(outcome.code)
+        }
+        other @ (Command::Dictate
         | Command::Ptt
-        | Command::Cancel
         | Command::Setup
         | Command::Status
         | Command::Model
@@ -157,6 +193,30 @@ mod tests {
                 !matches!(parse(&args(&[name])), Command::Unknown(_)),
                 "the binary rejects '{name}', which the manifest calls"
             );
+        }
+    }
+
+    #[test]
+    fn the_commands_this_issue_implements_are_not_in_the_unimplemented_arm() {
+        // A guard against a later change quietly folding one back into the 69 arm.
+        for name in ["daemon", "doctor", "cancel"] {
+            assert!(
+                IMPLEMENTED.contains(&name),
+                "{name} is implemented and must not report 'not implemented yet'"
+            );
+        }
+        for name in ["dictate", "ptt", "setup", "status", "model", "mic"] {
+            assert!(
+                !IMPLEMENTED.contains(&name),
+                "{name} is not implemented in this issue"
+            );
+        }
+    }
+
+    #[test]
+    fn the_usage_text_names_every_implemented_command() {
+        for name in IMPLEMENTED {
+            assert!(USAGE.contains(name), "usage does not mention {name}");
         }
     }
 

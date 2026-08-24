@@ -70,3 +70,88 @@ same agent's session transcript yielded about 2.6 KB of content over six turns.
 A recording made from the wrong input measured a mean volume of −91 dB over 4.37
 seconds, and recognition returned a single period. A real take of comparable
 length measured −46.9 dB. Hence the loudness check before transcription.
+
+## Daemon, client and doctor
+
+Verified by hand on macOS 25.6, Apple silicon, herdr 0.8.2, with the release build
+of the plugin. Nothing here was reproduced on Linux or Windows.
+
+| what | command | result |
+|---|---|---|
+| `doctor` on a machine with no configuration file | `herdr-voice doctor` | five lines; `config default`, `model missing`, `rewrite ok found "claude" in PATH`; exit 1 |
+| a client with no daemon | `herdr-voice cancel` | one line naming the socket and how to start the daemon; exit 1, no hang |
+| the daemon stays alive | `herdr-voice daemon &` | the process is still there a second later; `doctor` reports `daemon ok` and the path |
+| a second start | `herdr-voice daemon` | "a daemon is already listening at …", exit 0, still one process |
+| a request carrying a context | `HERDR_PLUGIN_CONTEXT_JSON=… herdr-voice cancel` | exit 0; the daemon recorded `request command=cancel entrypoint=cancel context=41 bytes` |
+| a request with no context | `env -u HERDR_PLUGIN_CONTEXT_JSON herdr-voice cancel` | exit 0, and the daemon recorded the context as unreadable on its own line |
+| a leftover socket after `kill -9` | `kill -9`, then `herdr-voice daemon` | the socket file survived the kill; the next daemon reclaimed it and `doctor` reported `daemon ok` |
+| an action through herdr | `herdr plugin link .`, `herdr plugin action invoke cancel` | exit 0; herdr logged `status: succeeded, exit_code: 0`; the daemon recorded a request of 375 context bytes |
+
+Three things this exercise established that the design had assumed:
+
+**A liveness probe is not a malformed request.** `doctor` and a second `daemon`
+start both connect and close without sending a frame, and the first version
+reported each one as `connection failed: malformed header: ""`. Three of those
+lines appeared in a log that had answered two real requests. The frame reader now
+distinguishes a peer that sent nothing from one that sent something wrong, and the
+daemon stays quiet about the former. A log that cries failure over the normal case
+is the same defect as a log that says nothing about a real one.
+
+**herdr does not set `HERDR_PLUGIN_ENTRYPOINT_ID` for an action invoked from the
+command line.** The recorded line read `entrypoint=-`. The variable is documented
+and the frame carries it, but on this path it does not arrive, so the `-` that
+stands for an absent token earned its place on the first real invocation rather
+than in a test.
+
+**The configuration directory the plugin derives is the one herdr computes.**
+`herdr plugin list` printed
+`config: ~/.config/herdr/plugins/config/haurylau.voice` for the linked plugin, which
+is what `config::directory` produces from `HERDR_PLUGIN_CONFIG_DIR` or, without it,
+from `$HOME`.
+
+Not verified, and why: the daemon's own log line reaching
+`herdr plugin log list` requires herdr to have started the daemon through the
+manifest's `startup` entry, which means restarting herdr. The daemon was started by
+hand instead, so its line was read from its own standard error. The plugin was
+linked for the action check and unlinked afterwards; `herdr plugin list` was
+identical before and after.
+
+### What the Windows job established
+
+The `windows-latest` job in CI is the only thing that compiles or runs the named
+pipe: the `x86_64-pc-windows-msvc` target is not installed on the development
+machine and `rustup` is absent, so nothing under `cfg(windows)` is built there.
+Two platform differences came out of it, both invisible on macOS and Linux.
+
+**A named pipe does not hold a connection whose client has already left.** A test
+connected, dropped the connection at once, and expected `accept` to hand that
+connection over anyway. A Unix socket queues it, so the test passed on two
+platforms; on Windows `accept` went back to waiting for a client that never came,
+and the job sat for ten minutes until the cap killed it. The single-threaded run
+named the culprit: the output stopped at the probe test. The test now holds the
+connection open until the daemon has accepted it and only then goes away, which is
+what both platforms agree on.
+
+**A closed peer is an error on Windows and zero bytes on Unix.** Nothing has been
+read when the frame's first line is attempted, so a peer that goes away there sent
+nothing at all — a liveness probe. The reader now treats `BrokenPipe`,
+`ConnectionReset`, `ConnectionAborted` and `UnexpectedEof` at that point the same
+as end of input. A disconnect further in, inside the body, stays a short body.
+
+Neither of these was found by reading the code, and neither could have been: the
+platform that shows them is the one this machine cannot build.
+
+The crate's own source settles why, and settles two related worries as well
+(`interprocess` 2.4.3, as vendored in the local registry):
+
+- `src/os/windows/named_pipe/listener.rs:154` — `accept` loops on `ERROR_NO_DATA`,
+  disconnects the instance and waits again. A connection whose client left without
+  writing is what that error is, and the crate calls it an empty connection and
+  discards it. That is the hang, exactly.
+- `src/os/windows/named_pipe/listener.rs:72` — `accept` creates the next instance
+  before it hands out the accepted one, so a request being served does not make the
+  next client queue. No work of ours is needed for that.
+- `src/os/windows/named_pipe/c_wrappers.rs:171` and
+  `src/os/windows/named_pipe/wait_timeout.rs:13` — a client meeting a busy pipe
+  waits rather than failing, but the wait is bounded: with both sides on the default
+  it is 50 milliseconds. So a liveness probe on Windows cannot block indefinitely.
