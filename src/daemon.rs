@@ -259,16 +259,27 @@ mod tests {
         // serve_one treats it as nothing to do rather than as a broken peer.
         let address = crate::transport::tests_support::probe_address("probe");
         let listener = crate::transport::listen(&address).expect("listen");
+        let (accepted, has_accepted) = std::sync::mpsc::channel();
         let served = {
             let address = address.clone();
             std::thread::spawn(move || {
                 let connection = listener.accept().expect("accept");
+                accepted.send(()).expect("announce the accept");
                 let stop = AtomicBool::new(false);
                 // The error type is not Send, so the verdict crosses the join, not it.
                 super::serve_one(connection, &stop, &address).map_err(|e| e.to_string())
             })
         };
-        drop(crate::transport::connect(&address).expect("connect"));
+
+        // The probe holds the connection open until the daemon has accepted it, and
+        // only then goes away. Dropping it earlier is a Unix-shaped test: a socket
+        // queues a connection whose client has already left, and a Windows named
+        // pipe does not, so `accept` would wait for a client that never comes.
+        let probe = crate::transport::connect(&address).expect("connect");
+        has_accepted
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the daemon must accept the probe");
+        drop(probe);
         assert_eq!(
             served.join().expect("the handler must finish"),
             Ok(()),

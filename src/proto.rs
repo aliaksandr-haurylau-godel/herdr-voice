@@ -74,6 +74,18 @@ impl From<io::Error> for ProtoError {
     }
 }
 
+/// Whether an error means the peer closed without sending, rather than a real
+/// transport failure. The kinds differ by platform for the same event.
+fn went_away(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::UnexpectedEof
+    )
+}
+
 fn token(value: &str) -> Result<&str, ProtoError> {
     if value.is_empty() || value.split_whitespace().count() != 1 {
         return Err(ProtoError::BadToken(value.to_string()));
@@ -100,8 +112,16 @@ impl Request {
 
     pub fn read_from<R: BufRead>(r: &mut R) -> Result<Request, ProtoError> {
         let mut header = String::new();
-        if r.read_line(&mut header)? == 0 {
-            return Err(ProtoError::Empty);
+        // Nothing has been read yet, so a peer that went away here sent nothing at
+        // all: that is a liveness probe, not a broken request. Unix reports it as
+        // zero bytes; Windows reports a closed pipe as an error instead, and both
+        // mean the same thing at this point. A disconnect further down, inside the
+        // body, is a different matter and stays `ShortBody`.
+        match r.read_line(&mut header) {
+            Ok(0) => return Err(ProtoError::Empty),
+            Ok(_) => {}
+            Err(e) if went_away(&e) => return Err(ProtoError::Empty),
+            Err(e) => return Err(ProtoError::Io(e)),
         }
         let line = header.trim_end_matches(['\r', '\n']);
         let parts: Vec<&str> = line.split(' ').collect();
@@ -189,6 +209,31 @@ mod tests {
         request.write_to(&mut buffer).expect("write");
         assert_eq!(buffer, b"voice/1 cancel - 0\n");
         assert_eq!(round_trip(&request), request);
+    }
+
+    #[test]
+    fn a_peer_that_closed_the_connection_is_the_same_as_one_that_sent_nothing() {
+        // Windows reports a closed pipe as an error where Unix reports zero bytes.
+        // Both happen before a single byte of the frame, so both are a probe.
+        struct Closed(std::io::ErrorKind);
+        impl std::io::Read for Closed {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(self.0, "gone"))
+            }
+        }
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            let mut input = BufReader::new(Closed(kind));
+            let error = Request::read_from(&mut input).expect_err("must refuse");
+            assert!(
+                matches!(error, ProtoError::Empty),
+                "{kind:?} gave {error:?}"
+            );
+        }
     }
 
     #[test]

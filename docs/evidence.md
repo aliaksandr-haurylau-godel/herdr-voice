@@ -115,3 +115,28 @@ manifest's `startup` entry, which means restarting herdr. The daemon was started
 hand instead, so its line was read from its own standard error. The plugin was
 linked for the action check and unlinked afterwards; `herdr plugin list` was
 identical before and after.
+
+### What the Windows job established
+
+The `windows-latest` job in CI is the only thing that compiles or runs the named
+pipe: the `x86_64-pc-windows-msvc` target is not installed on the development
+machine and `rustup` is absent, so nothing under `cfg(windows)` is built there.
+Two platform differences came out of it, both invisible on macOS and Linux.
+
+**A named pipe does not hold a connection whose client has already left.** A test
+connected, dropped the connection at once, and expected `accept` to hand that
+connection over anyway. A Unix socket queues it, so the test passed on two
+platforms; on Windows `accept` went back to waiting for a client that never came,
+and the job sat for ten minutes until the cap killed it. The single-threaded run
+named the culprit: the output stopped at the probe test. The test now holds the
+connection open until the daemon has accepted it and only then goes away, which is
+what both platforms agree on.
+
+**A closed peer is an error on Windows and zero bytes on Unix.** Nothing has been
+read when the frame's first line is attempted, so a peer that goes away there sent
+nothing at all — a liveness probe. The reader now treats `BrokenPipe`,
+`ConnectionReset`, `ConnectionAborted` and `UnexpectedEof` at that point the same
+as end of input. A disconnect further in, inside the body, stays a short body.
+
+Neither of these was found by reading the code, and neither could have been: the
+platform that shows them is the one this machine cannot build.
