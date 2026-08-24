@@ -135,7 +135,13 @@ fn serve_one(
     address: &Address,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = BufReader::new(connection);
-    let request = Request::read_from(&mut reader)?;
+    let request = match Request::read_from(&mut reader) {
+        // A liveness probe: `doctor` and a second `daemon` start both connect and
+        // close without sending a frame. Reporting that as a failure would fill the
+        // log with alarming lines about the normal case.
+        Err(crate::proto::ProtoError::Empty) => return Ok(()),
+        other => other?,
+    };
     eprintln!("{}", request_line(&request));
     if let Some(note) = context_note(&request) {
         eprintln!("{note}");
@@ -245,6 +251,29 @@ mod tests {
             context: vec![],
         };
         assert!(request_line(&anonymous).contains("entrypoint=-"));
+    }
+
+    #[test]
+    fn a_liveness_probe_is_not_reported_as_a_failure() {
+        // Connect, close, and let the daemon handle it. The assertion is that
+        // serve_one treats it as nothing to do rather than as a broken peer.
+        let address = crate::transport::tests_support::probe_address("probe");
+        let listener = crate::transport::listen(&address).expect("listen");
+        let served = {
+            let address = address.clone();
+            std::thread::spawn(move || {
+                let connection = listener.accept().expect("accept");
+                let stop = AtomicBool::new(false);
+                // The error type is not Send, so the verdict crosses the join, not it.
+                super::serve_one(connection, &stop, &address).map_err(|e| e.to_string())
+            })
+        };
+        drop(crate::transport::connect(&address).expect("connect"));
+        assert_eq!(
+            served.join().expect("the handler must finish"),
+            Ok(()),
+            "a probe must not be an error"
+        );
     }
 
     #[test]

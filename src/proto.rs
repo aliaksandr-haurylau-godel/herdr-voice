@@ -32,16 +32,24 @@ pub enum Reply {
 
 #[derive(Debug)]
 pub enum ProtoError {
+    /// The peer connected and closed without sending anything. Not a failure: it
+    /// is what a liveness probe looks like from the listening side, and both
+    /// `doctor` and a second `daemon` start do exactly that.
+    Empty,
     BadHeader(String),
     UnknownProtocol(String),
     BadToken(String),
-    ShortBody { expected: usize, got: usize },
+    ShortBody {
+        expected: usize,
+        got: usize,
+    },
     Io(io::Error),
 }
 
 impl fmt::Display for ProtoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ProtoError::Empty => write!(f, "the peer sent nothing"),
             ProtoError::BadHeader(line) => write!(f, "malformed header: {line:?}"),
             ProtoError::UnknownProtocol(found) => {
                 write!(
@@ -92,7 +100,9 @@ impl Request {
 
     pub fn read_from<R: BufRead>(r: &mut R) -> Result<Request, ProtoError> {
         let mut header = String::new();
-        r.read_line(&mut header)?;
+        if r.read_line(&mut header)? == 0 {
+            return Err(ProtoError::Empty);
+        }
         let line = header.trim_end_matches(['\r', '\n']);
         let parts: Vec<&str> = line.split(' ').collect();
         if parts.len() != 4 {
@@ -179,6 +189,15 @@ mod tests {
         request.write_to(&mut buffer).expect("write");
         assert_eq!(buffer, b"voice/1 cancel - 0\n");
         assert_eq!(round_trip(&request), request);
+    }
+
+    #[test]
+    fn a_peer_that_sends_nothing_is_not_a_malformed_header() {
+        // A liveness probe connects and closes. It must be distinguishable from a
+        // peer that sent something wrong, so the daemon can stay quiet about it.
+        let mut input = BufReader::new(&b""[..]);
+        let error = Request::read_from(&mut input).expect_err("must refuse");
+        assert!(matches!(error, ProtoError::Empty), "got {error:?}");
     }
 
     #[test]

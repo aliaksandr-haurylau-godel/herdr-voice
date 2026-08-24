@@ -24,6 +24,10 @@ pub struct Address {
 }
 
 impl Address {
+    /// A filesystem path. Unix only: on Windows the name lives in the pipe
+    /// namespace, so this constructor would have no caller and `-D warnings`
+    /// rejects one that does not exist.
+    #[cfg(unix)]
     pub fn path(value: String) -> Address {
         Address {
             value,
@@ -31,6 +35,8 @@ impl Address {
         }
     }
 
+    /// A name in the pipe namespace. Windows only, for the same reason reversed.
+    #[cfg(windows)]
     pub fn namespaced(value: String) -> Address {
         Address {
             value,
