@@ -61,9 +61,15 @@ fields.
 **Decision.** A frame of a header line and a body:
 
 ```
-voice/1 <command> <body-length>\n
+voice/1 <command> <entrypoint> <body-length>\n
 <body-length bytes of body>
 ```
+
+Four tokens, all on one line. `<entrypoint>` is `HERDR_PLUGIN_ENTRYPOINT_ID`, and
+it is on the wire because the daemon has to name it in the line it records and the
+variable reaches the client only: it is an environment variable, not a field of the
+invocation context. A single `-` stands for a variable that was not set, so the
+token count never varies.
 
 The body is the bytes of `HERDR_PLUGIN_CONTEXT_JSON`, copied without inspection; a
 length of zero means the variable was absent. The reply is one line: `ok` followed
@@ -73,6 +79,21 @@ for `ok`, non-zero for `error`.
 
 The daemon parses the body, because it is the end that needs the fields and the
 end that is already resident.
+
+**A body that will not parse is not by itself a failure.** Each command declares
+whether it needs a target pane. The daemon parses the body once, keeps the outcome
+— fields, or the reason they are missing — and then:
+
+- a command that needs a target pane and has none answers `error` naming what was
+  missing, and the client exits non-zero;
+- a command that needs none proceeds and answers `ok`.
+
+`cancel`, the one command wired in this issue, needs no target pane: it stops
+whatever is running and clears what a dead run left. So an absent or malformed
+context leaves `cancel` working and exiting 0, which is what the criteria require,
+while the daemon still records one line saying the context could not be read. The
+distinction lives in one place — a property of the command — rather than in each
+command's code.
 
 **Why.** The client's whole run becomes: read an environment variable, connect,
 write a header and copy a buffer, read one short line. The header parses by
@@ -146,13 +167,29 @@ rewrite  ok       found "<name>" in PATH
   taken from a crate.
 - **daemon** — whether connecting to the derived name succeeds, and the name.
 - **config** — the file, or the fact that defaults were used, and the path that was
-  looked at.
+  looked at. The path is `<config>/config.toml`, where `<config>` is
+  `HERDR_PLUGIN_CONFIG_DIR` when herdr set it, and otherwise
+  `$XDG_CONFIG_HOME/herdr/plugins/config/haurylau.voice` or, failing that,
+  `$HOME/.config/herdr/plugins/config/haurylau.voice`. The fallback is not a guess:
+  `herdr plugin config-dir haurylau.voice` prints exactly that directory, and it
+  prints it for a plugin that is not installed, which is the case `doctor` has to
+  survive when it is run from a plain terminal.
 - **model** — whether `<state>/models/` holds a file whose name contains the
   configured `[stt] model`.
 - **rewrite** — the engine from `[rewrite] engine`. For `agent`, whether the
-  configured program, or any of the default candidates when it is `auto`, is on
-  `PATH`. For `http`, whether an endpoint is configured. For `command`, whether the
-  program exists.
+  configured program is on `PATH`; when it is `auto`, the first name on the
+  candidate list that is on `PATH`. The candidate list has one entry, `claude`,
+  because that is the only agent command-line tool the prototype used
+  (`spike/spike.sh:103` refuses to start without it) and the only one every rewrite
+  measurement in `docs/evidence.md` was made with. A second name goes on the list
+  when somebody measures a second tool, not before. For `http`, whether an endpoint
+  is configured. For `command`, whether the program exists.
+
+  This fixes what `doctor` prints on a clean machine, which is the point of asking:
+  with no configuration file the defaults are `engine = "agent"` and
+  `agent = "auto"`, so the line is `ok` on a machine that has `claude` and
+  `missing` on one that does not, and the exit code follows from that rather than
+  from an invented list.
 
 `doctor` exits 0 when every line is `ok` and 1 otherwise.
 
@@ -217,9 +254,9 @@ them is what makes the pipeline stages testable later without a microphone
 | module | owns | tested by |
 |---|---|---|
 | `main` | argument parsing, dispatch, exit codes | the four tests already there, plus the new commands |
-| `proto` | the frame: encode, decode, replies | round trips, zero-length body, malformed header |
+| `proto` | the frame: encode, decode, replies | round trips, zero-length body, an absent entrypoint as `-`, malformed header, a wrong token count |
 | `transport` | the name, the listener, the stream | a round trip over a temporary name, on all three platforms |
-| `daemon` | connect-or-listen, the accept loop, the request line | connect-first logic against a live and a stale name |
+| `daemon` | connect-or-listen, the accept loop, the request line, which commands need a pane | connect-first logic against a live and a stale name; a malformed body tolerated for `cancel` and fatal for a pane-needing command |
 | `client` | one request, one reply, one exit code | reply handling: `ok`, `error`, a closed connection |
 | `context` | the invocation context, deserialised from JSON | absent fields, unknown fields, malformed input |
 | `config` | the configuration, with a default for every key | absent file, partial file, unknown keys, bad values |
