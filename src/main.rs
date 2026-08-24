@@ -10,6 +10,7 @@
 
 mod config;
 mod context;
+mod daemon;
 mod proto;
 mod transport;
 
