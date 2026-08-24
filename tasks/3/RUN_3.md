@@ -192,6 +192,72 @@ explicitly did not block on would cost a third gate for no decision:
 - `toml = "1"` needs no correction: version 1.0.7 is published, and 1.1.4 is the
   latest. The reviewer flagged it conditionally and the condition does not hold.
 
+### S3 Plan
+- artifact: `PLAN_3.md`
+- produced: 2026-08-24
+
+Eight tasks, each with its own test cycle and its own commit. The plan carries the
+code rather than descriptions of it, and states the interface each task produces so
+a task's implementer learns the names the neighbouring tasks use without reading
+them.
+
+Five defects were found in the plan before it was handed over, each of which would
+have cost the executor a red build: `write!` with a trailing newline where clippy
+demands `writeln!`; a `Default` implementation clippy calls derivable; a test
+helper introduced in a task later than the one that uses it; a models directory
+derived from the socket name, which on Windows is a pipe name with no parent
+directory; and a constant used only by tests, which trips `dead_code` under
+`-D warnings`.
+
+One fact was verified by running it rather than recalled:
+`GenericNamespaced::is_supported()` is **true on macOS**, where a namespaced name
+resolves to a file under the temporary directory. The plan therefore selects the
+platform by `cfg(windows)`, and says why in its global constraints. Taken from
+memory, this would have moved the socket out of the state directory on macOS.
+
+The reviewer for this stage is a project agent as well,
+`.claude/agents/octoflow-reviewer-implementer.md`, and it runs on the smaller model
+deliberately: by the stage definition, a plan the implementer cannot execute
+without guessing is rewritten, and the model is never escalated.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_3.md
+  reviewer: implementer
+  verdict: READY
+  date: 2026-08-24
+  questions: []
+  blocker: null
+  notes:
+    - "Verified against the actual `interprocess` 2.4.3 source cached at ~/.cargo/registry (not from memory): `ListenerOptions::new().name(...).try_overwrite(true).create_sync()`, `Stream::connect(name)` via the `traits::Stream` trait brought into scope by `local_socket::prelude::*`, and `to_fs_name::<GenericFilePath>()` / `to_ns_name::<GenericNamespaced>()` on `&str` all exist with the signatures the plan uses. Nothing in Tasks 1-8 names a symbol the crate does not have."
+    - "Every task ships complete, non-placeholder code for both the failing test and the implementation; the two hedges in the plan (`toml::de::Error::message()` may not exist, use `.to_string()` instead; `check_manifest.py`'s `source` variable needs moving up one block) are stated as explicit fallback instructions, not blanks."
+    - "Cross-checked `src/main.rs`, `Cargo.toml`, `herdr-plugin.toml`, `scripts/check_manifest.py` and `.github/workflows/check.yml` against every path and line the plan cites; all exist as described, and `MIN_HERDR_VERSION`/`Some(\"...\")` regex targets both match what Task 7/8 add."
+    - "Not a question, no answer needed: `daemon::answer`'s `cancel` arm never calls `context::parse`, so it never produces the 'daemon still records that the context could not be read' line DESIGN_3.md section 2 describes. The plan gives the exact code and exact tests either way, so I have nothing to guess — this is a design-fidelity gap, not something that stops me from executing Task 5 as written."
+    - "Task ordering, dependency direction and the AC-to-task mapping are explicit ('Notes for the executor'); I found no task that consumes something a later task produces."
+```
+
+The stand-in reviewer changed nothing: working tree, both artifacts' checksums and
+`HEAD` were identical before and after.
+
+### S3 Plan — revised
+- artifact: `PLAN_3.md`, Task 5
+- produced: 2026-08-24
+
+The reviewer's fourth note is a real divergence and was closed rather than carried
+into the code: `answer`'s `cancel` arm did not touch the body, so the line the
+design promises — the daemon records that the context could not be read, even for a
+command that needs no pane — would never have been printed. Task 5 now produces
+`context_note(&Request) -> Option<String>`, which the accept loop logs after the
+request line, with three tests: an absent body, a malformed body and a good one.
+Splitting it out of `answer` keeps it testable without capturing standard error.
+
+The body a command ignores is the same body the next pane-needing command will get,
+and a silent skip is the failure this project treats as a defect of the same weight
+as a wrong transcript.
+
+Revising the artifact means a new verdict, so the gate runs again.
+
 ## Notes
 
 The pipeline is untouched. Every action except `cancel` keeps exiting 69 with

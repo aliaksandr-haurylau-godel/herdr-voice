@@ -1062,7 +1062,7 @@ git commit -m "Read the configuration, with a default for every key"
 
 **Interfaces:**
 - Consumes: `proto::{Request, Reply}`, `transport::{Address, Listener, Stream, address, connect, listen}`, `context::parse`.
-- Produces: `daemon::needs_target_pane(&str) -> bool`; `daemon::answer(&Request) -> (Reply, Control)`; `daemon::Control::{Continue, Stop}`; `daemon::request_line(&Request) -> String`; `daemon::start() -> Result<Outcome, TransportError>`; `daemon::Outcome::{AlreadyRunning(String), Served}`.
+- Produces: `daemon::needs_target_pane(&str) -> bool`; `daemon::answer(&Request) -> (Reply, Control)`; `daemon::Control::{Continue, Stop}`; `daemon::request_line(&Request) -> String`; `daemon::context_note(&Request) -> Option<String>`; `daemon::start() -> Result<Outcome, TransportError>`; `daemon::Outcome::{AlreadyRunning(String), Served}`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1131,6 +1131,17 @@ mod tests {
         let (reply, control) = answer(&request("stop", b""));
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
         assert!(matches!(control, Control::Stop));
+    }
+
+    #[test]
+    fn a_body_that_will_not_parse_is_recorded_even_for_cancel() {
+        let absent = context_note(&request("cancel", b"")).expect("a note");
+        assert!(absent.contains("HERDR_PLUGIN_CONTEXT_JSON"), "got {absent:?}");
+
+        let malformed = context_note(&request("cancel", b"{not json")).expect("a note");
+        assert!(malformed.contains("unreadable"), "got {malformed:?}");
+
+        assert_eq!(context_note(&request("cancel", br#"{"tab_id":"t1"}"#)), None);
     }
 
     #[test]
@@ -1220,6 +1231,19 @@ pub fn answer(request: &Request) -> (Reply, Control) {
     }
 }
 
+/// What the daemon records about the body, if anything is wrong with it.
+///
+/// A command that needs no pane still records this. The body it could not read is
+/// the same body the next pane-needing command will get, and a silent skip here is
+/// exactly the failure mode the project treats as a defect: the prototype spent a
+/// morning looking like a hang because a parse error produced no output at all.
+pub fn context_note(request: &Request) -> Option<String> {
+    match context::parse(&request.context) {
+        Ok(_) => None,
+        Err(why) => Some(format!("context unreadable: {why}")),
+    }
+}
+
 /// One line per accepted request, on standard error. herdr captures a plugin's
 /// standard error, so `herdr plugin log list --plugin haurylau.voice` shows it.
 pub fn request_line(request: &Request) -> String {
@@ -1276,6 +1300,9 @@ fn serve_one(
     let mut reader = BufReader::new(connection);
     let request = Request::read_from(&mut reader)?;
     eprintln!("{}", request_line(&request));
+    if let Some(note) = context_note(&request) {
+        eprintln!("{note}");
+    }
     let (reply, control) = answer(&request);
     reply.write_to(reader.get_mut())?;
     if control == Control::Stop {
@@ -1296,7 +1323,7 @@ mod daemon;
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test daemon`
-Expected: eight tests pass.
+Expected: nine tests pass.
 
 - [ ] **Step 5: Add the end-to-end test for the two start paths**
 
@@ -1334,7 +1361,7 @@ The probe helper this uses is `transport::tests_support::probe_address`, added i
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cargo test daemon`
-Expected: nine tests pass, and the run finishes — a hang here means the wake-up connection after the stop flag is missing.
+Expected: ten tests pass, and the run finishes — a hang here means the wake-up connection after the stop flag is missing.
 
 - [ ] **Step 7: Commit**
 
