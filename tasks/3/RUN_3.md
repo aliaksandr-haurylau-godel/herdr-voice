@@ -85,11 +85,33 @@ dependencies. One dependency is added, `interprocess` 2.4.3, and it is confined 
 the `transport` module; the configuration and the invocation context are read by
 code written here, which the design names as the risk it is taking.
 
-The gate for this stage could not be run: the reviewer role for S2 is `planner`,
-which maps to the agent `octoflow-reviewer-planner`, and that agent does not
-exist. Only `octoflow-reviewer-designer` is installed. Reviewing the design with a
-different reviewer, or reviewing it here, would measure nothing, so the stage stays
-open until the planner reviewer exists.
+The gate for this stage had no reviewer at first: the S2 role is `planner`, which
+maps to the agent `octoflow-reviewer-planner`, and only
+`octoflow-reviewer-designer` was installed. The reviewer is now a **project**
+agent, `.claude/agents/octoflow-reviewer-planner.md`, rather than an addition to
+anyone's global agent set: a project agent is visible only in this repository,
+travels with it, and is reviewed in the pull request like any other file here. Its
+form is taken from the installed designer reviewer and its one question is whether
+the design can be cut into tasks with real dependencies without guessing. Its tools
+are read-only.
+
+### S2 Design — revised
+- artifact: `DESIGN_3.md`, section 5 replaced
+- produced: 2026-08-24
+
+The first version took one dependency and wrote the JSON and TOML readers by hand,
+naming that as a deliberate trade. The trade is off: a hand-written JSON reader is
+a defect factory on escapes, unicode and nesting, and the cost of one such defect
+exceeds the line it saves. The design now takes `serde` with `derive`, `serde_json`
+and `toml` alongside `interprocess`, and the section that argued for the
+hand-written readers is gone. The ban on asynchronous runtimes stands.
+
+The machine-wide Windows pipe name is now issue `#6` and no longer attributed to
+`#1`, which is about auto-repeat and audio capture. The design points at `#6`.
+
+The model-presence contract stays a filename substring in this issue, and section
+4 now records that the recognition issue has to replace it with an exact name and
+an integrity check: a substring matches an unrelated file.
 
 ## Notes
 

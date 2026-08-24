@@ -40,10 +40,10 @@ from the environment satisfies the requirement that the daemon and the client
 agree on where to meet without either of them depending on where it was started.
 
 **Consequence, recorded rather than solved.** A namespaced pipe name is
-machine-wide, so on Windows two users on one machine would collide on one daemon.
-The Unix side has no such problem, because the state directory is per user.
-Windows is verified under issue `#1`; this is one of the things that issue has to
-look at.
+machine-wide, so on Windows two users on one machine, or two herdr instances
+belonging to one person, reach one daemon. The Unix side has no such problem,
+because the state directory is per user. Fixing the name is issue `#6`; this issue
+implements the transport on macOS first and leaves the name as it is.
 
 ## 2 Message format
 
@@ -168,42 +168,45 @@ prevent for subcommands.
 
 **Contract this creates.** `<state>/models/` is where a speech model lives, and
 presence is a filename containing the configured model name. The transcription
-stage inherits both.
+stage inherits both, and has to strengthen the second: a substring test matches an
+unrelated file, which is good enough for a report that says "no model" and not
+good enough to choose what to load. That issue replaces it with an exact name and
+an integrity check.
 
 ## 5 Dependencies
 
 **Context.** The crate has none (`Cargo.toml:15`).
 
-**Decision.** One is added: `interprocess` 2.4.3, with default features.
+**Problem.** Three formats meet in this issue and none of them is ours. The
+transport is a Unix socket on one family of platforms and a named pipe on the
+other. The invocation context is JSON, produced by herdr. The configuration is
+TOML, in the schema of `docs/design.md` section 7.
+
+**Decision.** Four dependencies, and no asynchronous runtime in this project until
+a task appears that cannot be done without one:
+
+| crate | version | what it is for |
+|---|---|---|
+| `interprocess` | 2.4.3 | the named pipe on Windows |
+| `serde` | 1, feature `derive` | the context and configuration types |
+| `serde_json` | 1 | the invocation context |
+| `toml` | 1 | the configuration file |
 
 **Why.** On Unix a Unix domain socket is in `std`; a Windows named pipe is not,
-and the alternative is writing `winapi` calls by hand. Its default feature set is
-empty, so no asynchronous runtime comes with it, and its minimum Rust version,
-1.75, is below the crate's 1.82.
+and the alternative is writing `winapi` calls by hand. `interprocess` has an empty
+default feature set, so nothing asynchronous arrives with it, and its minimum Rust
+version, 1.75, is below the crate's 1.82.
 
-Nothing else is added, which has a consequence worth stating plainly: the
-invocation context is JSON and the configuration is TOML, and both are read by
-code written here. Two small readers, each in its own module with its own tests:
+The other three replace parsers that would otherwise be written here. A
+hand-written JSON reader is a defect factory on escapes, unicode and nesting, and
+the cost of one such defect is higher than the line it saves in `Cargo.toml`. The
+same argument covers TOML, which arrives in this issue rather than later because
+`doctor` reads `[stt] model` and `[rewrite] engine` to report on the model and the
+rewrite engine, and reports whether a file was found at all.
 
-- The context reader extracts the string fields the target needs —
-  `focused_pane_id`, `focused_pane_cwd`, `focused_pane_agent`, `tab_id`,
-  `tab_label` — from the top-level object, skipping nested objects such as
-  `worktree`, and decoding the escapes JSON allows inside a string. A field that
-  is absent is absent; a body that is not an object is an error naming what was
-  found instead.
-- The configuration reader understands what `docs/design.md` section 7 uses: a
-  `[table]` header, `key = value` with a quoted string, an integer, a boolean or
-  an array of strings, and comments. It reads the three keys this issue needs —
-  `[stt] model`, `[rewrite] engine`, `[rewrite] agent` — and ignores every other
-  key rather than failing on it, so a configuration file carrying keys for later
-  stages does not stop the daemon.
-
-**The risk in that, named.** A hand-written JSON reader is the one part of this
-design that trades a known-good library for a smaller dependency list. It is
-bounded — five string fields out of one object — and it is covered by tests over
-escapes, unicode escapes, nested objects and malformed input. If it turns out to
-need more than that, the cheaper answer is `serde_json`, and this decision should
-be revisited rather than defended.
+Both readers ignore keys and fields they do not know, so a configuration file
+carrying keys for later stages does not stop the daemon, and a herdr release that
+adds a context field does not stop an action.
 
 ## 6 Modules and tests
 
@@ -218,8 +221,8 @@ them is what makes the pipeline stages testable later without a microphone
 | `transport` | the name, the listener, the stream | a round trip over a temporary name, on all three platforms |
 | `daemon` | connect-or-listen, the accept loop, the request line | connect-first logic against a live and a stale name |
 | `client` | one request, one reply, one exit code | reply handling: `ok`, `error`, a closed connection |
-| `context` | the invocation context out of JSON | escapes, unicode, nested objects, absent fields, malformed input |
-| `config` | the configuration, with defaults | absent file, partial file, unknown keys, bad values |
+| `context` | the invocation context, deserialised from JSON | absent fields, unknown fields, malformed input |
+| `config` | the configuration, with a default for every key | absent file, partial file, unknown keys, bad values |
 | `doctor` | the five checks and their rendering | rendering and exit code from a fixed set of findings |
 
 None of these tests needs herdr, a microphone or a model. What cannot be covered
@@ -232,7 +235,7 @@ written into `docs/evidence.md` with the platform.
   keep reporting that they are not implemented.
 - Whether `doctor` becomes a manifest action or pane. It is a subcommand here. If
   a later issue adds a manifest entry, `scripts/check_manifest.py` keeps it honest.
-- The Windows pipe name being machine-wide rather than per user — issue `#1`.
+- The Windows pipe name being machine-wide rather than per user — issue `#6`.
 - The three `[[panes]]` entries invoke the binary by a relative path, and a pane
   command resolves against the pane's working directory rather than the plugin
   root. No pane is implemented, so nothing is broken; whoever implements the first
