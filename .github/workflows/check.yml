@@ -13,6 +13,10 @@ jobs:
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # A test that deadlocks would otherwise sit here for six hours. The suite runs
+    # in under a minute on every platform, so anything past ten minutes is a hang,
+    # and a hang should be a fast red rather than a slow one.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -28,7 +32,10 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: test
-        run: cargo test --all
+        # One thread and no capture: if a test hangs, the last line of output names
+        # the test before it, which is the only way to identify the culprit from a
+        # timed-out job.
+        run: cargo test --all -- --test-threads=1 --nocapture
 
   manifest:
     name: plugin manifest
