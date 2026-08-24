@@ -1,0 +1,20 @@
+[package]
+name = "herdr-voice"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Voice dictation for the herdr terminal multiplexer"
+license = "MIT"
+repository = "https://github.com/aliaksandr-haurylau-godel/herdr-voice"
+publish = false
+
+[[bin]]
+name = "herdr-voice"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

@@ -30,6 +30,10 @@ clients live in `.leakwords`, which is never committed — a list of those names
 inside a public repository would disclose exactly what it is meant to protect.
 Copy `.leakwords.example` and fill it in per clone.
 
+Cite paths **relative to the repository root**, with a line number when it helps:
+`spike/README.md:3`. An absolute path drags a home directory and an account name
+into a public repository, and the leak gate rejects it.
+
 When an example needs a path, use a generic one. When an example needs a project
 name, invent a neutral one. History in a public repository survives a revert, so
 the check that matters is the one that runs before the commit.
@@ -80,6 +84,25 @@ checklist from the pull request template.
 - Platform differences are declared in the manifest through `platforms`, not
   branched inside the binary, wherever the manifest can express them.
 - Configuration keys have defaults; an absent configuration file is a valid state.
+
+## Local development
+
+```sh
+cargo test                          # unit tests
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+python3 scripts/check_manifest.py   # the manifest must name commands the binary accepts
+herdr plugin link .                 # install this checkout as a plugin
+herdr plugin log list --plugin haurylau.voice   # what herdr ran and what it returned
+```
+
+`scripts/check_manifest.py` exists because the manifest is the only contract with
+herdr: a command named there but rejected by the binary produces a plugin that
+installs and then does nothing when its action is invoked. CI runs the same check.
+
+Infrastructure runs may skip S1 to S3 when the shape is already fixed by the
+design document, and say so in `RUN_<issue>.md`. Anything that changes behaviour
+goes through every stage.
 
 ## Testing
 
