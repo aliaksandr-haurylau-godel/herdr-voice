@@ -49,6 +49,40 @@ better than answering it per platform. It also gives the take a home that outliv
 the connection that started it, and it makes "one take at a time" a property of the
 structure rather than a rule someone has to remember.
 
+## 2a A device that goes away in the middle
+
+**Context.** A take spans two `dictate` invocations. Between them the person is
+talking and nothing is watching: a headset can be unplugged, a virtual device can be
+torn down by the application that owns it, and `cpal` reports that through the error
+callback of a running stream.
+
+**Problem.** Three things are undecided at once, and a task cannot be written while
+they are: when the take ends, what happens to the audio recorded before the failure,
+and whether the recorder's source of samples can report an error at all. The last
+one decides the shape of the interface every other module is written against.
+
+**Decision.**
+
+- **The source carries errors.** The recorder does not read samples from a stream
+  directly. It receives *events* — a block of samples, or a failure with its
+  reason — and both implementations produce both: the `cpal` stream from its data
+  and error callbacks, and the fake from a script that can be told to fail after a
+  given number of samples. A failure is therefore testable without a microphone,
+  which is what the rest of the criteria demand of everything else.
+- **The take ends at the failure, not at the next `Stop`.** The recorder stops the
+  stream, drops the take and remembers the reason.
+- **The audio recorded before the failure is discarded and its file removed.** The
+  next `dictate` answers with the remembered reason, naming the device and what
+  happened, and clears it.
+
+**Why.** Reporting at the next `dictate` is not a delay anybody chose; it is the
+first moment there is somewhere to report to. The daemon has no way to reach the
+person on its own until the indicator exists, and that is another issue. Keeping the
+partial audio would be worse than useless: a take that lost its device halfway is
+the same class of input as a take from the wrong device, and sending it on produces
+a confident transcript of nothing. The alternative — ending the take at the next
+`Stop` and keeping what was captured — was rejected for that reason.
+
 ## 3 From what the device gives to what recognition needs
 
 **Context.** Recognition needs 16 kHz mono. No input device on the development
@@ -123,14 +157,25 @@ Nothing deletes old takes yet. That belongs with the stage that consumes them.
 | `audio::level` | mean volume in dBFS | digital silence, a quiet tone below the threshold, a normal one above |
 | `audio::resample` | channel averaging, ratio selection, filter and decimate | a tone at 48 kHz decimates to 16 kHz with the expected length; a tone above 8 kHz is attenuated rather than folded; a rate that is not a multiple is refused |
 | `audio::wav` | 16-bit PCM WAV bytes | a known buffer round-trips through the header fields; the rate and channel count in the header are what was asked for |
-| `capture` | the recorder thread, the stream, the take's file | start, stop, start-while-running, stop-with-nothing — all with a fake source instead of `cpal` |
+| `capture` | the recorder thread, the stream, the take's file | start, stop, start-while-running, stop-with-nothing, a source that fails mid-take — all with a fake source instead of `cpal` |
 | `config` | `[audio] input` and `silence_db` | defaults, partial file, unknown key |
 | `daemon` | `dictate` toggling a take | first call starts, second stops, a refused take answers with the reason |
 
-The `capture` module takes its samples through a small trait with two
-implementations: the `cpal` stream, and a fake that yields a prepared buffer. That
-is what makes every test above run without a microphone, and it is the same shape
+The `capture` module takes its samples through a small interface with two
+implementations: the `cpal` stream, and a fake driven by a script. Both deliver the
+same two events, a block of samples and a failure, so every path above — including
+the device that goes away — runs without a microphone. It is the same shape
 `docs/design.md` section 4 gives the other stages.
+
+**The configuration is read once, when the daemon starts, and handed to the
+recorder thread.** Re-reading it per take would mean a person could change the
+input device without restarting, which nothing asks for, and it would put file
+system access on the path that runs while somebody is speaking.
+
+**Linux needs a system package before any of this compiles.** `cpal` pulls
+`alsa-sys` there, which needs the ALSA development headers present before `cargo
+fmt`, `clippy` or `test` will build at all. The check workflow installs no system
+packages today, so it gains a step that installs them on `ubuntu-latest` only.
 
 ## 7 What this design does not decide
 
@@ -157,5 +202,5 @@ is what makes every test above run without a microphone, and it is the same shap
 | AC-10 an accepted take reports its path | 2, 5 |
 | AC-11 loudness tested on synthesised samples | 4, 6 |
 | AC-12 `dictate` starts and stops | 2, 6 |
-| AC-13 device failures name the next action | 1, 2 |
+| AC-13 device failures name the next action | 1, 2, 2a |
 | AC-14 the four checks and the five CI checks | 6 |

@@ -67,6 +67,47 @@ back into the band and goes straight into recognition.
 
 Decisions taken here without the owner are also in `docs/decisions.md`.
 
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_8.md
+  reviewer: planner
+  verdict: QUESTIONS
+  date: 2026-08-25
+  questions:
+    - "AC-13 has three clauses and one of them is undecided: a device that disappears mid-take. Section 8 maps AC-13 to sections 1 and 2, but section 1 only covers name-to-choice at Start and section 2 only covers Start-while-running and Stop-with-nothing; nothing says what happens when the stream fails between the two `dictate` invocations. To cut a task with a done-criterion somebody else can check I would have to take three decisions the design does not: whether the take ends at the moment of failure or at the next Stop, whether the partial audio and its file are kept or removed, and — the one that spreads — whether the sample-source trait of section 6 carries an error at all. Section 6 describes the fake as one that 'yields a prepared buffer' and its test list stops at stop-with-nothing, so as written the trait has no error path and the failure cannot be tested without a microphone, which R9 and AC-6/AC-11 require of everything else. That trait is the interface between the `capture` task and the `audio::*` tasks; I cannot write those tasks independently while its shape depends on an undecided error path."
+  blocker: null
+  notes:
+    - "Not a gate question: `cpal` is not yet in `Cargo.toml`, and on `ubuntu-latest` it pulls `alsa-sys`, which needs the ALSA development headers present before anything builds. The workflow installs no system packages today, so AC-14 will need a step the design does not mention. Plannable without an answer — the done-criterion is CI green."
+    - "Not a gate question: no section says when the daemon reads `[audio]`. I will plan it as read once at daemon start and passed to the recorder thread; if the author meant per-take re-reading, say so and the task changes cheaply."
+    - "Everything else planned cleanly: `<state>` resolves against the existing `transport::state_directory`, the module table gives four independent tasks then `capture` then `config` and `daemon`, and the integer-ratio restriction is a decision with a reason rather than a gap."
+```
+
+### S2 Design — answers to the gate
+- artifact: `DESIGN_8.md`, new section 2a and a revised section 6
+- produced: 2026-08-25
+
+The question was right and the answer is three decisions, now in the artifact.
+
+The recorder's source of samples carries failures as well as samples, in both
+implementations, so a device that goes away is testable without a microphone — this
+is the one that decides the interface, and leaving it open would have forced the
+`capture` task to invent it.
+
+A take whose device fails ends at the failure, its partial audio is discarded and
+its file removed, and the reason is reported at the next `dictate`. Reporting there
+is not a chosen delay: it is the first moment there is anywhere to report to,
+because the indicator belongs to another issue. Keeping the partial audio was
+rejected — a take that lost its device halfway is the same class of input as one
+from the wrong device, and it produces a confident transcript of nothing.
+
+Both notes are answered in the artifact too: the configuration is read once at
+daemon start and handed to the recorder thread, and the check workflow gains a step
+installing the ALSA development headers on `ubuntu-latest`, without which nothing
+builds on Linux at all.
+
+A revised artifact needs a new verdict; the gate runs again.
+
 ## Notes
 
 The probe used to establish the `cpal` facts was a throwaway crate outside the
