@@ -12,6 +12,7 @@ mod client;
 mod config;
 mod context;
 mod daemon;
+mod doctor;
 mod proto;
 mod transport;
 
@@ -92,6 +93,11 @@ fn parse(args: &[String]) -> Command {
 /// Exit code for a command that exists but is not built yet. Distinct from the
 /// code for an unknown command, so a caller can tell "not yet" from "never".
 const NOT_IMPLEMENTED: u8 = 69;
+
+/// The oldest herdr this plugin works with. `scripts/check_manifest.py` fails if
+/// this and `min_herdr_version` in `herdr-plugin.toml` disagree, so the number
+/// cannot drift between the two files.
+pub const MIN_HERDR_VERSION: &str = "0.8.0";
 
 const USAGE: &str = "\
 herdr-voice — voice dictation for herdr

@@ -34,6 +34,20 @@ def main() -> None:
     if manifest["version"] != crate_version:
         fail(f"version {manifest['version']} does not match the crate's {crate_version}")
 
+    source = (ROOT / "src" / "main.rs").read_text()
+
+    # The minimum herdr version exists in two files. Two copies of one number drift,
+    # so the binary's copy is the one the code reads and this is what keeps the
+    # manifest honest about it.
+    declared = re.search(r'MIN_HERDR_VERSION: &str = "([^"]+)"', source)
+    if not declared:
+        fail("src/main.rs does not declare MIN_HERDR_VERSION")
+    if manifest.get("min_herdr_version") != declared.group(1):
+        fail(
+            f"min_herdr_version {manifest.get('min_herdr_version')} does not match "
+            f"MIN_HERDR_VERSION {declared.group(1)} in src/main.rs"
+        )
+
     entries = []
     for section in ("build", "startup", "actions", "panes"):
         for entry in manifest.get(section, []):
@@ -46,7 +60,6 @@ def main() -> None:
 
     # Every subcommand the manifest calls must be one the binary knows. The list
     # is read from the source rather than from a second copy kept in step by hand.
-    source = (ROOT / "src" / "main.rs").read_text()
     known = set(re.findall(r'Some\("([a-z-]+)"\)', source))
     for section, entry in entries:
         command = entry["command"]
