@@ -155,3 +155,29 @@ The crate's own source settles why, and settles two related worries as well
   `src/os/windows/named_pipe/wait_timeout.rs:13` — a client meeting a busy pipe
   waits rather than failing, but the wait is bounded: with both sides on the default
   it is 50 milliseconds. So a liveness probe on Windows cannot block indefinitely.
+
+## What the capture library offers
+
+Measured on macOS 25.6, Apple silicon, with `cpal` 0.18.2 in a throwaway crate
+outside this repository, before capture was designed. Two facts, both of which
+change what the capture stage has to do.
+
+**No input device on this machine offers 16 kHz.** Enumerating the CoreAudio host
+gave three input devices: a USB device, the built-in microphone, and a virtual
+device installed by a conferencing application. Each reports a single supported
+input configuration of 48 kHz, one channel, 32-bit float; the built-in microphone
+additionally offers 44.1, 88.2 and 96 kHz. Not one offers 16 kHz.
+
+The prototype never met this. It recorded through `ffmpeg` with `-ar 16000 -ac 1`
+(`spike/spike.sh:254`), so the resampling happened inside a program the plugin does
+not have. Producing 16 kHz mono is therefore work this plugin must do itself, and
+opening a device at 16 kHz is not an option to fall back on.
+
+**A device's name comes from `Display`.** In 0.18 `DeviceTrait` requires `Display`
+and offers `description()` and an `id()` documented as stable across runs,
+disconnections and reboots. The `name() -> Result<String>` of earlier versions is
+gone, so selection by name reads the `Display` form.
+
+The existence of a stable identifier is worth recording next to this, because it
+addresses exactly the failure that "select by name, never by index" was written
+against. Moving to it would change a rule in `CLAUDE.md` and was left alone.

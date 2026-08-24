@@ -26,6 +26,25 @@ gone.
 The issue's phrase "a plain subcommand" was resolved to the `dictate` action the
 manifest already declares, so that no user-visible name is invented at this stage.
 
+```yaml
+gate:
+  stage: S1
+  artifact: AC_8.md
+  reviewer: designer
+  verdict: READY
+  date: 2026-08-24
+  questions: []
+  blocker: null
+  notes:
+    - "Not a gate question, does not withhold READY: the two `cpal` facts in the as-is section are the only claims in the artifact with nothing in the repository behind them. `cpal` is not yet a dependency, the probe crate was deleted, and neither fact reached `docs/evidence.md`, which `CLAUDE.md` says is where hand-verified measurements go. Design is not blocked: the API surface is checkable with `cargo add` at design time, and the resampling requirement stands regardless. Every other as-is claim checked out, including the four `spike/spike.sh` citations at the lines given."
+```
+
+The reviewer is right that the two measurements had no home in the repository, and
+they now have one: `docs/evidence.md`, section "What the capture library offers",
+with the platform they were taken on. The device names of the machine are
+deliberately not written there — a list of somebody's audio devices identifies the
+machine, and the shape of the finding does not need them.
+
 ## Notes
 
 The probe used to establish the `cpal` facts was a throwaway crate outside the
