@@ -8,6 +8,7 @@
 //! the crate, the manifest, the tests and the release pipeline can be exercised
 //! before the first feature lands.
 
+mod config;
 mod context;
 mod proto;
 mod transport;
