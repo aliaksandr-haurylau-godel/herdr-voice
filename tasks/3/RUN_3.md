@@ -4,7 +4,7 @@
 |---|---|
 | issue | #3 — Skeleton: manifest, daemon, socket client, doctor |
 | input | GitHub issue, read with `gh issue view 3` |
-| stage | S3 |
+| stage | S4 |
 | branch | feat/3-daemon-client-doctor |
 | opened | 2026-08-24 |
 
@@ -257,6 +257,34 @@ and a silent skip is the failure this project treats as a defect of the same wei
 as a wrong transcript.
 
 Revising the artifact means a new verdict, so the gate runs again.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_3.md
+  reviewer: implementer
+  verdict: READY
+  date: 2026-08-24
+  questions: []
+  blocker: null
+  notes:
+    - "Task 5's revised interface, code and tests agree. `context_note(&Request) -> Option<String>` matches the interface line, `serve_one` calls it unconditionally after `request_line` and before `answer`, and it is exercised for every accepted request regardless of command — closing the gap the first verdict found (the `cancel` arm of `answer` still never touches the body, but `context_note` now does, on the same path). `ContextError::Absent`'s `Display` (Task 3) contains `HERDR_PLUGIN_CONTEXT_JSON`, and `context_note`'s `format!(\"context unreadable: {why}\")` contains `unreadable` regardless of which `ContextError` variant produced it, so both assertions in `a_body_that_will_not_parse_is_recorded_even_for_cancel` pass from the code as written, and the third case (`{\"tab_id\":\"t1\"}`) parses under Task 3's `serde_json::from_slice` and yields `None`. No task would have to guess a message string to make this test pass."
+    - "Test count is internally consistent: Step 1 lists nine `#[test]` functions in `src/daemon.rs`'s `tests` module, Step 4 expects nine passing, Step 5 appends one more (`a_second_start_finds_the_first_and_a_stop_ends_it`), and Step 6 expects ten. `Step 2`'s expected compile-failure message names four symbols and omits `context_note`, but the code and every executable step are unaffected by that omission — it doesn't tell me to do anything I can't verify against the actual test list."
+    - "Cross-checked Task 5 against what it consumes: `proto::{Request, Reply}` (Task 1), `transport::{Address, Listener, Stream, address, connect, listen}` and `transport::tests_support::probe_address` (Task 2), and `context::parse`/`ContextError` (Task 3) — every symbol Task 5 names exists with the signature Task 5 uses, and none of Tasks 1-3 or 8 was touched by this revision in a way that contradicts Task 5's new code."
+    - "Not a question, no answer needed: `serve_one` now parses the context body twice for a pane-needing command (once via `context_note`, once inside `answer`'s `context::parse` call) — a redundancy, not a gap. Both calls are fully written, deterministic and produce results the tests already pin down; there is nothing for an executor to invent."
+```
+
+The stand-in reviewer changed nothing again: working tree, the artifact's checksum
+and `HEAD` were identical before and after.
+
+Two observations from this verdict are carried into implementation rather than back
+into the plan, because neither changes what gets built:
+
+- The body is parsed twice for a pane-needing command, once by `context_note` and
+  once inside `answer`. No such command is wired in this issue, so the cost is
+  theoretical; whichever issue wires the first one folds the two calls together.
+- Task 5's step 2 lists the symbols the first compile failure names and omits
+  `context_note`. The step's purpose is to see the test fail, which it will.
 
 ## Notes
 
