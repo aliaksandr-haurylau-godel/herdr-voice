@@ -44,6 +44,17 @@ herdr plugin install aliaksandr-haurylau-godel/herdr-voice
 herdr plugin manifests cannot declare keybindings, so two lines go into your herdr
 configuration. The plugin's `setup` action prints them and offers to append them.
 
+## Building it
+
+```sh
+cargo test
+herdr plugin link .    # install this checkout as a plugin
+```
+
+The binary accepts every subcommand the plugin manifest names; the ones that are
+not built yet exit with a distinct code and say so, so "not yet" is never confused
+with "unknown".
+
 ## Documentation
 
 - [docs/design.md](docs/design.md) — how the plugin is built and why

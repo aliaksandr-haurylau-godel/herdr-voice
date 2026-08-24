@@ -1,0 +1,77 @@
+id = "haurylau.voice"
+name = "Voice"
+version = "0.0.0"
+min_herdr_version = "0.8.0"
+description = "Hold a key, speak, and the text lands in your agent's input box"
+platforms = ["macos", "linux", "windows"]
+
+# From a checkout the binary is built locally; a released copy fetches the
+# archive for the platform instead. Both leave the binary at the same path, so
+# every entry below is platform-independent.
+[[build]]
+platforms = ["macos", "linux"]
+command = ["sh", "-c", "cargo build --release"]
+
+[[build]]
+platforms = ["windows"]
+command = ["cmd", "/c", "cargo build --release"]
+
+[[startup]]
+platforms = ["macos", "linux"]
+command = ["target/release/herdr-voice", "daemon"]
+
+[[startup]]
+platforms = ["windows"]
+command = ["target/release/herdr-voice.exe", "daemon"]
+
+[[actions]]
+id = "dictate"
+title = "Dictation: start or finish"
+description = "Toggle recording; the text is inserted into the focused agent's input box"
+contexts = ["pane"]
+command = ["target/release/herdr-voice", "dictate"]
+
+[[actions]]
+id = "ptt"
+title = "Dictation: hold to talk"
+description = "Bound to a direct chord; every key auto-repeat extends the recording"
+contexts = ["pane"]
+command = ["target/release/herdr-voice", "ptt"]
+
+[[actions]]
+id = "cancel"
+title = "Dictation: cancel"
+description = "Stop and discard the current recording, and clear anything a dead run left"
+contexts = ["global"]
+command = ["target/release/herdr-voice", "cancel"]
+
+[[actions]]
+id = "setup"
+title = "Dictation: setup"
+description = "Print the keybindings to add, and offer to add them"
+contexts = ["global"]
+command = ["target/release/herdr-voice", "setup"]
+
+[[panes]]
+id = "status"
+title = "Dictation status"
+placement = "popup"
+width = "60%"
+height = 12
+command = ["target/release/herdr-voice", "status", "--follow"]
+
+[[panes]]
+id = "model"
+title = "Choose a speech model"
+placement = "popup"
+width = "70%"
+height = 16
+command = ["target/release/herdr-voice", "model", "--choose"]
+
+[[panes]]
+id = "mic"
+title = "Choose a microphone"
+placement = "popup"
+width = "60%"
+height = 14
+command = ["target/release/herdr-voice", "mic", "--choose"]
