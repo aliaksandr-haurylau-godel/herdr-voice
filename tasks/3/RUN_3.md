@@ -286,6 +286,51 @@ into the plan, because neither changes what gets built:
 - Task 5's step 2 lists the symbols the first compile failure names and omits
   `context_note`. The step's purpose is to see the test fail, which it will.
 
+### S4 Implement
+- artifact: code — `src/proto.rs`, `src/transport.rs`, `src/context.rs`,
+  `src/config.rs`, `src/daemon.rs`, `src/client.rs`, `src/doctor.rs`, the wiring in
+  `src/main.rs`, the version check in `scripts/check_manifest.py`
+- produced: 2026-08-24
+- verification: `cargo test --all` (58 tests), `cargo clippy --all-targets -- -D warnings`,
+  `cargo fmt --check` and `python3 scripts/check_manifest.py` all clean locally;
+  hand verification recorded in `docs/evidence.md`
+
+Executed task by task, each with its own failing test first and its own commit.
+Six defects were found while running the plan rather than while writing it:
+
+1. An unused `Read` import: methods of a supertrait are reachable through the
+   `R: BufRead` bound without it.
+2. `transport::Stream` and `Listener` needed `Debug`, because `expect_err` requires
+   it of the success type.
+3. The stale-socket test rested on a false premise. A listener dropped in an
+   orderly way removes its own socket file, so a leftover comes only from a process
+   that died holding one; the test now plants the leftover by hand.
+4. A byte-string literal cannot hold non-ASCII, so the unicode test could not
+   compile. It now checks the same label twice, through JSON escapes and as raw
+   UTF-8.
+5. `Address::path` and `Address::namespaced` each have a caller on one platform
+   only, so whichever is not used trips `dead_code` under `-D warnings`. Both are
+   now gated by platform.
+6. The verdict of `serve_one` could not cross a thread join, because its error type
+   is not `Send`.
+
+Hand verification found the one defect no test had: a liveness probe — which is
+what `doctor` and a second `daemon` start both perform — was reported as
+`connection failed: malformed header: ""`. Three such lines sat in a log that had
+answered two real requests. `ProtoError::Empty` now separates a peer that sent
+nothing from one that sent something wrong, and the daemon says nothing about the
+former. Both cases have tests.
+
+Two facts were established rather than assumed, and are in `docs/evidence.md`:
+herdr does not set `HERDR_PLUGIN_ENTRYPOINT_ID` for an action invoked from the
+command line, so the `-` for an absent token earned its place on the first real
+invocation; and the configuration directory the plugin derives is character for
+character the one `herdr plugin list` prints for the linked plugin.
+
+The plugin was linked to the live herdr for the action check and unlinked
+afterwards. `herdr plugin list` was identical before and after, and no daemon was
+left running.
+
 ## Notes
 
 The pipeline is untouched. Every action except `cancel` keeps exiting 69 with
