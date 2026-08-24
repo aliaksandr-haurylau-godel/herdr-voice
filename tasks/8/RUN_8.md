@@ -4,7 +4,7 @@
 |---|---|
 | issue | #8 — Capture: record from a named device at 16 kHz mono, and check the take was not silent |
 | input | GitHub issue, read with `gh issue view 8` |
-| stage | S1 |
+| stage | S2 |
 | branch | feat/8-capture |
 | opened | 2026-08-24 |
 
@@ -44,6 +44,28 @@ they now have one: `docs/evidence.md`, section "What the capture library offers"
 with the platform they were taken on. The device names of the machine are
 deliberately not written there — a list of somebody's audio devices identifies the
 machine, and the shape of the finding does not need them.
+
+### S2 Design
+- artifact: `DESIGN_8.md`
+- produced: 2026-08-25
+
+Four decisions, and two of them are the ones that matter.
+
+The recorder owns a thread for the daemon's whole life, and the `cpal` stream is
+built, held and dropped there and nowhere else. A take spans two `dictate`
+invocations, each arriving on a different connection handled on a different thread,
+so the stream cannot live in a connection handler. Owning a thread also makes the
+question of whether a `cpal` stream can move between threads irrelevant — the crate
+does not state it plainly for every platform, and this way it never has to.
+
+The rate conversion is restricted to integer ratios: the device is opened at 32,
+48, 64 or 96 kHz, preferring 48, and a windowed-sinc low-pass at 7.5 kHz runs
+before every *n*-th sample is taken. A device offering only 44.1 kHz is refused by
+name rather than recorded badly. That turns a rational resampler into a filter and
+a stride, and the low-pass is not optional: without it everything above 8 kHz folds
+back into the band and goes straight into recognition.
+
+Decisions taken here without the owner are also in `docs/decisions.md`.
 
 ## Notes
 
