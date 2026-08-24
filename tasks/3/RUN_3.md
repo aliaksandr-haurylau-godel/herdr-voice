@@ -4,7 +4,7 @@
 |---|---|
 | issue | #3 — Skeleton: manifest, daemon, socket client, doctor |
 | input | GitHub issue, read with `gh issue view 3` |
-| stage | S2 |
+| stage | S3 |
 | branch | feat/3-daemon-client-doctor |
 | opened | 2026-08-24 |
 
@@ -161,6 +161,36 @@ than by a preference.
    agent command-line tool the prototype used (`spike/spike.sh:103`) and the only
    one the rewrite measurements in `docs/evidence.md` were made with. A second name
    goes on the list when a second tool is measured.
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_3.md
+  reviewer: planner
+  verdict: READY
+  date: 2026-08-24
+  questions: []
+  blocker: null
+  notes:
+    - "All four earlier questions are closed in the artifact, and closed in a way I can plan from, not just answered in prose. (1) The entrypoint is a fourth header token with `-` for an unset variable, so `proto` has a fixed token count and `client`/`daemon` can be written against it independently. (2) 'needs a target pane' is now a property of the command, so the `daemon`/`context` task has one done-criterion instead of two contradictory ones: malformed body tolerated for `cancel` and exit 0, fatal and named for a pane-needing command — which is AC-8 as written. (3) The config path is `<config>/config.toml` with `HERDR_PLUGIN_CONFIG_DIR` then the two XDG fallbacks, so the `config` task has a stated input and the `doctor` config line has a checkable output. (4) The `agent = \"auto\"` candidate list is exactly `claude`, with the reason, so the `doctor` task no longer decides the clean-machine exit code by inventing a list."
+    - "Task cut I would make from section 6, and it holds: `proto` and `transport` with no dependencies; `context` and `config` with none; `daemon` on `proto`+`transport`+`context`; `client` on `proto`+`transport`; `doctor` on `transport`+`config`; `main` wiring last (only `cancel` leaves the 69 arm, AC-13); and the `min_herdr_version` constant plus its `scripts/check_manifest.py` check as its own task. Section 8 maps every AC to a section and I found no criterion without an owner and no ordering constraint that contradicts another."
+    - "Not a question, and the thinnest place in the artifact — AC-7. Section 2 describes the client's reply handling but never the connect-failure path, and the `client` row in section 6 lists `ok`, `error` and a closed connection but not 'no daemon'. Neither the message text nor any read/connect bound is stated. I can still write the task: its done-criterion comes straight from AC-7 — non-zero exit, no panic, no hang, and a message naming how to start the daemon — and the exact wording and timeout value are implementation choices whose outcome that criterion already checks. I would rather it were in the design than in my plan, but it does not stop me."
+    - "Not a question: section 1 says one module hides the transport and section 5 lists `interprocess` as 'the named pipe on Windows', which leaves it open whether Unix uses `std` sockets or `interprocess` too, and therefore whether the dependency is target-specific in `Cargo.toml`. Both readings sit entirely inside the `transport` task and neither changes the interface anyone above it sees, so no other task has to guess."
+    - "Separate note on a choice, not a gap: `toml = \"1\"` in the dependency table. If no 1.x of that crate is published, the version pin — not the decision to take the crate — is what the implementing task will have to correct; the argument for taking a TOML parser at all is made and I accept it."
+```
+
+The stand-in reviewer changed nothing again: working tree, both artifacts'
+checksums and `HEAD` were identical before and after.
+
+Three of the reviewer's notes are carried into S3 rather than back into the design,
+because the design has a verdict and reopening it for material the reviewer
+explicitly did not block on would cost a third gate for no decision:
+
+- AC-7's client path — the message and the bound — is stated in the plan.
+- Whether the Unix side uses `std` or `interprocess` sits inside the `transport`
+  task, which decides it.
+- `toml = "1"` needs no correction: version 1.0.7 is published, and 1.1.4 is the
+  latest. The reviewer flagged it conditionally and the condition does not hold.
 
 ## Notes
 
