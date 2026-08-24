@@ -1,0 +1,26 @@
+# Leak gate, public half. Generic rules only: secrets, personal paths, internal
+# hosts. Names of employers and clients are deliberately absent — a list of them
+# in a public repository would itself disclose what it is meant to protect. Those
+# live in an untracked file, see .leakwords.example.
+title = "herdr-voice leak gate"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "personal-home-path"
+description = "Absolute home paths disclose an account name and local layout"
+regex = '''/Users/[a-z0-9._%+-]+@[a-z0-9.-]+|/home/[a-z0-9._%+-]+@[a-z0-9.-]+'''
+tags = ["policy", "path"]
+
+[[rules]]
+id = "internal-hosts"
+description = "Internal hostnames and corporate URLs"
+regex = '''(?i)https?://[a-z0-9.-]*\.(internal|corp|intranet)(/|\b)'''
+tags = ["policy", "host"]
+
+[[rules]]
+id = "corporate-mail"
+description = "Work email addresses"
+regex = '''[a-z0-9._%+-]+@[a-z0-9.-]+\.(com|net|org)\b(?i)(?:.*(employee|internal))?'''
+tags = ["policy", "mail"]

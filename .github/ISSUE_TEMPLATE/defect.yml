@@ -1,0 +1,29 @@
+name: Defect
+description: Something behaves differently from what the design states
+labels: ["defect"]
+body:
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: Include the journal lines and the indicator state you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Platform, terminal, herdr version
+    validations:
+      required: true

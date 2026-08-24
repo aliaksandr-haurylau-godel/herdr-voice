@@ -1,0 +1,24 @@
+name: Verification
+description: Something that can only be confirmed by running it on a real machine
+labels: ["verification"]
+body:
+  - type: textarea
+    id: claim
+    attributes:
+      label: Claim to verify
+      description: The statement that is currently unproven.
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How to check
+      description: Exact steps and what output settles the question either way.
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment needed
+    validations:
+      required: true

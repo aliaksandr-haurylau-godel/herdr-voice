@@ -1,0 +1,29 @@
+name: Task
+description: A unit of work that runs through the stages
+labels: ["stage:S1"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What must be true when this is done. Not how.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What exists now, and which part of the design this touches.
+    validations:
+      required: true
+  - type: textarea
+    id: bounds
+    attributes:
+      label: Out of bounds
+      description: What this task deliberately does not cover.
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: macOS, Linux, Windows, or all.
+      value: all

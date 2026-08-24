@@ -1,0 +1,11 @@
+# Copy to .leakwords, which is never committed, and put one extended regular
+# expression per line. The pre-commit hook rejects a commit whose staged diff
+# matches any of them.
+#
+# Use it for the names a public repository must never receive: your employer,
+# your clients, their internal systems and repositories, and the code names of
+# projects you work on elsewhere.
+#
+# example-client-name
+# internal-project-codename
+# some-company\.com

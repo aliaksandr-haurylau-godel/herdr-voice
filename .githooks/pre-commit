@@ -1,0 +1,35 @@
+#!/bin/sh
+# Local half of the leak gate. Two independent checks, both before the commit
+# exists, because a public repository keeps history after a revert.
+#
+# Enable once per clone: git config core.hooksPath .githooks
+set -e
+
+root=$(git rev-parse --show-toplevel)
+staged=$(git diff --cached -U0)
+
+# 1. Secrets and the generic policy rules that ship with the repository.
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --config "$root/.gitleaks.toml" --redact --no-banner || {
+    echo "leak gate: staged changes contain secrets or match a policy rule" >&2
+    exit 1
+  }
+else
+  printf '%s\n' "$staged" | grep -q -E '/(Users|home)/[a-z0-9._%+-]+@' && {
+    echo "leak gate: staged changes contain a personal home path" >&2
+    exit 1
+  }
+fi
+
+# 2. The private word list: names this repository must never receive. The file is
+# untracked on purpose, so the list itself is not published. See .leakwords.example.
+if [ -f "$root/.leakwords" ]; then
+  while IFS= read -r pattern; do
+    case "$pattern" in ''|'#'*) continue ;; esac
+    if printf '%s\n' "$staged" | grep -q -i -E "$pattern"; then
+      echo "leak gate: staged changes match a private word-list entry" >&2
+      echo "the matching pattern is in .leakwords; nothing is printed here on purpose" >&2
+      exit 1
+    fi
+  done < "$root/.leakwords"
+fi
