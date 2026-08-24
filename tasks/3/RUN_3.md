@@ -4,7 +4,7 @@
 |---|---|
 | issue | #3 — Skeleton: manifest, daemon, socket client, doctor |
 | input | GitHub issue, read with `gh issue view 3` |
-| stage | S1 |
+| stage | S2 |
 | branch | feat/3-daemon-client-doctor |
 | opened | 2026-08-24 |
 
@@ -74,6 +74,22 @@ gate:
     - "Not a question: AC-3 fixes the socket path derivation only for the Unix side, while R5 and AC-12 require a named-pipe implementation on Windows. The pipe-name derivation, the wire format of the request, the shutdown signal for AC-1, how `doctor` locates the herdr binary when `HERDR_BIN_PATH` is absent, and where the daemon records a received request for AC-5 are all mine to decide — both ends of the transport are this binary, so no external contract is missing."
     - "Separate note on scope, not a reason to withhold READY: chosen reading 4 gives behaviour only to `cancel`, and with no pipeline there is nothing for `cancel` to cancel, so AC-5 reduces to a round-trip proof. That matches the issue's 'proves the shape' goal; I mention it only so the plan does not later read AC-5 as real cancellation semantics."
 ```
+
+### S2 Design
+- artifact: `DESIGN_3.md`
+- produced: 2026-08-24
+
+Decides the five things the acceptance criteria left open: the transport, the
+message format, the daemon's lifecycle, the contents of `doctor`, and the
+dependencies. One dependency is added, `interprocess` 2.4.3, and it is confined to
+the `transport` module; the configuration and the invocation context are read by
+code written here, which the design names as the risk it is taking.
+
+The gate for this stage could not be run: the reviewer role for S2 is `planner`,
+which maps to the agent `octoflow-reviewer-planner`, and that agent does not
+exist. Only `octoflow-reviewer-designer` is installed. Reviewing the design with a
+different reviewer, or reviewing it here, would measure nothing, so the stage stays
+open until the planner reviewer exists.
 
 ## Notes
 
