@@ -108,15 +108,15 @@ in this design, not in the protocol, and it is fixed here rather than left to #1
 - **Success (unchanged):** `format!("delivered to {target} [{level_dbfs:.1} dB]")`
   — for example `delivered to w1:p2 [-46.9 dB]`. It names the pane and the
   measured level, the two things AC-11 requires, and nothing else.
-- **Failure:** `format!("could not deliver to {target} ({why}) — copy the text \
-  below, or open the take at {path}: {text}")` — for example, against the
-  pane-gone case measured in `docs/evidence.md`: `could not deliver to w99:p99
-  (pane_not_found) — copy the text below, or open the take at
-  /state/takes/1234-5678-9.wav: fix the worklog entry`. It carries the full text
-  and the reason (AC-12), and it names what the person can actually do: the text
-  is sitting in the line they are already reading, or the take is still on disk
-  and can be opened — not "paste it by hand," which points at a clipboard that
-  holds nothing.
+- **Failure:** `format!("could not deliver to {target} ({why}) — the take is \
+  kept at {path}; text: {text}")` — for example, against the pane-gone case
+  measured in `docs/evidence.md`: `could not deliver to w99:p99 (pane_not_found)
+  — the take is kept at /state/takes/1234-5678-9.wav; text: fix the worklog
+  entry`. It carries the full text and the reason (AC-12), and it says where the
+  audio is rather than telling the person to "paste it by hand," which points at
+  a clipboard that holds nothing. The text itself needs no direction at all: the
+  colon in front of it already says "here it comes," and it is the last thing on
+  the line — there is nowhere else for it to be.
 
 Two changes from a first draft of this string, both made here rather than left for
 later:
