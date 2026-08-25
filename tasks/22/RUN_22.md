@@ -263,3 +263,58 @@ feature; and the refusal parser quotes both shapes rather than pointing at them.
 
 S3 is closed. Next is S4 Implement, whose gate is a review of the diff before any
 pull request exists.
+
+## Gate S4
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff of feat/22-delivery against main
+  reviewer: superpowers:requesting-code-review
+  verdict: QUESTIONS
+  date: 2026-08-26
+  blocker: null
+```
+
+Nine findings, three of them blocking. Build state at review time: 146 tests pass,
+clippy clean under `-D warnings`, format clean, manifest 11 entries.
+
+**Blocking.**
+
+1. A toast that fails to show leaves no record. The design requires one more journal
+   line when the toast itself cannot be raised; the requirement was dropped when the
+   plan was cut, and the code follows the plan. The original failure is not masked —
+   the journal line and the error reply are produced independently — so this is a
+   lost diagnostic rather than a lost failure, which is still what `CLAUDE.md` calls
+   a silent failure.
+2. The journal-order test does not pin the criterion. It asserts the order of the two
+   journal lines relative to each other, while the criterion is about the text
+   reaching the journal *before the delivery attempt*. Moving the write below the
+   delivery call leaves the test green and the transcript held only in memory across
+   an outward call. This is the group that went green on first run.
+3. The newline collapsing is exercised by no test. It is the whole content of the
+   third-pass fix, and no test passes a transcript or a reason containing a newline.
+   Drop either collapse and every test stays green until the first real multi-line
+   transcript truncates a reply.
+
+**Not blocking, weighed by the run.**
+
+4. The target pane and the take path are not collapsed although they sit ahead of the
+   transcript. Whether a pane id can carry a newline was not established; the code
+   defends neither way.
+5. Nothing verifies the argument lists of the real herdr calls. Every delivery test
+   runs through the fake, so a misspelt subcommand or swapped arguments would leave
+   the suite green and the plugin inert against a live herdr.
+6. An empty agent string defeats the fallback: `Some("")` passes an `is_some` check,
+   so a pane with no agent would be submitted to rather than inserted into. How herdr
+   encodes "no agent" was not established.
+7. The outward call to herdr has no bound. A wedged herdr leaks the connection thread
+   and produces no delivery-failed line.
+8. A rejected delivery prints herdr's bare code without naming what to do next, while
+   the not-found arm does.
+9. The reason parser keeps herdr's whole raw output when the refusal does not parse.
+
+**Checked and clean**: the exit code on every failure path, the reply strings byte for
+byte, the toast gate, the agent fallback at both levels, the absence of any reachable
+panic or unwrap, the take surviving a failed delivery, the pinned target, the
+configuration defaults, and the absence of a lock held across the subprocess call.
