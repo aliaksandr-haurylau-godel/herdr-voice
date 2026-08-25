@@ -45,11 +45,16 @@ pub fn needs_target_pane(command: &str) -> bool {
 /// run for `cancel` and for `doctor`, which is where somebody finds out what to fix.
 pub type Recognition = Result<Box<dyn Engine + Send + Sync>, String>;
 
-pub fn answer(
-    request: &Request,
-    recorder: &Recorder,
-    recognition: &Recognition,
-) -> (Reply, Control) {
+/// The four things resolved once, at daemon start, and needed everywhere a
+/// take can finish.
+pub struct Runtime {
+    pub recognition: Recognition,
+    pub deliverer: Box<dyn crate::delivery::Deliverer>,
+    pub delivery_settings: crate::delivery::Settings,
+    pub journal: Box<dyn Journal>,
+}
+
+pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Reply, Control) {
     match request.command.as_str() {
         "stop" => (Reply::Ok("stopping".to_string()), Control::Stop),
         "cancel" => (
@@ -67,9 +72,15 @@ pub fn answer(
                     ),
                     Control::Continue,
                 ),
-                Some(pane) if command == "dictate" => {
-                    (dictate(recorder, recognition, pane), Control::Continue)
-                }
+                Some(pane) if command == "dictate" => (
+                    dictate(
+                        recorder,
+                        runtime,
+                        pane,
+                        invocation.focused_pane_agent.as_deref(),
+                    ),
+                    Control::Continue,
+                ),
                 Some(_) => (
                     Reply::Ok(format!("{command}: not implemented yet")),
                     Control::Continue,
@@ -88,21 +99,21 @@ pub fn answer(
 /// The pane is pinned here, when the take begins, and kept with it until delivery.
 /// Choosing it at the end would follow the focus: somebody speaks looking at one
 /// agent, switches while thinking, and the text lands in another.
-fn dictate(recorder: &Recorder, recognition: &Recognition, pane: &str) -> Reply {
-    match recorder.start(pane, None) {
+fn dictate(recorder: &Recorder, runtime: &Runtime, pane: &str, agent: Option<&str>) -> Reply {
+    match recorder.start(pane, agent) {
         Started::Began => Reply::Ok(format!("recording for {pane}")),
         Started::CouldNotStart(why) => Reply::Error(why),
         Started::PreviousFailure(why) => Reply::Error(why),
         Started::AlreadyRunning => match recorder.stop() {
             Err(why) => Reply::Error(why.to_string()),
-            Ok(take) => transcribe(recognition, &take),
+            Ok(take) => transcribe(runtime, &take),
         },
     }
 }
 
 /// A finished take becomes text, or says why it did not.
-fn transcribe(recognition: &Recognition, take: &crate::capture::Take) -> Reply {
-    let engine = match recognition {
+fn transcribe(runtime: &Runtime, take: &crate::capture::Take) -> Reply {
+    let engine = match &runtime.recognition {
         Ok(engine) => engine,
         // The take is on disk and named, so nothing is lost by the engine being
         // absent: somebody can fix the configuration and the file is still there.
@@ -208,7 +219,16 @@ pub fn start() -> Result<Outcome, TransportError> {
         takes,
     );
 
-    serve(listener, address, Arc::new(recorder), Arc::new(recognition));
+    let runtime = Runtime {
+        recognition,
+        deliverer: Box::new(crate::delivery::HerdrDeliverer::new()),
+        delivery_settings: crate::delivery::Settings {
+            submit: loaded.config.delivery.submit,
+            toasts: loaded.config.ui.toasts,
+        },
+        journal: Box::new(StderrJournal),
+    };
+    serve(listener, address, Arc::new(recorder), Arc::new(runtime));
     Ok(Outcome::Served)
 }
 
@@ -216,7 +236,7 @@ fn serve(
     listener: transport::Listener,
     address: Address,
     recorder: Arc<Recorder>,
-    recognition: Arc<Recognition>,
+    runtime: Arc<Runtime>,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
     loop {
@@ -233,9 +253,9 @@ fn serve(
         let stop = Arc::clone(&stop);
         let address = address.clone();
         let recorder = Arc::clone(&recorder);
-        let recognition = Arc::clone(&recognition);
+        let runtime = Arc::clone(&runtime);
         thread::spawn(move || {
-            if let Err(e) = serve_one(connection, &stop, &address, &recorder, &recognition) {
+            if let Err(e) = serve_one(connection, &stop, &address, &recorder, &runtime) {
                 eprintln!("connection failed: {e}");
             }
         });
@@ -247,7 +267,7 @@ fn serve_one(
     stop: &AtomicBool,
     address: &Address,
     recorder: &Recorder,
-    recognition: &Recognition,
+    runtime: &Runtime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = BufReader::new(connection);
     let request = match Request::read_from(&mut reader) {
@@ -261,7 +281,7 @@ fn serve_one(
     if let Some(note) = context_note(&request) {
         eprintln!("{note}");
     }
-    let (reply, control) = answer(&request, recorder, recognition);
+    let (reply, control) = answer(&request, recorder, runtime);
     reply.write_to(reader.get_mut())?;
     if control == Control::Stop {
         stop.store(true, Ordering::SeqCst);
@@ -285,12 +305,21 @@ mod tests {
         )
     }
 
-    /// A recognition that always produces the same text, so a dispatch test is
-    /// about which branch runs rather than about speech.
-    fn fake_recognition(text: &str) -> Recognition {
-        Ok(Box::new(crate::stt::tests_support::Fake(Ok(
-            text.to_string()
-        ))))
+    /// A runtime that always produces the same transcript, delivers against a
+    /// fake that never fails, and never submits or toasts — so a dispatch
+    /// test is about which branch runs rather than about speech or delivery.
+    fn fake_runtime(text: &str) -> Runtime {
+        Runtime {
+            recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+                text.to_string()
+            )))),
+            deliverer: Box::new(crate::delivery::tests_support::FakeDeliverer::ok()),
+            delivery_settings: crate::delivery::Settings {
+                submit: false,
+                toasts: false,
+            },
+            journal: Box::new(StderrJournal),
+        }
     }
 
     fn request(command: &str, context: &[u8]) -> Request {
@@ -313,7 +342,7 @@ mod tests {
         let (reply, control) = answer(
             &request("cancel", b""),
             &silent_recorder(),
-            &fake_recognition("x"),
+            &fake_runtime("x"),
         );
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
         assert!(matches!(control, Control::Continue));
@@ -324,7 +353,7 @@ mod tests {
         let (reply, _) = answer(
             &request("cancel", b"{not json"),
             &silent_recorder(),
-            &fake_recognition("x"),
+            &fake_runtime("x"),
         );
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
     }
@@ -334,7 +363,7 @@ mod tests {
         let (reply, _) = answer(
             &request("dictate", b""),
             &silent_recorder(),
-            &fake_recognition("x"),
+            &fake_runtime("x"),
         );
         match reply {
             Reply::Error(text) => assert!(
@@ -351,7 +380,7 @@ mod tests {
         let (reply, _) = answer(
             &request("dictate", br#"{"focused_pane_id":"w1:p2"}"#),
             &recorder,
-            &fake_recognition("hello"),
+            &fake_runtime("hello"),
         );
         match reply {
             Reply::Ok(text) => assert!(text.contains("w1:p2"), "got {text:?}"),
@@ -363,8 +392,8 @@ mod tests {
     fn the_second_dictate_finishes_the_take_rather_than_starting_another() {
         let recorder = silent_recorder();
         let request = request("dictate", br#"{"focused_pane_id":"w1:p2"}"#);
-        answer(&request, &recorder, &fake_recognition("hello"));
-        let (reply, _) = answer(&request, &recorder, &fake_recognition("hello"));
+        answer(&request, &recorder, &fake_runtime("hello"));
+        let (reply, _) = answer(&request, &recorder, &fake_runtime("hello"));
         // The take is silence, so it is refused — which is itself proof that the
         // second keypress finished it instead of starting a second one.
         match reply {
@@ -381,7 +410,7 @@ mod tests {
         let (reply, _) = answer(
             &request("transcribe", b""),
             &silent_recorder(),
-            &fake_recognition("x"),
+            &fake_runtime("x"),
         );
         match reply {
             Reply::Error(text) => assert!(text.contains("transcribe"), "got {text:?}"),
@@ -394,7 +423,7 @@ mod tests {
         let (reply, control) = answer(
             &request("stop", b""),
             &silent_recorder(),
-            &fake_recognition("x"),
+            &fake_runtime("x"),
         );
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
         assert!(matches!(control, Control::Stop));
@@ -462,7 +491,7 @@ mod tests {
                     &stop,
                     &address,
                     &silent_recorder(),
-                    &fake_recognition("x"),
+                    &fake_runtime("x"),
                 )
                 .map_err(|e| e.to_string())
             })
@@ -496,7 +525,7 @@ mod tests {
                     listener,
                     address,
                     Arc::new(silent_recorder()),
-                    Arc::new(fake_recognition("x")),
+                    Arc::new(fake_runtime("x")),
                 );
                 let _ = ended.send(());
             })
