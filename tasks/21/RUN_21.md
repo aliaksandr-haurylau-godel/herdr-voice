@@ -165,3 +165,30 @@ interface breaks here and the benefit arrives later. Either the widening belongs
 to this issue together with the passing, or the trait is left alone until the
 issue that uses it. The gate did not raise this; it is raised here because the
 decision to open S3 is the run's.
+
+## Gate S2, second pass
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_21.md
+  reviewer: planner
+  verdict: QUESTIONS
+  date: 2026-08-26
+  questions:
+    - "The design names `Source` with two members, `resolve(value) -> Result<Source, String>` held beside the recognition engine, and says `auto` is not a member because it is the dispatch's own concern — while `collect` takes an already-resolved Source or the caller's instruction to try both. Nothing names what `resolve(\"auto\")` returns, nor the type of that `or`. With two members the resolved value cannot tell the default from `transcript`, yet the criteria make that distinction observable — `transcript` never reads the pane even on a miss, `auto` does — and the tests require all three to resolve and all three to dispatch. Three separate tasks meet at that boundary and would each have to invent the same third state: whether `Source` grows an `Auto` member, whether `collect` takes a different parameter, or whether the daemon passes something else."
+  blocker: null
+```
+
+Both claims the gate was asked to verify hold. `Recognition` is
+`Result<Box<dyn Engine + Send + Sync>, String>` resolved once inside the daemon's
+`start` and consulted per request, so resolving the context source the same way
+matches what is already there. And the transcript root's origin is reachable:
+`config::Vars` carries `home` and `config::directory` already reads it.
+
+Two notes from the gate, neither a question: `home` is optional while
+`transcript::find` takes a path, and the design's rule that a miss never blocks
+recognition already covers an absent home directory. And `dictate` currently
+receives only the pane string although the parsed invocation with the working
+directory and the agent name is available one frame up — plan-level work, not a
+design gap.
