@@ -106,3 +106,35 @@ prototype's fallback — `submit = true` still inserts without submitting when t
 pinned pane has no agent — is restored as AC-4, using `Invocation.
 focused_pane_agent`, already captured at pin time, so no new herdr call is
 needed to keep the condition.
+
+## Gate S1, second pass
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_22.md
+  reviewer: designer
+  verdict: READY
+  date: 2026-08-26
+  questions: []
+  blocker: null
+```
+
+The reviewer checked the one field a criterion depends on: `focused_pane_agent`
+exists in `src/context.rs` as `Option<String>`, is parsed from the invocation body
+and is covered by a test. So the agent name is available when the take is pinned,
+without a new call to herdr. Carrying it from the first `dictate` to delivery on
+the second is work the design adds — `answer` currently keeps only the pane string,
+and `Take` holds only the path, the level and the target.
+
+### One decision taken here, so the design does not have to guess
+
+`docs/design.md` documents `[ui] toasts = true`, a key that governs toasts, and
+AC-8 requires a toast without mentioning it. The toast obeys `[ui] toasts`: a
+documented key that some code ignores is a key that lies, and the journal line
+required by AC-7 is unconditional anyway, so a person who turned toasts off still
+has the failure recorded rather than lost. This is not a new user-visible name —
+the key already exists — and it is recorded in `docs/decisions.md`.
+
+S1 is closed. Next is S2 Design, which by its own rule stops for the owner's
+approval of the intent before anything is implemented.
