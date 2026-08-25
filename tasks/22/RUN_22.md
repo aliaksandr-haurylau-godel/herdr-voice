@@ -194,3 +194,45 @@ Citations drift by a few lines in three more places, the same class as before. I
 changes no task boundary.
 
 S2 is closed. Next is S3 Plan.
+
+## Gate S2, third pass
+
+The artifact was re-judged in full, not only where it changed. The previous READY
+was reached on a document that carried a defect the gate had not been asked about
+and the run signed off on: the failure reply put the transcript ahead of the path
+to the take, and the reply protocol reads one line, so a transcript with a newline
+in it truncated and took the path with it — losing both things the criterion
+requires the reply to carry.
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_22.md
+  reviewer: planner
+  verdict: READY
+  date: 2026-08-26
+  questions: []
+  blocker: null
+```
+
+The gate checked the protocol against the code rather than taking the design's
+word: a reply is written with `writeln!` and read with a single `read_line`, so a
+newline anywhere in the body ends the read and everything after it is lost, while a
+lone carriage return does not truncate. With the transcript last and both fields
+that can carry a newline collapsed to spaces, nothing can cut off the reason or the
+take's path, and truncation is removed for this reply entirely. The design's refusal
+to call that a fix for issue 19 is accurate: nothing in it bounds length, and the
+engine-failure reply it does not touch still carries an embedded newline before its
+example — which is issue 19, and where it was first seen.
+
+Two things a task will settle by existing convention rather than by a design
+statement, named so nobody thinks they were missed: the failure reply must be the
+error variant, since the client maps that to exit 1 and both existing failure
+branches already use it; and the rejected-delivery error must print the extracted
+code alone for the reply's example to hold.
+
+The task graph comes out of the artifact without invention. The `depends on` column
+omits the daemon's dependency on delivery and configuration, which the prose
+states — the plan makes it explicit.
+
+S2 is closed.
