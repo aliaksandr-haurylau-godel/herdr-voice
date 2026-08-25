@@ -7,6 +7,7 @@
 //! sections 1 and 2.
 
 pub mod files;
+pub mod pane;
 pub mod source;
 
 /// The three values `[context] source` can resolve to. `Auto` is a member in
