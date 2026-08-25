@@ -159,30 +159,90 @@ The crate's own source settles why, and settles two related worries as well
 
 ## Linux, in a container
 
-Run on 2026-08-25 by `scripts/linux-check.sh`, which performs the whole check in
-one non-interactive pass and prints the table below itself. The plugin was built
-from revision `e32a9b7`, the tip of `main`.
+Run twice on 2026-08-25 by `scripts/linux-check.sh`, which performs the whole
+check in one non-interactive pass and prints the table below itself. The two runs
+agreed step for step; the second exists to show the script is re-runnable on a
+machine it has already touched. The plugin was built from revision `68fbe89`, the
+tip of `main`, which is the first revision that records anything — capture landed
+there. The script itself carries the changes described below, which are not in
+`68fbe89`.
+
+This is the second run of this check. The first, on revision `e32a9b7`, could not
+touch capture at all, because capture did not exist: its `no-device` step was
+recorded as pending. Everything that run established about installation, the
+socket path and the `[[startup]]` entry was re-observed here and is stated below
+as one result.
 
 The machine: a throwaway Debian GNU/Linux 12 (bookworm) container, `aarch64`,
-kernel 6.18.15, no sound hardware of any kind. Versions it installed and printed:
-`rustc 1.98.0 (88d9e12ae 2026-08-18)`, `cargo 1.98.0 (797e8a9bc 2026-08-05)`,
-`herdr 0.8.2`, `cc (Debian 12.2.0-14+deb12u1) 12.2.0`, ALSA development headers
-`alsa 1.2.8` from `libasound2-dev`.
+kernel 6.18.15, no sound hardware of any kind — no `/dev/snd`, no PipeWire, no
+`arecord`. The host ran Apple's `container` 1.1.0 and nothing was installed on it.
+Versions the script installed and printed: `rustc 1.98.0 (88d9e12ae 2026-08-18)`,
+`cargo 1.98.0 (797e8a9bc 2026-08-05)`, `herdr 0.8.2`, `cc (Debian 12.2.0-14+deb12u1)
+12.2.0`, ALSA development headers `alsa 1.2.8` from `libasound2-dev`.
 
 | step | exit | outcome |
 |---|---|---|
-| packages | 0 | `apt-get`; ALSA headers present for the capture work of issue #8 |
+| packages | 0 | `apt-get`; ALSA headers `alsa 1.2.8`, which `cpal` needs to build at all |
 | rust | 0 | stable toolchain installed by `rustup` |
 | herdr | 0 | installed by `curl -fsSL https://herdr.dev/install.sh \| sh` |
-| build | 0 | `cargo build --release` produced `target/release/herdr-voice` |
-| link | 0 | `herdr plugin link .`; herdr computes the config directory `~/.config/herdr/plugins/config/haurylau.voice` |
+| build | 0 | `cargo build --release` produced `target/release/herdr-voice`, `cpal` and `alsa-sys` included |
+| link | 0 | `herdr plugin link .`; herdr computes the config directory `<config>/herdr/plugins/config/haurylau.voice` |
 | server | 0 | `herdr server`, the headless server, runs without a terminal |
+| pane | 0 | `herdr workspace create --focus` gives herdr a focused pane, `w1:p1` |
 | daemon | 0 | herdr started the daemon itself, through the manifest's `[[startup]]` entry |
 | doctor | 1 | five lines in the fixed order; `herdr ok`, `daemon ok`, `config default`, `model missing`, `rewrite missing` |
 | action | 0 | `herdr plugin action invoke cancel` returned 0 |
-| herdr-log | 0 | herdr recorded the invocation as `succeeded` with `exit_code 0`, and the `[[startup]]` daemon has a record too |
-| no-device | 69 | pending: capture is not built yet, so the binary said `mic: not implemented yet` and exited |
+| herdr-log | 0 | herdr recorded that invocation as `succeeded` with `exit_code 0`, and the `[[startup]]` daemon has a record too |
+| no-device | 1 | a take through the `dictate` action named the input it could not open and exited |
+| named-device | 1 | `[audio] input` set to a name no device has was refused, with the names that do exist |
 | no-daemon | 1 | with nothing listening, the client named the socket and exited without hanging |
+
+**A take with no capture device names the input and exits.** This is what the
+issue was left open for. A `dictate` action invoked through herdr, against the
+focused pane `w1:p1`, on a machine with no `/dev/snd`, ended with exit code 1 and
+this on standard error:
+
+```
+cannot read what "Default Audio Device" supports: The requested audio device is
+not available. It may have been disconnected.
+```
+
+No hang, no signal, no panic, no silence and no zero exit — the five outcomes the
+step now fails on. The daemon stayed up and answered the invocations that came
+after.
+
+**With no sound hardware, ALSA still offers a device.** The container has no card,
+and `cpal` nevertheless enumerated one input, called `Default Audio Device`, whose
+supported configurations could not be read. So the branch that reports "no input
+devices at all" is not the one a headless Linux machine reaches: the refusal comes
+one step later, at the point the device is interrogated. The daemon's standard
+error carries the ALSA library's own complaint next to it — `cannot find card '0'`,
+`Unknown PCM default` — which is noise from the library rather than from the
+plugin, and it does not reach the person: what herdr shows is the single line
+above.
+
+**A configured input that no device answers to is refused with the list.** With
+`[audio] input` set to a name nothing has, the take exited 1 and said:
+
+```
+no input device named "No Such Microphone 6133"; the ones that exist are
+"Discard all samples (playback) or generate zero samples (capture)". Set [audio]
+input to one of them, or leave it empty for the default
+```
+
+The one name in that list is ALSA's null device, which is all this container
+offers. The refusal repeats the configured name and does not fall back to the
+default, which is the behaviour "by name, never by index" exists to produce.
+
+**A plugin's exit code is not what `herdr plugin action invoke` returns.** That
+command returns 0 for "the action was started", and the plugin's own exit code,
+standard output and standard error appear only in the record herdr keeps —
+`herdr plugin log list --plugin haurylau.voice`. The record is written when the
+command ends, not when it starts: read the instant `invoke` returns, it still says
+`"status":"running"`. Every assertion about what a take did therefore reads that
+record and waits for it to leave `running`, and a record that never leaves it is
+how a hang is detected. The first version of the check grepped the log
+immediately and failed on a `cancel` that had in fact succeeded.
 
 **herdr starts the daemon from the manifest, and the daemon's own lines reach the
 plugin log.** This is what the macOS exercise could not establish, because it
@@ -199,23 +259,30 @@ daemon was killed with a signal, the record read:
 
 So a daemon stopped by a signal is `failed` in herdr's eyes, `entrypoint` is `-`
 for a command-line invocation on Linux exactly as on macOS, and the context herdr
-sends from the command line was 57 bytes here against 375 on macOS.
+sends from the command line was 57 bytes there against 375 on macOS. With a
+workspace open it is larger: the `dictate` invocations in this run carried a
+context naming `focused_pane_id`, `focused_pane_cwd`, `tab_id`, `tab_label` and
+the workspace, which is what makes a take possible at all — `dictate` refuses to
+start without a pane to deliver into.
 
 **The socket path the plugin derives is the one herdr computes.** herdr ran the
-daemon with `HERDR_PLUGIN_STATE_DIR=~/.local/state/herdr/plugins/haurylau.voice`,
-and the daemon listened at `voice.sock` inside it. A client started from a plain
-shell, with no `HERDR_` variable set at all, derived the same path from `$HOME`
-and reached that daemon: `doctor` reported `daemon ok` with the same name. The two
-derivations agree on Linux.
+daemon with `HERDR_PLUGIN_STATE_DIR` pointing at
+`<state>/herdr/plugins/haurylau.voice`, and the daemon listened at `voice.sock`
+inside it. A client started from a plain shell, with no `HERDR_` variable set at
+all, derived the same path from `$HOME` and reached that daemon: `doctor` reported
+`daemon ok` with the same name. The two derivations agree on Linux.
 
-**No capture device, and nothing to open it with yet.** The container had no
-`/dev/snd`, no PipeWire and no `arecord`, which is the state a headless Linux
-machine is in. Capture is issue #8 and is not on `main`, so the capture-facing
-command exits 69 and says `mic: not implemented yet`. The check records that as
-pending rather than as a pass, and fails outright on a hang, a signal, a panic or
-silence. **This section has to be re-run once #8 lands**, and the step in the
-script names what to change: drive a take through the `dictate` action and require
-a non-zero exit whose message names the missing device.
+**A daemon left over from an earlier run answers `doctor` and then goes away
+mid-request.** Between the first and second attempt at this run, a daemon that
+herdr had started from `[[startup]]` outlived the server that spawned it. The next
+run's `doctor` reported `daemon ok` — the socket was there and the connection was
+accepted — and the `dictate` that followed got no reply at all:
+`the daemon spoke something unexpected: malformed header: ""`. That message is
+what a client says when the daemon closes a connection without answering, and it
+is the right shape of failure: exit 1, a named cause, no hang. The cause was the
+check's own cleanup, which killed the server and the daemon it had started by
+hand but not the one herdr started; it now kills every `herdr-voice daemon` it can
+find, and both re-runs after that change were clean.
 
 Two smaller things, both about herdr rather than about the plugin. `herdr status
 server` exits 0 whether or not a server is running and says which in its output,
@@ -224,8 +291,24 @@ the exit code and reported a server that did not exist. And `herdr plugin link`
 works with no server running, which is what lets the plugin be linked first so
 that the server can run its `[[startup]]` entry.
 
-Not established here: audio capture on Linux, anything involving a real
-microphone, and the `x86_64` architecture — this run was `aarch64`.
+**The step was checked against a false pass.** A copy of the script judging an
+action that exits 69, "not implemented yet", was run through the same assertions,
+and the step failed: `the take reported 'not implemented yet'`. So the `no-device`
+step is not green because nothing tests it.
+
+Not established here, and each of these is a real gap rather than a formality:
+
+- **Recording from a real microphone on Linux.** The container has no sound
+  hardware, so every take in this run is a refusal. Nothing here shows that a
+  Linux machine with a working input produces 16 kHz mono, or what its levels
+  look like; that is still known only from macOS, in "Capture, by hand on macOS".
+- **A machine with no input devices at all.** ALSA offers its null device even
+  with no card, so the "no input devices at all" refusal was never reached.
+- **`x86_64`.** Both runs were `aarch64`. The release workflow builds for both,
+  and only one of them has now met a live herdr.
+- **The silence floor on Linux.** `[audio] silence_db` was left at its default and
+  no take ever produced samples to measure, so the floor was not exercised here.
+
 ## What the capture library offers
 
 Measured on macOS 25.6, Apple silicon, with `cpal` 0.18.2 in a throwaway crate
