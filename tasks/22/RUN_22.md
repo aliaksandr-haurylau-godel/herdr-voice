@@ -162,3 +162,35 @@ design drops the prototype's `--sound`, which no criterion asks for.
 
 Three citations in the design have drifted by a few lines each: `Command::Start`,
 `HERDR_BIN_PATH` in `src/doctor.rs`, and `stt::tests_support`.
+
+## Gate S2, second pass
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_22.md
+  reviewer: planner
+  verdict: READY
+  date: 2026-08-26
+  questions: []
+  blocker: null
+```
+
+Both claims the gate was asked to check hold. `capture::tests_support` exports only
+`SilentSource`, which pushes 4 800 zero samples; the scriptable fake and its tone
+generator are private to the test module, so the `ToneSource` the design adds is
+the minimal audible slice of them. It clears the floor with room to spare — the
+silence floor defaults to −60 dB and a 0.3-amplitude sine measures near −13 dB,
+the same amplitude an existing capture test already asserts stays above the floor.
+The step after the level check survives too: the WAV writer creates the take
+directory itself, so a daemon test whose takes directory does not exist still
+reaches transcription, which with the fake engine never opens the file.
+
+The `Runtime` change matches the code: `transcribe` is reached through `dictate`,
+`answer`, `serve_one`, `serve` and `start` — the five-function chain that threads
+the recognition engine today and that the design replaces with one bundle.
+
+Citations drift by a few lines in three more places, the same class as before. It
+changes no task boundary.
+
+S2 is closed. Next is S3 Plan.
