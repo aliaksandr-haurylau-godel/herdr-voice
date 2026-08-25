@@ -42,21 +42,41 @@ the check that matters is the one that runs before the commit.
 
 Work starts from a GitHub issue and moves through stages. Each stage produces one
 artifact, and the artifact is reviewed by whoever consumes it next before the
-stage closes. Stage definitions and verdict format live in the octoflow shared
-files; this file states only what is specific to this repository.
+stage closes. The verdict format lives in the octoflow shared files; the stages
+that apply here are the five below and no others.
 
 | Stage | Produces | Skill | Reviewed by |
 |---|---|---|---|
 | S1 Assess | `AC_<issue>.md` | `octoflow-assess` | designer, via `octoflow-gate` |
 | S2 Design | `DESIGN_<issue>.md` | `superpowers:brainstorming` | planner, via `octoflow-gate` |
 | S3 Plan | `PLAN_<issue>.md` | `superpowers:writing-plans` | implementer, via `octoflow-gate` |
-| S4 Implement | code | `superpowers:executing-plans` with `superpowers:test-driven-development` | `/code-review` |
+| S4 Implement | code | `superpowers:executing-plans` with `superpowers:test-driven-development` | `superpowers:requesting-code-review`, before a pull request exists |
+| S5 Verify | a section in `docs/evidence.md` | `superpowers:verification-before-completion` | the run records the verdict |
 
 Gate verdicts are `READY`, `QUESTIONS` or `BLOCKED`. `QUESTIONS` returns the
-artifact to its author; the reviewer never edits what it reviews.
+artifact to its author; the reviewer never edits what it reviews. Every verdict,
+including S4's and S5's, is recorded in `RUN_<issue>.md`.
 
-Before claiming that anything is done, run `superpowers:verification-before-completion`:
-evidence first, assertions after.
+**S4 closes on a review of the diff, not on a pull request.** `/code-review`
+runs only against an open pull request and answers with a comment rather than a
+verdict, so it cannot close a stage; use it after the pull request is open, as a
+second pass. The gate exists because two defects went through S4 unreviewed on
+2026-08-25 — a `cancel` that stops nothing, and a reply that arrives truncated
+along with the level and the target pane — and both were found by hand afterwards,
+since nothing looked at the code between "the tasks are done" and "the pull
+request is open".
+
+**S5 is a step that can fail, not a request.** Run the thing, read the whole
+output, and write what happened into `docs/evidence.md` with the platform it was
+verified on. A negative result, recorded, passes this stage; a claim with no
+command and no output beside it does not.
+
+The octoflow shared definitions also describe stages whose skills are not on
+disk — `octoflow-take`, `octoflow-design`, `octoflow-plan`, `octoflow-implement`,
+`octoflow-verify` and `octoflow-ship`. They do not apply here, and nothing
+outside this repository is edited to make that so: the same reason the stage
+reviewers are project agents in `.claude/agents/` rather than additions to
+anyone's global set.
 
 ### Trigger and run root
 
@@ -107,7 +127,9 @@ installs and then does nothing when its action is invoked. CI runs the same chec
 
 Infrastructure runs may skip S1 to S3 when the shape is already fixed by the
 design document, and say so in `RUN_<issue>.md`. Anything that changes behaviour
-goes through every stage.
+goes through every stage. S4 and S5 are never skipped: a run that writes no code
+still verifies what it did, and a run that writes code has its diff reviewed
+before the pull request.
 
 ## Testing
 
