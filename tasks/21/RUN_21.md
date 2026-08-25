@@ -83,8 +83,20 @@ criteria against `docs/design.md`, `docs/evidence.md`, `spike/context.sh`,
 `src/stt.rs`, `src/context.rs` and `src/config.rs`, and every citation it checked
 held.
 
-### Answer pending
+### Answered
 
-The first question is the owner's: a configuration key is a user-visible name.
-Asked on 2026-08-26. The second follows from it — a third value that means "decide
-per take" is what makes a set mode and an automatic fallback the same mechanism.
+The owner named the key: `[context] source`, three values, `auto` default —
+`auto` is the transcript falling back to the pane when none is found;
+`transcript` and `pane` are set modes where the other source is never
+consulted. That answers both questions at once rather than choosing between the
+two readings the second question posed: `auto` is reading (b) from the
+questions above, `transcript`/`pane` together are reading (a), and the key
+carries all three. `AC_21.md` was revised on 2026-08-26 to name the key in
+AC-3, AC-7 and the requirements, to state the herdr-call rule each value
+implies (never called under `transcript`/`pane` on the excluded path, called
+under `auto` only after the transcript search comes up empty), and to split
+open question 3 ("no conversation found at all") into its three per-value
+forms — the design decision itself (fail, proceed on file names, or report
+once) stays open, per value or otherwise. No entry was added to
+`docs/decisions.md`: the key is the owner's decision, not one taken during this
+revision.
