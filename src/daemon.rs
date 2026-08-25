@@ -552,6 +552,71 @@ mod tests {
         );
     }
 
+    /// A journal that pushes into a trace shared with a deliverer, so a test
+    /// can see the two interleaved rather than only each one's own order.
+    struct TracingJournal(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl Journal for TracingJournal {
+        fn write(&self, line: &str) {
+            self.0.lock().unwrap().push(format!("journal:{line}"));
+        }
+    }
+
+    /// Wraps a `FakeDeliverer`, recording each call into the same trace a
+    /// `TracingJournal` writes to, before delegating to the fake's own
+    /// behavior (result and call log). This is what lets a test tell "the
+    /// journal line was written" apart from "the journal line was written
+    /// before delivery was attempted" — asserting only the two journal lines'
+    /// order relative to each other proves neither, since both are written
+    /// only after `deliver` returns.
+    struct TracingDeliverer {
+        trace: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        inner: crate::delivery::tests_support::FakeDeliverer,
+    }
+    impl crate::delivery::Deliverer for TracingDeliverer {
+        fn insert(&self, pane: &str, text: &str) -> Result<(), crate::delivery::DeliveryError> {
+            self.trace.lock().unwrap().push(format!("deliver:insert:{pane}"));
+            self.inner.insert(pane, text)
+        }
+        fn submit(&self, pane: &str, text: &str) -> Result<(), crate::delivery::DeliveryError> {
+            self.trace.lock().unwrap().push(format!("deliver:submit:{pane}"));
+            self.inner.submit(pane, text)
+        }
+        fn notify(&self, title: &str, body: &str) -> Result<(), crate::delivery::DeliveryError> {
+            self.trace.lock().unwrap().push("deliver:notify".to_string());
+            self.inner.notify(title, body)
+        }
+    }
+
+    #[test]
+    fn the_delivering_line_is_written_before_delivery_is_attempted_not_merely_before_the_failure_line(
+    ) {
+        let recorder = tone_recorder("journal-pinned");
+        let trace = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let deliverer = TracingDeliverer {
+            trace: std::sync::Arc::clone(&trace),
+            inner: crate::delivery::tests_support::FakeDeliverer::failing(
+                crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+            ),
+        };
+        let mut runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.deliverer = Box::new(deliverer);
+        runtime.journal = Box::new(TracingJournal(std::sync::Arc::clone(&trace)));
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        let trace = trace.lock().unwrap();
+        assert_eq!(
+            *trace,
+            vec![
+                "journal:delivering: fix the worklog entry".to_string(),
+                "deliver:insert:w1:p2".to_string(),
+                "journal:delivery failed: pane=w1:p2 reason=pane_not_found".to_string(),
+            ],
+            "the delivering line must precede the delivery attempt itself, not just the failure line"
+        );
+    }
+
     #[test]
     fn a_toast_is_raised_on_a_failed_delivery_only_when_ui_toasts_is_on() {
         for (toasts, expect_notify) in [(true, true), (false, false)] {
