@@ -4,7 +4,7 @@
 |---|---|
 | issue | #13 — Recognition: transcribe a take with candle, and let the person choose the model |
 | input | GitHub issue, read with `gh issue view 13` |
-| stage | S1 |
+| stage | S2 |
 | branch | feat/13-recognition |
 | opened | 2026-08-25 |
 
@@ -109,6 +109,51 @@ Dropping the placeholder, or the argument before it, would be a rule nothing
 states.
 
 A revised artifact needs a new verdict; the gate runs again.
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_13.md
+  reviewer: designer
+  verdict: READY
+  date: 2026-08-25
+  questions: []
+  blocker: null
+  notes:
+    - "The narrowing to one engine is consistent where it matters. AC-6 no longer demands a named failure for an unconfigured endpoint, only 'not built in this version', which needs no key, no wire contract and no HTTP client. Two leftover mentions of `http` are statements about that engine's nature, not build obligations."
+    - "The `auto` answer is designable: substitution is unconditional, so `{language}` is one string replacement with no neighbouring-argument rule, and the owner-written argument list is where the omission case lives."
+    - "As-is claims check out against the branch: `src/config.rs:50`, `src/config.rs:64`, `src/doctor.rs:192` matching by `contains`, `src/doctor.rs:260`, and `dictate` answering with path, level and target at `src/daemon.rs:85-90`."
+    - "One thing I will decide in the design rather than ask about: whether the model contract gates a command whose argument list contains no `{model}` placeholder."
+    - "Separate note: with the default engine `candle` and an empty command list, a fresh install transcribes nothing until two keys are set. The criteria state that deliberately, so it is the owner's call and not a gap."
+```
+
+### S2 Design
+- artifact: `DESIGN_13.md`
+- produced: 2026-08-25
+
+Four decisions. The interface takes only the path, because the path is the only
+thing that changes between takes — which also puts the model check at the moment
+somebody can still be told what to fix, rather than in the middle of a recording.
+
+The command is an argument list with placeholders, and the reviewer's open point is
+answered rather than deferred: a list with no `{model}` placeholder brings its own
+model, so the model contract does not gate it. Demanding a model this plugin manages
+would refuse a working setup.
+
+A model is usable after four checks in order — the exact name, a plausible size,
+the `ggml` magic, and a `.sha256` sidecar when one exists — and each catches
+something the next cannot. `doctor` and the engine call the same function so they
+cannot disagree.
+
+An engine that cannot run gives one of four answers, each naming what to set, and
+never falls back to an engine that works. One "recognition is not available" would
+make somebody guess which of four things to fix.
+
+One thing the design adds that the criteria did not ask for, because it comes from
+the environment rather than the requirements: herdr starts plugin commands with a
+minimal `PATH`, and the daemon is started by herdr. A program found in an
+interactive shell may be absent from the daemon's, so "not found" reports the `PATH`
+it actually searched.
 
 ## Notes
 
