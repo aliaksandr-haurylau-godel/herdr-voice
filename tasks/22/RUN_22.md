@@ -138,3 +138,27 @@ the key already exists — and it is recorded in `docs/decisions.md`.
 
 S1 is closed. Next is S2 Design, which by its own rule stops for the owner's
 approval of the intent before anything is implemented.
+
+## Gate S2
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_22.md
+  reviewer: planner
+  verdict: QUESTIONS
+  date: 2026-08-26
+  questions:
+    - "The daemon test that proves delivery is called needs transcribe's success path to be reachable, which needs recorder.stop() to return a Take. The only source daemon.rs can reach is capture::tests_support::SilentSource, which pushes zero samples, so the take is refused as too quiet and transcribe is never entered — which is why the existing test asserts on 'below ... dB'. The audible source that would produce a real Take lives in capture.rs's private test module, not in tests_support. No section says who exports an audible source, and the capture row of the task table scopes capture to Take.agent only. The daemon-test task therefore has an input nobody produces and an undeclared dependency on the capture task."
+    - "The journal lines are specified as eprintln! inside transcribe, while the task table claims a daemon test proving that the line with the text appears before delivery is called. Standard error written by eprintln! is not readable from inside the test process, and no existing test asserts on it: this codebase makes journal text testable by returning it from a pure function and calling eprintln! at the call site, the way request_line and context_note do. Which shape delivery's journal lines take is not stated, and it changes transcribe's signature — a returned line or a passed writer rather than a bare eprintln!. That is the interface between the daemon-wiring task and the task that verifies the journal-line criteria."
+  blocker: null
+```
+
+Both citation checks the gate was asked to run hold: `spike/spike.sh` really calls
+`herdr notification show` with a `--body`, and the agent-name threading matches the
+shape of `src/capture.rs` — `Take`, `Command::Start`, `Running` and
+`Recorder::start` all take one more field beside `target` without resistance. The
+design drops the prototype's `--sound`, which no criterion asks for.
+
+Three citations in the design have drifted by a few lines each: `Command::Start`,
+`HERDR_BIN_PATH` in `src/doctor.rs`, and `stt::tests_support`.
