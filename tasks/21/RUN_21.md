@@ -192,3 +192,40 @@ recognition already covers an absent home directory. And `dictate` currently
 receives only the pane string although the parsed invocation with the working
 directory and the agent name is available one frame up — plan-level work, not a
 design gap.
+
+## Gate S2, third pass
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_21.md
+  reviewer: planner
+  verdict: READY
+  date: 2026-08-26
+  questions: []
+  blocker: null
+```
+
+S2 is closed.
+
+## Sequencing against issue 22
+
+Issue 22 lands first, and this run builds on what it leaves behind. Both runs
+change how the daemon carries per-take state, in opposite directions: 22 replaces
+the recognition engine threaded through `start`, `serve`, `serve_one`, `answer`,
+`dictate` and `transcribe` with one bundle, while this design holds the resolved
+context source beside that same engine — the parameter 22 removes. Whichever
+landed second would rewrite its own threading work.
+
+Three consequences for the plan of this run:
+
+- The resolved context source becomes a field of 22's bundle rather than a value
+  held beside the recognition engine.
+- The helper that runs the `herdr` binary through `HERDR_BIN_PATH` is 22's to
+  extract from `doctor`. This run consumes it and does not extract it again.
+- The working directory and the agent name reach `dictate` by 22's threading. This
+  run needs both — the first to derive the project directory, the second to decide
+  whether a conversation is sought at all — and adds neither itself.
+
+This is sequencing between two runs rather than a change to either design, so
+neither artifact is reopened.
