@@ -158,11 +158,16 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take) -> Reply {
                 .write(&delivery_failed_line(&take.target, &why));
             if runtime.delivery_settings.toasts {
                 // A toast that could not be shown must not stop the journal
-                // line or the client's reply from getting through.
-                let _ = runtime.deliverer.notify(
+                // line or the client's reply from getting through — but its
+                // own failure is still a lost diagnostic, so it is journaled.
+                if let Err(toast_why) = runtime.deliverer.notify(
                     "Delivery failed",
                     &format!("{}: the text is in the plugin log", take.target),
-                );
+                ) {
+                    runtime
+                        .journal
+                        .write(&toast_failed_line(&toast_why.to_string().replace('\n', " ")));
+                }
             }
             Reply::Error(format!(
                 "could not deliver to {} ({why}) — the take is kept at {}; text: {}",
@@ -221,6 +226,14 @@ pub fn delivering_line(text: &str) -> String {
 /// Written when a delivery attempt is rejected.
 pub fn delivery_failed_line(target: &str, why: &str) -> String {
     format!("delivery failed: pane={target} reason={why}")
+}
+
+/// Written when the toast itself could not be raised — herdr's `notification
+/// show` failed on top of the delivery it was reporting. The delivery-failed
+/// line above already carries the pane and the reason; this line exists so
+/// that a toast nobody saw is not also a diagnostic nobody sees.
+pub fn toast_failed_line(why: &str) -> String {
+    format!("toast failed: {why}")
 }
 
 pub fn start() -> Result<Outcome, TransportError> {
@@ -567,6 +580,34 @@ mod tests {
     }
 
     #[test]
+    fn a_toast_that_cannot_be_raised_is_still_recorded_in_the_journal() {
+        let recorder = tone_recorder("toast-fails");
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        )
+        .and_notify_fails(crate::delivery::DeliveryError::NotFound {
+            binary: "herdr".into(),
+            path: "/usr/bin".into(),
+        });
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = runtime_with(fake, false);
+        runtime.delivery_settings.toasts = true;
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        let lines = journal.0.lock().unwrap();
+        assert_eq!(lines.len(), 3, "the toast's own failure must be journaled too, got {lines:?}");
+        assert!(lines[0].contains("fix the worklog entry"), "got {lines:?}");
+        assert!(
+            lines[1].contains("w1:p2") && lines[1].contains("pane_not_found"),
+            "got {lines:?}"
+        );
+        assert!(lines[2].contains("toast"), "got {lines:?}");
+    }
+
+    #[test]
     fn cancel_needs_no_pane_and_dictate_does() {
         assert!(!needs_target_pane("cancel"));
         assert!(needs_target_pane("dictate"));
@@ -706,6 +747,12 @@ mod tests {
         let line = delivery_failed_line("w99:p99", "pane_not_found");
         assert!(line.contains("w99:p99"));
         assert!(line.contains("pane_not_found"));
+    }
+
+    #[test]
+    fn the_toast_failed_line_names_the_reason() {
+        let line = toast_failed_line("herdr not found");
+        assert!(line.contains("herdr not found"), "got {line:?}");
     }
 
     #[test]

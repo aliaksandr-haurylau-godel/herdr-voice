@@ -74,6 +74,10 @@ pub mod tests_support {
     #[derive(Clone)]
     pub struct FakeDeliverer {
         result: Result<(), DeliveryError>,
+        /// Independent of `result`: a test proving the toast's own failure is
+        /// handled needs `insert`/`submit` to fail (so a toast is attempted at
+        /// all) while `notify` fails for its own, separate reason.
+        notify_result: Result<(), DeliveryError>,
         calls: Arc<Mutex<Vec<Call>>>,
     }
 
@@ -81,14 +85,21 @@ pub mod tests_support {
         pub fn ok() -> Self {
             FakeDeliverer {
                 result: Ok(()),
+                notify_result: Ok(()),
                 calls: Arc::new(Mutex::new(Vec::new())),
             }
         }
         pub fn failing(with: DeliveryError) -> Self {
             FakeDeliverer {
                 result: Err(with),
+                notify_result: Ok(()),
                 calls: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+        /// Makes `notify` fail too, on top of whatever `result` already governs.
+        pub fn and_notify_fails(mut self, with: DeliveryError) -> Self {
+            self.notify_result = Err(with);
+            self
         }
         pub fn calls(&self) -> Vec<Call> {
             self.calls.lock().unwrap().clone()
@@ -115,7 +126,7 @@ pub mod tests_support {
                 .lock()
                 .unwrap()
                 .push(Call::Notify(title.to_string(), body.to_string()));
-            Ok(())
+            self.notify_result.clone()
         }
     }
 }
