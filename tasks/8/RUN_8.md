@@ -4,7 +4,7 @@
 |---|---|
 | issue | #8 — Capture: record from a named device at 16 kHz mono, and check the take was not silent |
 | input | GitHub issue, read with `gh issue view 8` |
-| stage | S2 |
+| stage | S4 |
 | branch | feat/8-capture |
 | opened | 2026-08-24 |
 
@@ -145,6 +145,44 @@ So `dictate` stays where issue 3 put it. The target is pinned when a take begins
 and held until delivery, and a take does not start when no pane can be determined —
 losing a take is worse than nothing, and better than delivering it to the wrong
 agent.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_8.md
+  reviewer: implementer
+  verdict: READY
+  date: 2026-08-25
+  questions: []
+  blocker: null
+  notes:
+    - "Not a gate question: Task 5 gives `stop()` a full signature but never states `start()`'s return type, while Task 7 needs `start()` to distinguish three outcomes — a fresh take began, a take is already running, and a remembered mid-take failure to report and clear without starting. The behaviour is fully determined by DESIGN_8 section 2a, so it is a signature I choose, not a decision I invent."
+    - "Not a gate question: adding an `f32` field to `Config` breaks its `#[derive(Eq)]`. One line to fix, and the compiler names it immediately."
+    - "Checked against the code: `transport::state_directory` exists and matches what section 5 relies on; `needs_target_pane`, the `IMPLEMENTED` guard test and `answer`'s dispatch are where task 7 says; the manifest needs no change since `dictate` is already declared; the workflow has no ALSA step, matching task 0's premise. Every module tasks 1 to 6 name is new work."
+    - "The gap the S2 gate raised is resolved in the artifact I read, and nothing in the plan reopens it."
+```
+
+### S3 Plan — revised after the verdict
+- artifact: `PLAN_8.md`, tasks 5, 6 and 7
+- produced: 2026-08-25
+
+Three changes, none of which grows the work.
+
+Task 7 no longer proposes taking `dictate` out of `needs_target_pane`; the reason
+is above, under "a reversal withdrawn". The task gets smaller: the guard test in
+`src/main.rs` stays as it is.
+
+Task 5 now states `start`'s return type, which the reviewer said it would otherwise
+choose while writing: three outcomes, because task 7 has to tell them apart. The
+target pane is passed in at `start` and kept with the take, which is what pinning
+means in code.
+
+Task 6 records that `f32` costs `Config` its `Eq` derive.
+
+The verdict above was given on the version before these changes. Task 0 — the ALSA
+step in CI — is untouched by all three and is independent of every other task, so
+it proceeds while the gate runs again on the revised plan. Nothing else starts
+before that verdict.
 
 ## Notes
 

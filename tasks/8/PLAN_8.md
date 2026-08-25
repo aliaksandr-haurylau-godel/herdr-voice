@@ -109,8 +109,14 @@ sure it fails without the filter.
 - `pub enum Event { Samples(Vec<f32>), Failed(String) }` and a source that produces
   them, with two implementations: `cpal`, and a fake driven by a script.
 - `pub struct Recorder` owning one thread for the daemon's life, with
-  `start()`, `stop() -> Result<Take, CaptureError>`, and a remembered failure.
+  `start(target: &str) -> Started`, `stop() -> Result<Take, CaptureError>`, and a
+  remembered failure.
+- `pub enum Started { Began, AlreadyRunning, PreviousFailure(String) }` — the three
+  outcomes task 7 has to tell apart: a take began, one is already running so this is
+  the toggle's second half, or the previous take died with the device and its reason
+  is being reported and cleared without starting anything.
 - `pub struct Take { pub path: PathBuf, pub level_dbfs: f32 }`.
+- The target pane is passed in at `start` and kept with the take.
 - The take's path: `<state>/takes/<milliseconds>-<pid>-<counter>.wav`.
 **Done when:** tests drive the fake source through start, stop, start-while-running,
 stop-with-nothing, a source that fails mid-take, and a take below the threshold —
@@ -131,6 +137,8 @@ work onto that thread, never to wrap the stream.
 **Done when:** tests cover the defaults, a partial file, and an unknown key inside
 `[audio]` being ignored. The existing test that proves `[audio]` parses and is
 dropped is updated rather than deleted.
+**Watch for:** `silence_db` is an `f32`, and `Config` derives `Eq` today. `f32` has
+no `Eq`, so the derive loses it; the tests only ever need `PartialEq`.
 **Depends on:** nothing.
 
 ---
@@ -149,11 +157,12 @@ dispatches `dictate` to the client instead of exiting 69.
   `src/main.rs` is updated to say so;
 - `cargo test --all`, clippy, fmt and the manifest check all pass.
 **Depends on:** Tasks 5 and 6.
-**Watch for:** `needs_target_pane` already lists `dictate`. A take needs no pane —
-the pane matters at delivery — so `dictate` moves off that list, and the test that
-asserts it is on the list changes with it. Say so in the commit message: it reverses
-a decision from issue #3, which took it on the assumption that dictation delivers
-in one step.
+**Watch for:** `needs_target_pane` already lists `dictate` and stays that way. The
+pane is pinned when the take begins and kept with it until delivery — the indicator
+of `docs/design.md` section 6 is drawn on a specific pane from the moment recording
+starts, and a target chosen at the end would follow the focus while the person is
+still speaking. A `dictate` that cannot name a pane does not start a take and says
+why.
 
 ---
 
