@@ -375,3 +375,34 @@ newline is truncated silently, losing the remainder of the transcript along with
 the level and the target pane (#19).
 
 The rewrite stage's default model is recorded in `docs/decisions.md`.
+
+## S4 gate
+
+A reviewer read `main...HEAD` and returned four findings, no severe ones: no
+panic paths, no silent failures, no device selection by index.
+
+Acted on, in `f30f62a`:
+
+- `doctor` read and hashed the model file twice per invocation, because the
+  engine line and the model line each asked for the same lookup. On a
+  multi-gigabyte model with a `.sha256` sidecar that is the whole file read and
+  hashed twice for two report lines. `stt::locate_configured_model` now does the
+  lookup once and both lines derive from it. A test counts the calls and pins it
+  at one; it was red at two before the change.
+- The module comment promised five report lines where six are printed.
+- `asks_for_a_model` in `doctor.rs` duplicated the rule `stt::resolve` uses to
+  decide whether a model is needed. Removed; the rule has one home now.
+
+Not acted on: the reviewer noted that `"command" is ready` claims more than was
+checked, since a program absent from `PATH` is only found when a take runs. The
+design defers that check to run time deliberately, and the string is user-visible,
+so changing it is the owner's call rather than this run's.
+
+## S5 verification
+
+Run on macOS 26.6.2, Apple silicon, against the fixed build: `doctor` prints the
+same six lines it did before the change, with `engine ok "command" is ready` and
+`model ok`. 125 tests pass, clippy is clean under `-D warnings`, `cargo fmt
+--check` is clean, and `scripts/check_manifest.py` reports 11 entries with all
+commands known. The spoken take and the three transcription comparisons are in
+`docs/evidence.md` under "Recognition, by hand on macOS".
