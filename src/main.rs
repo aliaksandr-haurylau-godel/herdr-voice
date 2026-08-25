@@ -16,6 +16,7 @@ mod context;
 mod daemon;
 mod doctor;
 mod proto;
+mod stt;
 mod transport;
 
 use std::process::ExitCode;

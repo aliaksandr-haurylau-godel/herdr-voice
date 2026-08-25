@@ -4,7 +4,7 @@
 |---|---|
 | issue | #13 — Recognition: transcribe a take with candle, and let the person choose the model |
 | input | GitHub issue, read with `gh issue view 13` |
-| stage | S2 |
+| stage | S4 |
 | branch | feat/13-recognition |
 | opened | 2026-08-25 |
 
@@ -229,6 +229,66 @@ Both separate notes are taken too: `doctor` gains a fourth state beside `ok`,
 `default` and `missing`, and the README line has a module row of its own.
 
 A revised artifact needs a new verdict; the gate runs again.
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_13.md
+  reviewer: planner
+  verdict: READY
+  date: 2026-08-25
+  questions: []
+  blocker: null
+  notes:
+    - "The bound is now one rule and it cuts: bound to the command name, the module table says the same, and the client task has one input, one output and one done-criterion. The cost is stated in the design rather than left to be found in the field."
+    - "AC-11 mapping to 4a and 5 does not give the client task a second done-criterion: 4a is a precondition for that criterion holding, not a second producer of it."
+    - "Both earlier notes are closed: AC-14 maps to a module row with a checkable criterion, and the `doctor` fourth state is named with its content."
+    - "As-is claims check out: `REPLY_TIMEOUT` two seconds at `src/client.rs:18`, `src/main.rs:145` passing a bare command name, `Started::Began` against `AlreadyRunning` in the daemon, three `State` variants at `src/doctor.rs:21`, `Stt` with only `model`, and no recognition line in the README."
+```
+
+### S3 Plan
+- artifact: `PLAN_13.md`
+- produced: 2026-08-25
+
+Nine tasks, no implementation code, no new dependencies: running a program is
+`std::process`.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_13.md
+  reviewer: implementer
+  verdict: READY
+  date: 2026-08-25
+  questions: []
+  blocker: null
+  notes:
+    - "Task 1 is already implemented in the working tree and matches its done-criterion exactly."
+    - "Task 3's wording about a rendered argument list reads oddly next to `render`'s per-call audio argument, but the design resolves it: the engine holds the template, the model and the language, and renders the path at transcribe time, since the path is the only thing that changes between takes."
+    - "Tasks that omit a mechanical detail all match a pattern already used once in this crate for the same purpose, so writing them is not guessing."
+    - "The run file has no appended READY block for S2 before the plan was written — bookkeeping, not a gap in the plan."
+```
+
+The last note is right and is fixed above: the S2 verdict was recorded here only
+now, after the plan had already been written against it. The verdict existed and
+the plan waited for it; the writing-down did not.
+
+### S4 Implement — tasks 1 to 4
+- artifact: `[stt]` keys in `src/config.rs`, `src/stt/model.rs`, `src/stt/command.rs`,
+  `src/stt.rs`
+- produced: 2026-08-25
+- verification: 117 tests
+
+One defect was caught before it was committed, and it is the same shape as the one
+hand verification found in issue 8: the command engine rendered its argument list
+when it was built, before any take existed, so the program was handed the literal
+`{audio}` and never saw the file. The engine now holds the template and renders at
+transcription time, and two tests pin it: the take's path reaches the program, and
+a list with no placeholder still receives it.
+
+The digest the model check needs is written here rather than taken as a dependency,
+and it is verified against the published SHA-256 vectors — a hand-written hash that
+is not checked against a known answer is an assumption, not a check.
 
 ## Notes
 
