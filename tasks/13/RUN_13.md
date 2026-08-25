@@ -71,6 +71,45 @@ There is no fourth engine. The criterion said four and was wrong.
 
 A revised artifact needs a new verdict; the gate runs again.
 
+```yaml
+gate:
+  stage: S1
+  artifact: AC_13.md
+  reviewer: designer
+  verdict: QUESTIONS
+  date: 2026-08-25
+  questions:
+    - "AC-6: under which configuration key is the `http` endpoint set, and what is the request and response contract? The artifact names and defaults `[stt] command` and records it as the owner's to confirm, but the endpoint has no key anywhere, while AC-6 requires 'an endpoint that is not configured' to be a distinct named failure. Designing it means inventing a user-visible name, its default, whether a token and a model ride with it, what is posted and where the transcript is read from — the same class of decision the artifact just refused to take alone for `command`."
+    - "AC-3 against AC-12 for a command with `language = \"auto\"`: AC-3 replaces every placeholder, AC-12 says auto means the engine decides rather than a literal value being sent. For `[\"-l\", \"{language}\"]` that is three different programs — substitute `auto`, drop the argument, or drop it and the one before it — and nothing chooses."
+  blocker: null
+  notes:
+    - "Not a question: the `http` engine will need a blocking HTTP client crate, which meets the standing dependency decision. I can take and record that myself; only the user-visible key is out of my hands."
+    - "Everything the first gate asked was answered and the answers hold against the code and the design: `[stt] model` as an identifier with the file `ggml-<model>.bin` matches `models_directory()` in `src/doctor.rs:260` and the default in `src/config.rs:64`; the `ggml` magic is the byte order a whisper.cpp model actually begins with; the engine set is three and agrees with `docs/design.md:112-117`."
+```
+
+### S1 Assess — the endpoint engine leaves the issue
+- artifact: `AC_13.md`, chosen readings and five criteria
+- produced: 2026-08-25
+
+The first question is answered by removing its subject rather than by inventing
+what it asks for. Everything the endpoint engine needs — a key, a default, whether
+a token and a model travel with it, what is posted, where the transcript is read
+from — is a user-visible decision of the same class as `[stt] command`, and it
+needs an HTTP client dependency besides. None of it is on the path to a working
+chain, which the external command already reaches. It becomes issue #16, and this
+issue builds one engine.
+
+That is the third narrowing of this issue tonight, and it is the only one that
+makes the night's work smaller in every direction at once: fewer names invented
+without the owner, one fewer dependency, and the same chain reached.
+
+The second question is answered by not inventing a rule: `auto` is substituted like
+any other value, because `auto` is what these programs already understand.
+Dropping the placeholder, or the argument before it, would be a rule nothing
+states.
+
+A revised artifact needs a new verdict; the gate runs again.
+
 ## Notes
 
 The prototype passed a bias prompt to `whisper-cli`. That prompt is context, and
