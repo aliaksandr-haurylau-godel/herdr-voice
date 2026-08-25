@@ -149,6 +149,31 @@ pub fn request_line(request: &Request) -> String {
     )
 }
 
+/// Where a journal line goes. Production writes to standard error, the
+/// channel request_line/context_note already use; a test substitutes
+/// something it can read back, in order, without touching real stderr.
+pub trait Journal: Send + Sync {
+    fn write(&self, line: &str);
+}
+
+pub struct StderrJournal;
+impl Journal for StderrJournal {
+    fn write(&self, line: &str) {
+        eprintln!("{line}");
+    }
+}
+
+/// Written before a delivery attempt, so the text is not held only in
+/// memory while the outward call to herdr runs.
+pub fn delivering_line(text: &str) -> String {
+    format!("delivering: {text}")
+}
+
+/// Written when a delivery attempt is rejected.
+pub fn delivery_failed_line(target: &str, why: &str) -> String {
+    format!("delivery failed: pane={target} reason={why}")
+}
+
 pub fn start() -> Result<Outcome, TransportError> {
     let address = transport::address(&transport::Vars::from_env())?;
 
@@ -404,6 +429,18 @@ mod tests {
             context: vec![],
         };
         assert!(request_line(&anonymous).contains("entrypoint=-"));
+    }
+
+    #[test]
+    fn the_delivering_line_carries_the_text() {
+        assert!(delivering_line("fix the worklog entry").contains("fix the worklog entry"));
+    }
+
+    #[test]
+    fn the_delivery_failed_line_names_the_pane_and_the_reason() {
+        let line = delivery_failed_line("w99:p99", "pane_not_found");
+        assert!(line.contains("w99:p99"));
+        assert!(line.contains("pane_not_found"));
     }
 
     #[test]
