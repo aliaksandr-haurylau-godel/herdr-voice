@@ -449,3 +449,19 @@ socket path is bound by `sun_path`, 104 bytes on macOS, and the daemon refused w
 names the cause and the path, so nothing is silent about it, but the default state
 directory is already long and a longer account name would reach the limit on a real
 installation. This run used a short state directory for that reason.
+
+## Delivering into a pane that is gone
+
+macOS 26.6.2, herdr 0.8.2. Measured because a criterion for issue #22 turned on
+it: whether a pane that has disappeared makes delivery fail loudly or quietly.
+
+| command, against a pane id that does not exist | result |
+|---|---|
+| `herdr pane send-text "w99:p99" "probe"` | `{"error":{"code":"pane_not_found","message":"pane w99:p99 not found"}}`, exit 1 |
+| `herdr agent prompt "w99:p99" "probe"` | `{"error":{"code":"agent_not_found","message":"agent target w99:p99 not found"}}`, exit 1 |
+
+**A pane that is gone is an ordinary rejected call, not a silent success.** Neither
+command needs a preceding existence check, and neither can deliver into nothing
+while reporting success — which is what the criterion was written to prevent. The
+error carries a machine-readable code, so a failure can name the pane and the
+reason without parsing prose.
