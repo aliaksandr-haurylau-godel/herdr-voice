@@ -100,3 +100,40 @@ forms — the design decision itself (fail, proceed on file names, or report
 once) stays open, per value or otherwise. No entry was added to
 `docs/decisions.md`: the key is the owner's decision, not one taken during this
 revision.
+
+## Gate S1, second pass
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_21.md
+  reviewer: designer
+  verdict: READY
+  date: 2026-08-26
+  questions: []
+  blocker: null
+```
+
+The ticket body was given to the reviewer in the request this time. The first pass
+had no shell and could not read it, so requirements attributed to the ticket went
+unchecked; this pass judged them against the ticket itself.
+
+Notes the reviewer left for the design, none of them gate questions:
+
+- The pane source needs an outward call that does not exist yet. `src/transport.rs`
+  is the plugin's own socket and `src/client.rs` its command-line side; there is no
+  herdr client. The prototype names the exact contract —
+  `herdr pane read "$pane" --source recent --lines "$CTX_LINES" --format text` in
+  `spike/context.sh` — and the invocation context already carries the pane id, the
+  working directory and the agent kind, so the mechanism is designable without a
+  new requirement.
+- The `pane` branch has no budget of its own among the four keys: `conversation_turns`
+  counts transcript turns, and no line count appears. The prototype's 80 lines and
+  the `prompt_chars` cap bound the output, so this settles from the reference the
+  ticket points at.
+- `docs/design.md` also lists branch, pane title and agent kind as context
+  components, and the prototype builds its hotword string from those plus file
+  names, while these criteria cover conversation plus file names. The ticket does
+  not ask for the other three, so their absence is scope rather than a gap.
+
+S1 is closed. Next is S2 Design.
