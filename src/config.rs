@@ -48,7 +48,15 @@ impl Default for Audio {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Stt {
+    /// A model identifier, not a file name: the file is `ggml-<model>.bin`.
     pub model: String,
+    /// `candle`, `http` or `command`. The first two are not built yet.
+    pub engine: String,
+    /// The spoken language, or `auto` to let the engine decide.
+    pub language: String,
+    /// The program and its arguments for `engine = "command"`, with `{audio}`,
+    /// `{model}` and `{language}` replaced before it runs. Provisional name.
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -62,6 +70,9 @@ impl Default for Stt {
     fn default() -> Self {
         Stt {
             model: "large-v3-turbo".to_string(),
+            engine: "candle".to_string(),
+            language: "auto".to_string(),
+            command: Vec::new(),
         }
     }
 }
@@ -169,6 +180,9 @@ mod tests {
         assert_eq!(defaults.audio.input, "");
         assert_eq!(defaults.audio.silence_db, -60.0);
         assert_eq!(defaults.stt.model, "large-v3-turbo");
+        assert_eq!(defaults.stt.engine, "candle");
+        assert_eq!(defaults.stt.language, "auto");
+        assert!(defaults.stt.command.is_empty());
         assert_eq!(defaults.rewrite.engine, "agent");
         assert_eq!(defaults.rewrite.agent, "auto");
     }
@@ -257,6 +271,41 @@ mod tests {
             Source::Invalid { why, .. } => assert!(!why.is_empty()),
             other => panic!("expected invalid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_recognition_keys_are_read() {
+        let directory = scratch("stt");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[stt]\nengine = \"command\"\nlanguage = \"en\"\n\
+             command = [\"whisper-cli\", \"-m\", \"{model}\", \"-f\", \"{audio}\"]\n",
+        )
+        .unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(loaded.config.stt.engine, "command");
+        assert_eq!(loaded.config.stt.language, "en");
+        assert_eq!(loaded.config.stt.command.len(), 5);
+        assert_eq!(loaded.config.stt.command[0], "whisper-cli");
+        // The rest still comes from the defaults.
+        assert_eq!(loaded.config.stt.model, "large-v3-turbo");
+    }
+
+    #[test]
+    fn an_unknown_key_inside_stt_is_ignored() {
+        let directory = scratch("stt-unknown");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[stt]\nengine = \"command\"\nbeam_size = 5\n",
+        )
+        .unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(loaded.config.stt.engine, "command");
+        assert!(
+            matches!(loaded.source, Source::File(_)),
+            "an unknown key must not make the file invalid, got {:?}",
+            loaded.source
+        );
     }
 
     #[test]

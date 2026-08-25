@@ -1,13 +1,15 @@
 //! What is missing, and what to do about it.
 //!
-//! Five lines in a fixed order. The prototype's worst failure was silence: a parse
-//! error produced no output and looked like a hang for a morning, so every line
-//! that is not `ok` names the next action. See `tasks/3/DESIGN_3.md`, section 4.
+//! Six lines in a fixed order: herdr, daemon, config, engine, model, rewrite. The
+//! prototype's worst failure was silence: a parse error produced no output and
+//! looked like a hang for a morning, so every line that is not `ok` names the next
+//! action. See `tasks/3/DESIGN_3.md`, section 4.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{self, Source};
+use crate::stt::{self, model};
 use crate::transport;
 use crate::MIN_HERDR_VERSION;
 
@@ -22,6 +24,10 @@ pub enum State {
     Ok,
     Default,
     Missing,
+    /// Nothing in this configuration would ever look for a model: the engine is
+    /// not built, or its argument list has no `{model}` placeholder. Distinct from
+    /// `Missing`, which would send somebody to download a file nothing would read.
+    NotUsed,
 }
 
 impl State {
@@ -30,6 +36,7 @@ impl State {
             State::Ok => "ok",
             State::Default => "default",
             State::Missing => "missing",
+            State::NotUsed => "unused",
         }
     }
 }
@@ -185,28 +192,68 @@ pub fn config_finding(loaded: &config::Loaded) -> Finding {
     }
 }
 
-pub fn model_finding(models: &Path, model: &str) -> Finding {
-    let found = std::fs::read_dir(models).ok().and_then(|entries| {
-        entries
-            .filter_map(Result::ok)
-            .find(|entry| entry.file_name().to_string_lossy().contains(model))
-    });
-    match found {
-        Some(entry) => Finding {
-            name: "model",
+/// What `stt::resolve_with` reports for the configured engine, printed exactly as
+/// the daemon would print it — so doctor and the daemon can never disagree. Takes a
+/// model lookup already performed elsewhere (`engine_and_model_findings`, below) so
+/// that reporting on both the engine and the model needs only one `locate` call.
+fn engine_finding_from(
+    stt: &config::Stt,
+    model: Option<Result<PathBuf, model::ModelError>>,
+) -> Finding {
+    match stt::resolve_with(stt, model) {
+        Ok(_) => Finding {
+            name: "engine",
             state: State::Ok,
-            detail: format!("{}", entry.path().display()),
+            detail: format!("{:?} is ready", stt.engine),
         },
+        Err(e) => Finding {
+            name: "engine",
+            state: State::Missing,
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// The model line. Takes a model lookup already performed elsewhere
+/// (`engine_and_model_findings`, below) for the same reason `engine_finding_from`
+/// does: one `locate` call answers both lines, not one each.
+fn model_finding_from(
+    stt: &config::Stt,
+    models: &Path,
+    model: Option<Result<PathBuf, model::ModelError>>,
+) -> Finding {
+    match model {
         None => Finding {
             name: "model",
-            state: State::Missing,
+            state: State::NotUsed,
             detail: format!(
-                "no file naming {model} in {}; put a speech model there — \
-                 the chooser is not built yet",
+                "[stt] model ({}) is not used by this configuration; nothing in it \
+                 asks for one. It would be looked for in {}",
+                stt.model,
                 models.display()
             ),
         },
+        Some(Ok(path)) => Finding {
+            name: "model",
+            state: State::Ok,
+            detail: format!("{}", path.display()),
+        },
+        Some(Err(e)) => Finding {
+            name: "model",
+            state: State::Missing,
+            detail: e.to_string(),
+        },
     }
+}
+
+/// The engine and model lines together, from one lookup: `doctor` needs both, and a
+/// real model file is read and hashed only once for the pair, not once per line. See
+/// PR #20's finding on `doctor` reading a multi-gigabyte model twice.
+fn engine_and_model_findings(stt: &config::Stt, models: &Path) -> (Finding, Finding) {
+    let model = stt::locate_configured_model(stt, models);
+    let engine = engine_finding_from(stt, model.clone());
+    let model_line = model_finding_from(stt, models, model);
+    (engine, model_line)
 }
 
 pub fn rewrite_finding(engine: &str, agent: &str) -> Finding {
@@ -263,22 +310,33 @@ fn models_directory() -> Option<PathBuf> {
 
 pub fn run() -> u8 {
     let loaded = config::load(config::directory(&config::Vars::from_env()).as_deref());
-    let findings = vec![
-        herdr_finding(),
-        daemon_finding(),
-        config_finding(&loaded),
-        match models_directory() {
-            Some(models) => model_finding(&models, &loaded.config.stt.model),
-            None => Finding {
+    let mut findings = vec![herdr_finding(), daemon_finding(), config_finding(&loaded)];
+    match models_directory() {
+        Some(models) => {
+            let (engine, model) = engine_and_model_findings(&loaded.config.stt, &models);
+            findings.push(engine);
+            findings.push(model);
+        }
+        None => {
+            let detail = "cannot tell where models live: neither HERDR_PLUGIN_STATE_DIR, \
+                           XDG_STATE_HOME nor HOME is set"
+                .to_string();
+            findings.push(Finding {
+                name: "engine",
+                state: State::Missing,
+                detail: detail.clone(),
+            });
+            findings.push(Finding {
                 name: "model",
                 state: State::Missing,
-                detail: "cannot tell where models live: neither HERDR_PLUGIN_STATE_DIR, \
-                         XDG_STATE_HOME nor HOME is set"
-                    .to_string(),
-            },
-        },
-        rewrite_finding(&loaded.config.rewrite.engine, &loaded.config.rewrite.agent),
-    ];
+                detail,
+            });
+        }
+    }
+    findings.push(rewrite_finding(
+        &loaded.config.rewrite.engine,
+        &loaded.config.rewrite.agent,
+    ));
     print!("{}", render(&findings));
     exit_code(&findings)
 }
@@ -368,17 +426,143 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_model_is_present_when_a_file_carries_its_name() {
-        let directory = std::env::temp_dir().join(format!("doctor-model-{}", std::process::id()));
+    fn command_stt(argv: &[&str]) -> config::Stt {
+        config::Stt {
+            engine: "command".to_string(),
+            command: argv.iter().map(|s| s.to_string()).collect(),
+            ..config::Stt::default()
+        }
+    }
+
+    fn scratch_models(tag: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("doctor-model-{tag}-{}", std::process::id()));
         let models = directory.join("models");
         std::fs::create_dir_all(&models).unwrap();
+        models
+    }
+
+    fn write_real_model(models: &Path, name: &str) {
+        let mut content = vec![0x6C, 0x6D, 0x67, 0x67];
+        content.resize(2 * 1024 * 1024, 0u8);
+        std::fs::write(models.join(format!("ggml-{name}.bin")), content).unwrap();
+    }
+
+    #[test]
+    fn the_model_line_is_ok_when_the_shared_check_finds_it() {
+        let models = scratch_models("ok");
+        write_real_model(&models, "large-v3-turbo");
+        let stt = command_stt(&["prog", "-m", "{model}"]);
+        let finding = engine_and_model_findings(&stt, &models).1;
+        assert_eq!(finding.state, State::Ok);
+        assert!(finding.detail.contains("large-v3-turbo"), "got {finding:?}");
+    }
+
+    #[test]
+    fn the_model_line_is_missing_when_the_shared_check_refuses_it() {
+        let models = scratch_models("missing");
+        let stt = command_stt(&["prog", "-m", "{model}"]);
+        let finding = engine_and_model_findings(&stt, &models).1;
+        assert_eq!(finding.state, State::Missing);
+        // The shared check's own message, not a substring rule.
+        assert!(
+            finding.detail.contains("no speech model"),
+            "got {finding:?}"
+        );
+    }
+
+    #[test]
+    fn the_model_line_is_not_used_when_the_engine_is_not_built() {
+        let models = scratch_models("not-built");
+        for engine in ["candle", "http"] {
+            let stt = config::Stt {
+                engine: engine.to_string(),
+                ..config::Stt::default()
+            };
+            let finding = engine_and_model_findings(&stt, &models).1;
+            assert_eq!(finding.state, State::NotUsed, "engine {engine}");
+            assert!(finding.detail.contains("[stt] model"), "got {finding:?}");
+        }
+    }
+
+    #[test]
+    fn the_model_line_is_not_used_when_the_argument_list_has_no_placeholder() {
+        let models = scratch_models("no-placeholder");
+        let stt = command_stt(&["prog", "{audio}"]);
+        let finding = engine_and_model_findings(&stt, &models).1;
+        assert_eq!(finding.state, State::NotUsed);
+        assert!(finding.detail.contains("[stt] model"), "got {finding:?}");
+    }
+
+    #[test]
+    fn no_test_asserts_the_substring_rule_any_more() {
+        // A file merely containing the model name must not be found: the shared
+        // check requires the exact name, the size floor and the ggml magic bytes.
+        let models = scratch_models("substring");
+        std::fs::write(
+            models.join("old-ggml-large-v3-turbo.bin"),
+            vec![0u8; 2 * 1024 * 1024],
+        )
+        .unwrap();
+        let stt = command_stt(&["prog", "-m", "{model}"]);
         assert_eq!(
-            model_finding(&models, "large-v3-turbo").state,
+            engine_and_model_findings(&stt, &models).1.state,
             State::Missing
         );
-        std::fs::write(models.join("ggml-large-v3-turbo.bin"), b"x").unwrap();
-        assert_eq!(model_finding(&models, "large-v3-turbo").state, State::Ok);
+    }
+
+    #[test]
+    fn the_engine_line_names_what_resolve_reports_for_each_engine() {
+        let models = scratch_models("engine-candle");
+        let candle = config::Stt {
+            engine: "candle".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&candle, &models).0;
+        assert_eq!(finding.state, State::Missing);
+        assert!(finding.detail.contains("candle"), "got {finding:?}");
+        assert!(finding.detail.contains("#15"), "got {finding:?}");
+
+        let models = scratch_models("engine-http");
+        let http = config::Stt {
+            engine: "http".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&http, &models).0;
+        assert_eq!(finding.state, State::Missing);
+        assert!(finding.detail.contains("http"), "got {finding:?}");
+        assert!(finding.detail.contains("#16"), "got {finding:?}");
+
+        let models = scratch_models("engine-command");
+        let command = command_stt(&["prog", "{audio}"]);
+        let finding = engine_and_model_findings(&command, &models).0;
+        assert_eq!(finding.state, State::Ok);
+
+        let models = scratch_models("engine-unknown");
+        let unknown = config::Stt {
+            engine: "vosk".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&unknown, &models).0;
+        assert_eq!(finding.state, State::Missing);
+        assert!(finding.detail.contains("vosk"), "got {finding:?}");
+    }
+
+    #[test]
+    fn the_model_is_located_once_per_doctor_run() {
+        let models = scratch_models("locate-once");
+        write_real_model(&models, "large-v3-turbo");
+        let stt = command_stt(&["prog", "-m", "{model}"]);
+
+        model::locate_calls::reset();
+        let (engine, model_line) = engine_and_model_findings(&stt, &models);
+        assert_eq!(engine.state, State::Ok, "got {engine:?}");
+        assert_eq!(model_line.state, State::Ok, "got {model_line:?}");
+        assert_eq!(
+            model::locate_calls::get(),
+            1,
+            "doctor must locate the model once per invocation, not once per report line"
+        );
     }
 
     #[test]
