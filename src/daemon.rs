@@ -152,17 +152,21 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take) -> Reply {
             take.target, take.level_dbfs
         )),
         Err(why) => {
+            // Whether a pane id or a path can carry a newline was never
+            // established either way, and both sit ahead of the transcript in
+            // the reply below — collapsing them costs nothing and defends the
+            // reply regardless.
+            let target = take.target.replace('\n', " ");
+            let path = take.path.display().to_string().replace('\n', " ");
             let why = why.to_string().replace('\n', " ");
-            runtime
-                .journal
-                .write(&delivery_failed_line(&take.target, &why));
+            runtime.journal.write(&delivery_failed_line(&target, &why));
             if runtime.delivery_settings.toasts {
                 // A toast that could not be shown must not stop the journal
                 // line or the client's reply from getting through — but its
                 // own failure is still a lost diagnostic, so it is journaled.
                 if let Err(toast_why) = runtime.deliverer.notify(
                     "Delivery failed",
-                    &format!("{}: the text is in the plugin log", take.target),
+                    &format!("{target}: the text is in the plugin log"),
                 ) {
                     runtime
                         .journal
@@ -170,9 +174,7 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take) -> Reply {
                 }
             }
             Reply::Error(format!(
-                "could not deliver to {} ({why}) — the take is kept at {}; text: {}",
-                take.target,
-                take.path.display(),
+                "could not deliver to {target} ({why}) — the take is kept at {path}; text: {}",
                 text.replace('\n', " "),
             ))
         }
@@ -565,6 +567,32 @@ mod tests {
             .unwrap();
         assert!(std::path::Path::new(path).exists(), "AC-10: {path}");
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_pane_and_the_path_are_collapsed_too_although_they_precede_the_transcript() {
+        // Whether herdr can hand back a pane id with a newline in it is not
+        // established either way; the cost of defending against it is nothing,
+        // so both it and the take's path (also ahead of the transcript) are
+        // collapsed the same way the reason and the transcript already are.
+        let take = crate::capture::Take {
+            path: std::path::PathBuf::from("/tmp/oddly\nnamed.wav"),
+            level_dbfs: -10.0,
+            target: "w1\n:p2".to_string(),
+            agent: None,
+        };
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        );
+        let runtime = runtime_with(fake, false);
+        let reply = transcribe(&runtime, &take);
+        let text = match reply {
+            Reply::Error(text) => text,
+            other => panic!("expected Reply::Error, got {other:?}"),
+        };
+        assert!(!text.contains('\n'), "got {text:?}");
+        assert!(text.contains("w1 :p2"), "got {text:?}");
+        assert!(text.contains("/tmp/oddly named.wav"), "got {text:?}");
     }
 
     /// Records every line written, in order.
