@@ -485,6 +485,72 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    /// Records every line written, in order.
+    #[derive(Default)]
+    struct RecordingJournal(std::sync::Mutex<Vec<String>>);
+    impl Journal for RecordingJournal {
+        fn write(&self, line: &str) {
+            self.0.lock().unwrap().push(line.to_string());
+        }
+    }
+    /// Lets a Runtime own a Journal while the test keeps its own handle to read
+    /// what was written — the same shape FakeDeliverer::clone() gives above.
+    struct TestJournal(std::sync::Arc<RecordingJournal>);
+    impl Journal for TestJournal {
+        fn write(&self, line: &str) {
+            self.0.write(line);
+        }
+    }
+
+    #[test]
+    fn the_delivering_line_precedes_the_failure_line_and_names_the_reason() {
+        let recorder = tone_recorder("journal-order");
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        );
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = runtime_with(fake, false);
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        let lines = journal.0.lock().unwrap();
+        assert_eq!(lines.len(), 2, "got {lines:?}");
+        assert!(lines[0].contains("fix the worklog entry"), "got {lines:?}");
+        assert!(
+            lines[1].contains("w1:p2") && lines[1].contains("pane_not_found"),
+            "got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_toast_is_raised_on_a_failed_delivery_only_when_ui_toasts_is_on() {
+        for (toasts, expect_notify) in [(true, true), (false, false)] {
+            let recorder = tone_recorder(&format!("toast-{toasts}"));
+            let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+                crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+            );
+            let mut runtime = runtime_with(fake.clone(), false);
+            runtime.delivery_settings.toasts = toasts;
+            let request = dictate_request();
+            answer(&request, &recorder, &runtime);
+            answer(&request, &recorder, &runtime);
+            let notified = fake
+                .calls()
+                .iter()
+                .any(|c| matches!(c, crate::delivery::tests_support::Call::Notify(..)));
+            assert_eq!(notified, expect_notify, "toasts = {toasts}");
+            if notified {
+                assert!(matches!(
+                    fake.calls().last(),
+                    Some(crate::delivery::tests_support::Call::Notify(title, body))
+                        if title == "Delivery failed" && body == "w1:p2: the text is in the plugin log"
+                ));
+            }
+        }
+    }
+
     #[test]
     fn cancel_needs_no_pane_and_dictate_does() {
         assert!(!needs_target_pane("cancel"));
