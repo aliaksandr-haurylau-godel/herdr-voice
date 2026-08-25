@@ -392,6 +392,24 @@ pub mod tests_support {
 
         fn stop(&mut self) {}
     }
+
+    /// Hears one loud moment and stops — a take that clears the silence floor, so a
+    /// test past capture can reach recognition and delivery without a microphone.
+    pub struct ToneSource;
+
+    impl Source for ToneSource {
+        fn start(&mut self, _device: Option<&str>, sink: Sink) -> Result<Format, String> {
+            let samples: Vec<f32> = (0..4_800)
+                .map(|i| 0.3 * (i as f32 * std::f32::consts::TAU * 440.0 / 48_000.0).sin())
+                .collect();
+            sink.push(Event::Samples(samples));
+            Ok(Format {
+                rate: 48_000,
+                channels: 1,
+            })
+        }
+        fn stop(&mut self) {}
+    }
 }
 
 #[cfg(test)]
@@ -656,5 +674,22 @@ mod tests {
             Started::CouldNotStart(why) => assert!(why.contains("no such device"), "got {why}"),
             other => panic!("expected CouldNotStart, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tone_source_clears_the_silence_floor() {
+        let recorder = Recorder::spawn(
+            || Box::new(tests_support::ToneSource),
+            Audio::default(),
+            takes_dir("tone-source"),
+        );
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
+        let take = recorder.stop().expect("a take that clears the floor");
+        assert!(
+            take.level_dbfs > Audio::default().silence_db,
+            "got {}",
+            take.level_dbfs
+        );
+        std::fs::remove_file(&take.path).ok();
     }
 }
