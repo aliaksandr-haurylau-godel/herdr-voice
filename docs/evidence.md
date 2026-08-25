@@ -379,3 +379,73 @@ the name reaches the source; that test fails against the old behaviour.
 answered with the path and the level, and the client discarded everything it was
 told on success, so a take that worked was indistinguishable from a take that did
 nothing. Results now go to standard output and failures to standard error.
+
+## Recognition, by hand on macOS
+
+macOS 26.6.2 build 25G83, Apple silicon, herdr 0.8.2, release build. The
+transcriber is `whisper-cli` from Homebrew against `ggml` 0.20.2 on Metal, with
+`ggml-large-v3-turbo.bin` in the models directory. `[stt] engine = "command"`,
+`language = "ru"`, and the argument list the code suggests as an example.
+
+**A spoken sentence went through the whole chain for the first time.** A 70-second
+take of Russian speech containing English technical terms, measured at −50.9 dB,
+came back as:
+
+> я бы смержал этот пули квест без ревью в остальном все ок можем двигаться
+> дальше это была тестовая запись я думаю а
+
+The chain works: the microphone, the conversion, the file, the transcriber and the
+reply all did their part. What it produced is not usable, and the reason is the one
+thing left out.
+
+| the same take, transcribed three ways | time | "pull request" came back as |
+|---|---|---|
+| `-l ru`, no bias prompt | 1.65 s | "пули квест" |
+| `-l ru`, `--prompt` naming the terms | 1.53 s | **"pull request"**, and "review" in Latin too |
+| `-l auto`, no bias prompt | 1.81 s | "пули квест" |
+
+**The terms need the bias prompt, and nothing else supplies them.** Automatic
+language detection changes nothing; the prompt changes the terms and brings back
+commas as well. This narrows what the section above concluded from the prototype —
+that biasing improves form but does not restore terms. It does restore them, when
+the term is in the string; there it was absent because only file basenames were
+collected. So the chain cannot produce a usable transcript for this kind of speech
+until context is collected and passed, and recognition without it renders every
+English term as the Russian word it sounds like.
+
+**Recognition is not the slow stage.** 1.5 to 1.8 seconds for 70 seconds of speech,
+on Metal. The seven seconds the earlier measurement attributes to the rewrite stage
+belong to the agent it calls, not to the model that transcribes.
+
+**A minute of room tone produced confident text out of nothing.** Room tone
+measured −54.4 dB — above the −60 floor, so the take was accepted — and the
+transcriber returned "Продолжение следует..." four times over. The silence floor
+answers "is anything arriving", not "did anybody speak", and a hallucinated
+sentence delivered into an agent's prompt is worse than an empty one. Nothing is
+changed here yet; the number is written down because it decides where a floor
+should sit.
+
+| refusal paths, each with `doctor` beside it | what it did |
+|---|---|
+| `[stt] command` empty | `doctor`: `engine missing` with an example list, `model unused`, exit 1; the take refused with the same sentence |
+| `engine = "candle"` | `doctor`: `engine missing`, naming issue #15 and what to set instead, `model unused`, exit 1; the take refused likewise |
+| the working configuration | `doctor`: `engine ok "command" is ready`, `model ok`, exit 0 |
+
+**Found by running it: a reply with a newline in it is truncated silently.** A
+transcriber printing two lines delivered only the first, with exit 0, and the level
+and the target pane vanished with the remainder — they are formatted after the
+text. The same cuts the guidance off refusals: the message promises an example and
+the client prints everything up to "for example:". The reply protocol is one line
+by construction and the messages grew multi-line. Recorded as issue #19.
+
+**Found by running it: `cancel` stops nothing.** It answers `nothing to cancel`
+with exit 0 while a take is recording, and the next `dictate` stops that same take
+and transcribes it. There is currently no way to abandon a take without delivering
+it. Recorded as issue #18.
+
+**Found by running it: a deep state directory stops the daemon from starting.** The
+socket path is bound by `sun_path`, 104 bytes on macOS, and the daemon refused with
+`local socket name length exceeds capacity of sun_path of sockaddr_un`. The message
+names the cause and the path, so nothing is silent about it, but the default state
+directory is already long and a longer account name would reach the limit on a real
+installation. This run used a short state directory for that reason.

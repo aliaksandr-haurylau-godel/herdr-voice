@@ -347,3 +347,31 @@ this work was silence or room tone, and no words have been through the chain.
 The prototype passed a bias prompt to `whisper-cli`. That prompt is context, and
 context is its own task, so nothing here passes one — which `docs/evidence.md` says
 costs punctuation and capitalisation but not terms.
+
+## Outcome
+
+Tasks 7, 8 and 9 are done; the issue is complete. 124 tests pass, clippy and
+`cargo fmt --check` are clean, and `scripts/check_manifest.py` reports 11 entries
+with all commands known.
+
+`doctor` now reports the engine from `stt::resolve` itself, so it cannot disagree
+with the daemon, and the model line uses `stt::model::locate` instead of the old
+substring rule. A fourth state, `unused`, covers a configuration whose engine asks
+for no model.
+
+A spoken take went through the whole chain for the first time, on macOS 26.6.2 —
+recorded in `docs/evidence.md` under "Recognition, by hand on macOS", with the
+transcript as it came out. Recognition costs 1.5 to 1.8 seconds for 70 seconds of
+speech; the slow stage is the rewrite, which calls an agent.
+
+The transcript is not usable without the bias prompt: every English term inside
+Russian speech comes back as the Russian word it sounds like. The same take with
+the terms in `--prompt` returns them correctly. Context therefore moves ahead of
+delivery and push-to-talk in the order of work.
+
+Two defects were found by running it, both filed rather than fixed here, because
+neither belongs to this issue: `cancel` stops nothing (#18), and a reply carrying a
+newline is truncated silently, losing the remainder of the transcript along with
+the level and the target pane (#19).
+
+The rewrite stage's default model is recorded in `docs/decisions.md`.
