@@ -1,8 +1,8 @@
 # Evidence
 
 Measurements the design rests on. Every number here was produced on one machine —
-Apple silicon, macOS 25.6, herdr 0.8.2 — with the shell prototype kept in `spike/`.
-Nothing here has been reproduced on Linux or Windows.
+Apple silicon, macOS 25.6, herdr 0.8.2 — with the shell prototype kept in `spike/`,
+except the last section, which was produced on Linux in a container and says so.
 
 ## Key auto-repeat through herdr
 
@@ -114,7 +114,8 @@ Not verified, and why: the daemon's own log line reaching
 manifest's `startup` entry, which means restarting herdr. The daemon was started by
 hand instead, so its line was read from its own standard error. The plugin was
 linked for the action check and unlinked afterwards; `herdr plugin list` was
-identical before and after.
+identical before and after. That gap is closed on Linux rather than on macOS —
+see "Linux, in a container" at the end of this file.
 
 ### What the Windows job established
 
@@ -156,6 +157,75 @@ The crate's own source settles why, and settles two related worries as well
   waits rather than failing, but the wait is bounded: with both sides on the default
   it is 50 milliseconds. So a liveness probe on Windows cannot block indefinitely.
 
+## Linux, in a container
+
+Run on 2026-08-25 by `scripts/linux-check.sh`, which performs the whole check in
+one non-interactive pass and prints the table below itself. The plugin was built
+from revision `e32a9b7`, the tip of `main`.
+
+The machine: a throwaway Debian GNU/Linux 12 (bookworm) container, `aarch64`,
+kernel 6.18.15, no sound hardware of any kind. Versions it installed and printed:
+`rustc 1.98.0 (88d9e12ae 2026-08-18)`, `cargo 1.98.0 (797e8a9bc 2026-08-05)`,
+`herdr 0.8.2`, `cc (Debian 12.2.0-14+deb12u1) 12.2.0`, ALSA development headers
+`alsa 1.2.8` from `libasound2-dev`.
+
+| step | exit | outcome |
+|---|---|---|
+| packages | 0 | `apt-get`; ALSA headers present for the capture work of issue #8 |
+| rust | 0 | stable toolchain installed by `rustup` |
+| herdr | 0 | installed by `curl -fsSL https://herdr.dev/install.sh \| sh` |
+| build | 0 | `cargo build --release` produced `target/release/herdr-voice` |
+| link | 0 | `herdr plugin link .`; herdr computes the config directory `~/.config/herdr/plugins/config/haurylau.voice` |
+| server | 0 | `herdr server`, the headless server, runs without a terminal |
+| daemon | 0 | herdr started the daemon itself, through the manifest's `[[startup]]` entry |
+| doctor | 1 | five lines in the fixed order; `herdr ok`, `daemon ok`, `config default`, `model missing`, `rewrite missing` |
+| action | 0 | `herdr plugin action invoke cancel` returned 0 |
+| herdr-log | 0 | herdr recorded the invocation as `succeeded` with `exit_code 0`, and the `[[startup]]` daemon has a record too |
+| no-device | 69 | pending: capture is not built yet, so the binary said `mic: not implemented yet` and exited |
+| no-daemon | 1 | with nothing listening, the client named the socket and exited without hanging |
+
+**herdr starts the daemon from the manifest, and the daemon's own lines reach the
+plugin log.** This is what the macOS exercise could not establish, because it
+would have meant restarting herdr there. With the plugin linked before the server
+came up, `herdr plugin log list --plugin haurylau.voice` showed the `[[startup]]`
+record next to the action's. The daemon's standard error appears in that record
+only after the process ends; while it runs the record carries none. When the
+daemon was killed with a signal, the record read:
+
+```
+"event":"startup","status":"failed",
+"stderr":"listening at <state>/voice.sock\nrequest command=cancel entrypoint=- context=57 bytes\n"
+```
+
+So a daemon stopped by a signal is `failed` in herdr's eyes, `entrypoint` is `-`
+for a command-line invocation on Linux exactly as on macOS, and the context herdr
+sends from the command line was 57 bytes here against 375 on macOS.
+
+**The socket path the plugin derives is the one herdr computes.** herdr ran the
+daemon with `HERDR_PLUGIN_STATE_DIR=~/.local/state/herdr/plugins/haurylau.voice`,
+and the daemon listened at `voice.sock` inside it. A client started from a plain
+shell, with no `HERDR_` variable set at all, derived the same path from `$HOME`
+and reached that daemon: `doctor` reported `daemon ok` with the same name. The two
+derivations agree on Linux.
+
+**No capture device, and nothing to open it with yet.** The container had no
+`/dev/snd`, no PipeWire and no `arecord`, which is the state a headless Linux
+machine is in. Capture is issue #8 and is not on `main`, so the capture-facing
+command exits 69 and says `mic: not implemented yet`. The check records that as
+pending rather than as a pass, and fails outright on a hang, a signal, a panic or
+silence. **This section has to be re-run once #8 lands**, and the step in the
+script names what to change: drive a take through the `dictate` action and require
+a non-zero exit whose message names the missing device.
+
+Two smaller things, both about herdr rather than about the plugin. `herdr status
+server` exits 0 whether or not a server is running and says which in its output,
+so the state has to be read from `--json`; the first version of the check trusted
+the exit code and reported a server that did not exist. And `herdr plugin link`
+works with no server running, which is what lets the plugin be linked first so
+that the server can run its `[[startup]]` entry.
+
+Not established here: audio capture on Linux, anything involving a real
+microphone, and the `x86_64` architecture — this run was `aarch64`.
 ## What the capture library offers
 
 Measured on macOS 25.6, Apple silicon, with `cpal` 0.18.2 in a throwaway crate
