@@ -49,6 +49,10 @@ pub fn deliver(
     pane: &str,
     text: &str,
 ) -> Result<(), DeliveryError> {
+    // How herdr encodes "no agent" was never established: it may omit the
+    // field or send an empty string. An empty agent is treated the same as
+    // no agent, so it falls back to inserting rather than submitting.
+    let agent = agent.filter(|a| !a.is_empty());
     if submit && agent.is_some() {
         deliverer.submit(pane, text)
     } else {
@@ -301,6 +305,20 @@ mod tests {
     fn submit_falls_back_to_insert_when_no_agent_is_named() {
         let fake = FakeDeliverer::ok();
         assert_eq!(deliver(&fake, true, None, "w1:p2", "hello"), Ok(()));
+        assert_eq!(
+            fake.calls(),
+            vec![Call::Insert("w1:p2".into(), "hello".into())]
+        );
+    }
+
+    #[test]
+    fn submit_falls_back_to_insert_when_the_agent_is_the_empty_string() {
+        // How herdr encodes "no agent" was never established: it may omit the
+        // field (Option::None, already covered above) or send an empty one.
+        // Defend against both, since Some("").is_some() alone would submit to
+        // a pane the criterion requires only an insert into.
+        let fake = FakeDeliverer::ok();
+        assert_eq!(deliver(&fake, true, Some(""), "w1:p2", "hello"), Ok(()));
         assert_eq!(
             fake.calls(),
             vec![Call::Insert("w1:p2".into(), "hello".into())]
