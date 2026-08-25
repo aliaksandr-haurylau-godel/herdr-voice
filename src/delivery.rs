@@ -120,10 +120,94 @@ pub mod tests_support {
     }
 }
 
+fn herdr_binary() -> String {
+    std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string())
+}
+
+fn extract_reason(output: &[u8]) -> String {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        error: ErrorBody,
+    }
+    #[derive(serde::Deserialize)]
+    struct ErrorBody {
+        code: String,
+    }
+
+    let text = String::from_utf8_lossy(output).trim().to_string();
+    match serde_json::from_str::<Envelope>(&text) {
+        Ok(envelope) => envelope.error.code,
+        Err(_) => text,
+    }
+}
+
+pub struct HerdrDeliverer {
+    binary: String,
+}
+
+impl HerdrDeliverer {
+    pub fn new() -> Self {
+        HerdrDeliverer {
+            binary: herdr_binary(),
+        }
+    }
+
+    fn run(&self, args: &[&str]) -> Result<(), DeliveryError> {
+        match std::process::Command::new(&self.binary).args(args).output() {
+            // herdr starts plugin commands with a minimal PATH — the same
+            // reasoning src/stt/command.rs:78-86 states for the transcriber.
+            Err(_) => Err(DeliveryError::NotFound {
+                binary: self.binary.clone(),
+                path: std::env::var("PATH").unwrap_or_default(),
+            }),
+            Ok(output) if output.status.success() => Ok(()),
+            Ok(output) => {
+                let text = if !output.stdout.is_empty() {
+                    &output.stdout
+                } else {
+                    &output.stderr
+                };
+                Err(DeliveryError::Rejected(extract_reason(text)))
+            }
+        }
+    }
+}
+
+impl Default for HerdrDeliverer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Deliverer for HerdrDeliverer {
+    fn insert(&self, pane: &str, text: &str) -> Result<(), DeliveryError> {
+        self.run(&["pane", "send-text", pane, text])
+    }
+    fn submit(&self, pane: &str, text: &str) -> Result<(), DeliveryError> {
+        self.run(&["agent", "prompt", pane, text])
+    }
+    fn notify(&self, title: &str, body: &str) -> Result<(), DeliveryError> {
+        self.run(&["notification", "show", title, "--body", body])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::tests_support::{Call, FakeDeliverer};
     use super::*;
+
+    #[test]
+    fn a_structured_rejection_yields_its_code() {
+        let text = br#"{"error":{"code":"pane_not_found","message":"pane w99:p99 not found"}}"#;
+        assert_eq!(extract_reason(text), "pane_not_found");
+        let text = br#"{"error":{"code":"agent_not_found","message":"agent target w99:p99 not found"}}"#;
+        assert_eq!(extract_reason(text), "agent_not_found");
+    }
+
+    #[test]
+    fn text_that_is_not_the_structured_shape_is_kept_as_is() {
+        assert_eq!(extract_reason(b"herdr: unknown flag --bogus\n"), "herdr: unknown flag --bogus");
+    }
 
     #[test]
     fn insert_only_never_calls_submit() {

@@ -99,15 +99,10 @@ impl Default for Ui {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Delivery {
     pub submit: bool,
-}
-impl Default for Delivery {
-    fn default() -> Self {
-        Delivery { submit: false }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
