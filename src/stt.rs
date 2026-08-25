@@ -9,7 +9,7 @@ pub mod command;
 pub mod model;
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::Stt;
 
@@ -77,8 +77,35 @@ pub fn wants_our_model(argv: &[String]) -> bool {
     argv.iter().any(|argument| argument.contains("{model}"))
 }
 
+/// The model this configuration would use, if it asks for one at all. `None` means
+/// nothing here would ever look for a model: the engine is not `command`, or its
+/// argument list has no `{model}` placeholder. `Some(Err(_))` means one was expected
+/// and not found. Exposed so that a caller who needs both the engine's readiness and
+/// the model's own state — `doctor`, in particular — can locate the file once and
+/// derive both from that single result, instead of asking twice for the same read.
+pub fn locate_configured_model(
+    stt: &Stt,
+    models: &Path,
+) -> Option<Result<PathBuf, model::ModelError>> {
+    if stt.engine == "command" && wants_our_model(&stt.command) {
+        Some(model::locate(models, &stt.model))
+    } else {
+        None
+    }
+}
+
 /// The engine the configuration asks for, built and ready, or the reason it is not.
 pub fn resolve(stt: &Stt, models: &Path) -> Result<Box<dyn Engine + Send + Sync>, EngineError> {
+    resolve_with(stt, locate_configured_model(stt, models))
+}
+
+/// Builds the engine from a model lookup the caller already performed, so that a
+/// caller who also needs to report on the model's own state — `doctor` — never asks
+/// `locate` a second time for what `resolve` would otherwise look up itself.
+pub fn resolve_with(
+    stt: &Stt,
+    model: Option<Result<PathBuf, model::ModelError>>,
+) -> Result<Box<dyn Engine + Send + Sync>, EngineError> {
     match stt.engine.as_str() {
         "candle" => Err(EngineError::NotBuilt {
             engine: "candle".to_string(),
@@ -92,10 +119,10 @@ pub fn resolve(stt: &Stt, models: &Path) -> Result<Box<dyn Engine + Send + Sync>
             if stt.command.is_empty() {
                 return Err(EngineError::NotConfigured);
             }
-            let model = if wants_our_model(&stt.command) {
-                Some(model::locate(models, &stt.model).map_err(EngineError::Model)?)
-            } else {
-                None
+            let model = match model {
+                Some(Ok(path)) => Some(path),
+                Some(Err(e)) => return Err(EngineError::Model(e)),
+                None => None,
             };
             Ok(Box::new(command::CommandEngine::new(
                 stt.command.clone(),

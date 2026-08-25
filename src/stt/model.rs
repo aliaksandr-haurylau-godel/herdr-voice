@@ -19,7 +19,34 @@ pub fn file_name(model: &str) -> String {
     format!("ggml-{model}.bin")
 }
 
-#[derive(Debug)]
+/// How many times `locate` has run, counted only in tests. Thread-local rather than
+/// a shared static: `cargo test` runs tests concurrently on separate threads, and a
+/// process-wide counter would pick up unrelated tests' calls. It pins one property:
+/// `doctor` must locate a configured model at most once per invocation, not once
+/// per report line. See the test `the_model_is_located_once_per_doctor_run` in
+/// `src/doctor.rs`.
+#[cfg(test)]
+pub(crate) mod locate_calls {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn reset() {
+        COUNT.with(|c| c.set(0));
+    }
+
+    pub(crate) fn get() -> usize {
+        COUNT.with(|c| c.get())
+    }
+
+    pub(super) fn increment() {
+        COUNT.with(|c| c.set(c.get() + 1));
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum ModelError {
     Missing { path: PathBuf, model: String },
     TooSmall { path: PathBuf, bytes: u64 },
@@ -68,6 +95,9 @@ impl std::error::Error for ModelError {}
 /// cannot: the wrong name, a truncated file, a file that is not a model at all, and
 /// the wrong model under the right name.
 pub fn locate(models: &Path, model: &str) -> Result<PathBuf, ModelError> {
+    #[cfg(test)]
+    locate_calls::increment();
+
     let path = models.join(file_name(model));
 
     let metadata = match std::fs::metadata(&path) {
