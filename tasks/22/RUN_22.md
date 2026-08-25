@@ -322,3 +322,49 @@ configuration defaults, and the absence of a lock held across the subprocess cal
 The reviewer corrected its own report after filing: the findings are its own trace
 of the files, not a merge with a dispatched subagent's report as first stated. The
 verdict and the substance stand; only the attribution was wrong.
+
+## Gate S4, second pass
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff of feat/22-delivery against main
+  reviewer: superpowers:requesting-code-review
+  verdict: QUESTIONS
+  date: 2026-08-26
+  blocker: null
+```
+
+The six repairs were verified by mutation rather than by report: each behaviour was
+removed from a scratch copy and the suite run. Every one goes red, each on the test
+that names it — including the one that matters most, where moving the journal write
+below the delivery call reddens the new interleaved-trace test while the old
+order-only test stays green. That is the hole the first pass named, and it is closed.
+
+**One finding, and it is the worse half of a finding the first pass raised.** The
+argument lists are now asserted as data, so a misspelt subcommand is caught. The four
+lines binding each trait method to its builder are asserted by nothing: swapping the
+bodies of `insert` and `submit` leaves all 155 tests green and clippy clean, because
+both builders are still called. With the default configuration — submit off — a
+finished take would then run `herdr agent prompt`, which appends Enter, so the text is
+submitted to the agent instead of being left in the pane's input. The call succeeds,
+so there is no rejection, no journal line, no toast, and the reply says the text was
+delivered. The issue's central requirement is violated with no signal anywhere.
+
+It is a coverage gap rather than a live defect — the bindings as written are correct.
+Closing it needs a test that exercises the real deliverer rather than the builders,
+which today it cannot: the binary path is read from the environment at construction,
+and mutating the environment under a parallel suite is not an option. A constructor
+taking the path, pointed at a script that records its arguments, pins the whole chain.
+
+Nothing bypasses the builders: the private runner has exactly three callers, and no
+other delivery path constructs a process.
+
+### Measured while the gate was open
+
+`herdr notification show --help` on herdr 0.8.2 confirms the shape the code builds:
+`herdr notification show <TITLE> --body <TEXT>`. The subcommand also takes `--sound`,
+with `none`, `done` and `request`; the prototype passed `--sound none` explicitly and
+this code passes nothing, so a failed delivery's toast uses herdr's default sound,
+which is not measured. Recorded rather than changed: no criterion asks for a sound
+either way.
