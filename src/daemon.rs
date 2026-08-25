@@ -111,7 +111,9 @@ fn dictate(recorder: &Recorder, runtime: &Runtime, pane: &str, agent: Option<&st
     }
 }
 
-/// A finished take becomes text, or says why it did not.
+/// A finished take becomes text, and the text is delivered — or, if either
+/// step fails, the reply is a Reply::Error naming why and what to do next
+/// (client::outcome maps Reply::Ok to exit 0, Reply::Error to exit 1).
 fn transcribe(runtime: &Runtime, take: &crate::capture::Take) -> Reply {
     let engine = match &runtime.recognition {
         Ok(engine) => engine,
@@ -124,15 +126,51 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take) -> Reply {
             ))
         }
     };
-    match engine.transcribe(&take.path) {
-        Ok(text) => Reply::Ok(format!(
-            "{text} [{:.1} dB, {}]",
-            take.level_dbfs, take.target
+    let text = match engine.transcribe(&take.path) {
+        Ok(text) => text,
+        Err(why) => {
+            return Reply::Error(format!(
+                "{why} — the take is kept at {}",
+                take.path.display()
+            ))
+        }
+    };
+
+    // Written before the delivery attempt: the text must not be held only
+    // in memory while the outward call to herdr runs.
+    runtime.journal.write(&delivering_line(&text));
+
+    match crate::delivery::deliver(
+        runtime.deliverer.as_ref(),
+        runtime.delivery_settings.submit,
+        take.agent.as_deref(),
+        &take.target,
+        &text,
+    ) {
+        Ok(()) => Reply::Ok(format!(
+            "delivered to {} [{:.1} dB]",
+            take.target, take.level_dbfs
         )),
-        Err(why) => Reply::Error(format!(
-            "{why} — the take is kept at {}",
-            take.path.display()
-        )),
+        Err(why) => {
+            let why = why.to_string().replace('\n', " ");
+            runtime
+                .journal
+                .write(&delivery_failed_line(&take.target, &why));
+            if runtime.delivery_settings.toasts {
+                // A toast that could not be shown must not stop the journal
+                // line or the client's reply from getting through.
+                let _ = runtime.deliverer.notify(
+                    "Delivery failed",
+                    &format!("{}: the text is in the plugin log", take.target),
+                );
+            }
+            Reply::Error(format!(
+                "could not deliver to {} ({why}) — the take is kept at {}; text: {}",
+                take.target,
+                take.path.display(),
+                text.replace('\n', " "),
+            ))
+        }
     }
 }
 
@@ -328,6 +366,123 @@ mod tests {
             entrypoint: Some(command.to_string()),
             context: context.to_vec(),
         }
+    }
+
+    /// A recorder that hears one loud moment and stops — clears the silence
+    /// floor, so a test can reach transcription and delivery.
+    fn tone_recorder(tag: &str) -> Recorder {
+        Recorder::spawn(
+            || Box::new(crate::capture::tests_support::ToneSource),
+            crate::config::Audio::default(),
+            std::env::temp_dir().join(format!("daemon-takes-{tag}-{}", std::process::id())),
+        )
+    }
+
+    fn dictate_request() -> Request {
+        request("dictate", br#"{"focused_pane_id":"w1:p2","focused_pane_agent":"claude"}"#)
+    }
+
+    fn runtime_with(deliverer: crate::delivery::tests_support::FakeDeliverer, submit: bool) -> Runtime {
+        Runtime {
+            recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+                "fix the worklog entry".to_string(),
+            )))),
+            deliverer: Box::new(deliverer),
+            delivery_settings: crate::delivery::Settings { submit, toasts: false },
+            journal: Box::new(StderrJournal),
+        }
+    }
+
+    #[test]
+    fn a_finished_take_reaches_delivery_and_the_reply_confirms_the_pane_not_the_text() {
+        let recorder = tone_recorder("delivered");
+        let runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        let (reply, _) = answer(&request, &recorder, &runtime);
+        match reply {
+            Reply::Ok(text) => {
+                assert!(text.contains("delivered to w1:p2"), "got {text:?}");
+                assert!(text.contains("dB"), "got {text:?}");
+                assert!(!text.contains("fix the worklog entry"), "got {text:?}");
+            }
+            other => panic!("expected a confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_off_inserts_and_never_submits() {
+        let recorder = tone_recorder("insert-only");
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let runtime = runtime_with(fake.clone(), false);
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        assert_eq!(
+            fake.calls(),
+            vec![crate::delivery::tests_support::Call::Insert(
+                "w1:p2".into(),
+                "fix the worklog entry".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn submit_on_with_an_agent_submits() {
+        let recorder = tone_recorder("submit");
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let runtime = runtime_with(fake.clone(), true); // dictate_request() names "claude"
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        assert_eq!(
+            fake.calls(),
+            vec![crate::delivery::tests_support::Call::Submit(
+                "w1:p2".into(),
+                "fix the worklog entry".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn submit_on_with_no_agent_falls_back_to_insert() {
+        let recorder = tone_recorder("fallback");
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let runtime = runtime_with(fake.clone(), true);
+        let request = request("dictate", br#"{"focused_pane_id":"w1:p2"}"#); // no agent
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        assert_eq!(
+            fake.calls(),
+            vec![crate::delivery::tests_support::Call::Insert(
+                "w1:p2".into(),
+                "fix the worklog entry".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_rejected_call_fails_the_delivery_keeps_the_audio_and_carries_the_text_and_the_reason() {
+        let recorder = tone_recorder("rejected");
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        );
+        let runtime = runtime_with(fake, false);
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        let (reply, _) = answer(&request, &recorder, &runtime);
+        let text = match reply {
+            Reply::Error(text) => text,
+            other => panic!("expected a failed delivery (Reply::Error), got {other:?}"),
+        };
+        assert!(
+            text.contains("could not deliver to w1:p2 (pane_not_found)"),
+            "got {text:?}"
+        );
+        assert!(text.contains("text: fix the worklog entry"), "got {text:?}");
+        let path = text.split("kept at ").nth(1).unwrap().split(';').next().unwrap();
+        assert!(std::path::Path::new(path).exists(), "AC-10: {path}");
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
