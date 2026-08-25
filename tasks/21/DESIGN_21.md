@@ -1,14 +1,7 @@
 # DESIGN_21 — context: bias recognition with what the agent is talking about
 
 Covers `AC_21.md` in full, and closes the five open questions it left to this
-stage. Revised twice after the S2 gate. First pass (`tasks/21/RUN_21.md`,
-"Gate S2"): `bias::collect`'s return type is now named, an unrecognised
-`[context] source` value has a defined effect, the transcript root and its
-test seam are named, every section is checked against AC-9 rather than only
-the assembly step, and `Engine::transcribe` is left untouched rather than
-half-decided. Second pass ("Gate S2, second pass"): `Source` grows a third
-member, `Auto`, so `resolve("auto")` and `bias::collect`'s parameter type are
-both named rather than one of them being inferred from the other's absence.
+stage.
 
 Decides nine things: the module and its boundary with `src/context.rs`, the
 control flow `[context] source` selects, what `bias::collect` returns and how
@@ -95,18 +88,13 @@ carrying a message that lists the three valid values, the same shape
 `EngineError::Unknown` already gives an unrecognised `[stt] engine`
 (`src/stt.rs`).
 
-An earlier version of this section gave `Source` two members and treated
-`auto` as `bias::collect`'s own dispatch rather than a resolved value, on the
-reasoning that `auto` is a fallback *behaviour*, not a source. That reasoning
-still holds — `Auto` names no filesystem or herdr call of its own, section 2's
-table still dispatches on it into the same two calls — but the type built from
-it could not say what `resolve("auto")` returns, and left `collect`'s
-parameter unnamed, which is exactly the gap that made `bias::source`,
-section 2's dispatch, and the daemon's start-up resolution three tasks each
-free to invent their own answer. A third member that stands for the
-behaviour, rather than a missing member that has to be reconstructed from
-`ContextSource`'s absence, is what let this section state `collect`'s
-parameter type directly instead of describing it in prose.
+`Auto` names no filesystem or herdr call of its own — section 2's dispatch
+table sends it into the same two calls, `transcript::find` then `pane::read`,
+that `Transcript` and `Pane` reach directly — but it is still a member of
+`Source`, not a separate parameter or a value `bias::collect`'s caller
+supplies on its own: `bias::source`, the dispatch in section 2, and the
+daemon's start-up resolution all read `Source` as one three-way type, so none
+of them can disagree about what a resolved `auto` is.
 
 `bias::collect(source: Source, ...) -> Collected` takes the resolved `Source`
 by value — `Auto` included — and never itself fails; a `source` that failed to
@@ -190,8 +178,8 @@ as it stands at the moment the take needs it, with no retry and no wait.
 the algorithm rather than working around its staleness: the id cannot mislead
 discovery if discovery never reads it. It also means the `transcript` and `auto`
 branches need no herdr client at all — only `pane` does — which keeps the
-outward-call surface (section 4) to the one contract the S1 gate already
-sanctioned.
+outward-call surface (section 4) to the one contract this design calls
+herdr through.
 
 **What this costs.** Two agents both working in the same directory, in two
 different panes, cannot be told apart by this algorithm: newest-by-mtime picks
@@ -276,7 +264,7 @@ plugin's own socket to itself, not a connection to herdr. `src/doctor.rs`
 already runs the `herdr` binary directly, though — `herdr --version`, resolved
 through `HERDR_BIN_PATH` with `herdr` as the default (`src/doctor.rs:106`) — so
 running it for `pane read` follows an established shape rather than inventing
-one. The reviewer's note names the exact contract:
+one. The exact contract is:
 `herdr pane read "$pane" --source recent --lines "$CTX_LINES" --format text`
 (`spike/context.sh:42-45`), and the invocation context already carries the pane
 id.
@@ -295,15 +283,14 @@ id.
 Output filtering matches the prototype: trim trailing whitespace per line, drop
 lines with no letter or digit — a frame or a status line, not content — and keep
 the last `PANE_LINES` lines after filtering. `PANE_LINES` is a constant, `80`,
-not a fifth `[context]` key: the S1 gate's reviewer noted the pane branch has no
-budget of its own among the four keys, and the prototype's 80 lines plus the
-overall `prompt_chars` cap already bound the result — the reference the ticket
-points at, not a new requirement. "The pane read returned nothing usable"
+not a fifth `[context]` key: the pane branch has no budget of its own among
+the four keys, and the prototype's 80 lines plus the overall `prompt_chars`
+cap already bound the result. "The pane read returned nothing usable"
 (AC-3) means the process failed to run, exited non-zero, or the filtered
 result is empty.
 
 **Why the split.** `argv` is what a test checks — the exact command line, byte
-for byte, against the contract the reviewer named — without a live herdr.
+for byte, against the contract in `spike/context.sh:42-45` — without a live herdr.
 `read` is exercised the same way `command.rs`'s `CommandEngine` is: pointed at a
 real, small program during a test (a script that prints fixed text or fails),
 never at herdr itself, matching `CLAUDE.md`'s testing rule directly.
@@ -364,9 +351,11 @@ nothing.
 ## 8 What happens when nothing is found
 
 **Context.** AC-8 requires that none of `transcript`, `pane` or `auto` panics on
-a miss; RUN_21's S1 gate flags that a silent difference between the three would
-be the worst outcome; the issue lists three candidates — fail the take, proceed
-on file names alone, report once.
+a miss. A silent difference between the three — one source failing a take,
+another proceeding, a third doing something in between, with nothing to tell
+them apart from the outside — would be the worst outcome; the issue lists
+three candidates for what to do instead — fail the take, proceed on file names
+alone, report once.
 
 **Decision.** All three sources, on a miss, take the same outcome: recognition
 is never blocked. `Collected.bias` (section 2a) is assembled from whatever was
@@ -395,9 +384,9 @@ design reports once per take, not once ever: every miss is logged, on the same
 line the request itself already is, so nothing is suppressed and nothing is
 duplicated into a second channel.
 
-**Why the outcome is uniform across the three.** The gate's own words — "a
-silent difference between the three would be the worst outcome" — argue against
-each value inventing its own recovery. `transcript` and `pane` reaching "not
+**Why the outcome is uniform across the three.** A silent difference between
+the three would be the worst outcome, and that argues against each value
+inventing its own recovery. `transcript` and `pane` reaching "not
 found" by a different route than `auto` does is already a structural
 difference (section 2); giving each a different *consequence* on top of that
 would be a second, needless one.
@@ -517,9 +506,9 @@ No test needs a microphone, a live herdr or a running model. `bias::pane`'s
 tests run a real, small program under `HERDR_BIN_PATH`, never `herdr` itself,
 following `src/stt/command.rs`'s tests exactly. `bias::files`'s tests run real
 `git` against a scratch directory, following `src/config.rs`'s tests. Nothing
-here needs a network. The last `daemon` test is the one AC-9's gate failure
-argues for directly: a positive assertion that logging happened is not
-evidence the string wasn't in it.
+here needs a network. The last `daemon` test is the one AC-9 argues for
+directly: a positive assertion that logging happened is not evidence the
+string wasn't in it.
 
 ## 12 What this design does not decide
 
@@ -529,9 +518,8 @@ evidence the string wasn't in it.
   engine, per AC-6 and section 9's reasoning for declining to guess the shape
   here.
 - Branch, pane title and agent kind, which `docs/design.md` section 4 also
-  lists as context components: out of scope for this issue, per the S1 gate's
-  note and the issue's own requirements, which cover conversation and file
-  names only.
+  lists as context components: out of scope for this issue, whose own
+  requirements cover conversation and file names only.
 - The rewrite stage's own prompt, which stays a separate concern per the issue.
 - A second agent's transcript layout: section 4 names the gate; adding a second
   entry to it is future work, not designed here.
