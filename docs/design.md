@@ -129,6 +129,10 @@ Assembled from herdr and from the repository the target agent works in:
   commits, from the repository root rather than the agent's subdirectory.
 - The git branch, the pane title and the agent kind.
 
+When no transcript is found, or when `[context] source = "pane"`, the
+conversation component is read from the pane's screen through `herdr pane read`
+instead.
+
 The visible screen of a pane running a full-screen agent is deliberately **not**
 the main source: it is mostly frame. The conversation transcript carries the
 content instead.
@@ -227,6 +231,7 @@ skip_if_plain = true
 prompt_file = ""
 
 [context]
+source = "auto"            # auto | transcript | pane
 conversation_turns = 6
 file_names = 40
 prompt_chars = 600
