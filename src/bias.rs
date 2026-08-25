@@ -6,6 +6,7 @@
 //! names are collected independent of `source`. See `tasks/21/DESIGN_21.md`,
 //! sections 1 and 2.
 
+pub mod files;
 pub mod source;
 
 /// The three values `[context] source` can resolve to. `Auto` is a member in
