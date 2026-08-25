@@ -290,6 +290,58 @@ The digest the model check needs is written here rather than taken as a dependen
 and it is verified against the published SHA-256 vectors — a hand-written hash that
 is not checked against a known answer is an assumption, not a check.
 
+### S4 Implement — tasks 5 and 6
+- artifact: `src/client.rs`, `src/daemon.rs`
+- produced: 2026-08-25
+- verification: 119 tests, clippy, format and the manifest check all clean
+
+The second `dictate` answers with text. The reply carries the transcript, the level
+and the pane. An engine that cannot be resolved does not stop the daemon: `cancel`
+still works, `doctor` still explains, and whoever finishes a take is told the reason
+and where the take was kept, so nothing is lost while the configuration is fixed.
+
+## Resume point
+
+Work paused here on 2026-08-25, mid-issue, at the owner's request. Everything is
+committed and pushed; nothing is left uncommitted in any working tree.
+
+**Where this stopped.** Tasks 1 to 6 of `PLAN_13.md` are done. Tasks 7, 8 and 9 are
+not started.
+
+**What exists in the code:**
+
+- `[stt] engine`, `language` and `command` in `src/config.rs`, with defaults
+  `candle`, `auto` and empty.
+- `src/stt/model.rs` — the file name rule `ggml-<model>.bin` and four ordered
+  checks, with a SHA-256 written here and verified against the published vectors.
+- `src/stt/command.rs` — placeholder rendering and running a program. The argument
+  list is rendered at transcription time, not when the engine is built; two tests
+  pin that, because the first version rendered early and would have handed the
+  program a placeholder instead of the take.
+- `src/stt.rs` — the `Engine` trait and `resolve`, with `candle` and `http`
+  reporting that they are not built and naming `command`.
+- `src/client.rs` — `timeout_for`, two minutes for `dictate` and two seconds
+  otherwise.
+- `src/daemon.rs` — the daemon resolves an engine at start, keeps the reason if it
+  cannot, and transcribes a finished take before replying.
+
+**The next step** is task 7: `doctor` must report the engine and the model from the
+same functions the daemon uses, and gain a fourth `State` — the model is not used
+by this configuration — for when the engine is not built or the argument list has no
+`{model}`. `src/doctor.rs` still carries the substring rule in `model_finding`,
+which task 7 removes.
+
+Then task 8, one paragraph in `README.md`, and task 9, running it against the
+`whisper-cli` and the model that are already on the development machine.
+
+**Read before continuing:** `tasks/13/DESIGN_13.md` sections 3 and 4 for what
+`doctor` must say, and `docs/decisions.md` for the three decisions marked as needing
+the owner's word — deferring the built-in engine, the `[stt] command` key, and no
+release tag. None of the three is settled.
+
+**Not verified anywhere yet:** a transcript of real speech. Every take made during
+this work was silence or room tone, and no words have been through the chain.
+
 ## Notes
 
 The prototype passed a bias prompt to `whisper-cli`. That prompt is context, and
