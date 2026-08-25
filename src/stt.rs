@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::config::Stt;
 
-pub trait Engine {
+pub trait Engine: Send + Sync {
     fn transcribe(&self, audio: &Path) -> Result<String, EngineError>;
 }
 
@@ -78,7 +78,7 @@ pub fn wants_our_model(argv: &[String]) -> bool {
 }
 
 /// The engine the configuration asks for, built and ready, or the reason it is not.
-pub fn resolve(stt: &Stt, models: &Path) -> Result<Box<dyn Engine>, EngineError> {
+pub fn resolve(stt: &Stt, models: &Path) -> Result<Box<dyn Engine + Send + Sync>, EngineError> {
     match stt.engine.as_str() {
         "candle" => Err(EngineError::NotBuilt {
             engine: "candle".to_string(),

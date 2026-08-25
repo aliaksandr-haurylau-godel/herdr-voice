@@ -12,15 +12,34 @@ use std::time::Duration;
 use crate::proto::{Reply, Request};
 use crate::transport::{self, Address};
 
-/// How long the client waits for a reply before it gives up. A daemon that
-/// answers a few bytes has no reason to take longer, and a hang is the failure
-/// this bound exists to prevent.
+/// How long the client waits for a command that only writes a few bytes. A hang is
+/// the failure this bound exists to prevent.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long it waits for a command whose answer waits on real work. Transcribing a
+/// two-second take measured two seconds (`docs/evidence.md`), so the short bound
+/// would report a take that worked as a daemon that never answered — a failure
+/// landing squarely on the successful case.
+pub const WORKING_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The bound for a command, chosen by its name.
+///
+/// By name and not by what the command turns out to do: the client picks its bound
+/// before it sends, and whether a `dictate` press starts a take or finishes one is
+/// the daemon's to know. So both halves get the long bound. The press that starts a
+/// take is answered at once, so this only shows when the daemon is wedged — and a
+/// late message about that beats a prompt lie about a take that was working.
+pub fn timeout_for(command: &str) -> Duration {
+    match command {
+        "dictate" => WORKING_TIMEOUT,
+        _ => REPLY_TIMEOUT,
+    }
+}
 
 #[derive(Debug)]
 pub enum ClientError {
     NoDaemon(String),
-    Timeout,
+    Timeout(Duration),
     Transport(String),
     Protocol(String),
 }
@@ -52,12 +71,12 @@ pub fn outcome(result: Result<Reply, ClientError>) -> Outcome {
                  startup entry does"
             )),
         },
-        Err(ClientError::Timeout) => Outcome {
+        Err(ClientError::Timeout(waited)) => Outcome {
             code: 1,
             message: Some(format!(
                 "the daemon did not answer within {} seconds; \
                  check `herdr plugin log list --plugin haurylau.voice`",
-                REPLY_TIMEOUT.as_secs()
+                waited.as_secs()
             )),
         },
         Err(ClientError::Transport(why)) => Outcome {
@@ -89,6 +108,7 @@ pub fn send_to(
     entrypoint: Option<String>,
     context: Vec<u8>,
 ) -> Outcome {
+    let waited = timeout_for(command);
     let mut stream = match transport::connect(address) {
         Ok(stream) => stream,
         Err(_) => return outcome(Err(ClientError::NoDaemon(address.display().to_string()))),
@@ -112,10 +132,10 @@ pub fn send_to(
         let _ = sender.send(Reply::read_from(&mut reader).map_err(|e| e.to_string()));
     });
 
-    match receiver.recv_timeout(REPLY_TIMEOUT) {
+    match receiver.recv_timeout(waited) {
         Ok(Ok(reply)) => outcome(Ok(reply)),
         Ok(Err(why)) => outcome(Err(ClientError::Protocol(why))),
-        Err(_) => outcome(Err(ClientError::Timeout)),
+        Err(_) => outcome(Err(ClientError::Timeout(waited))),
     }
 }
 
@@ -158,15 +178,35 @@ mod tests {
 
     #[test]
     fn a_silent_daemon_is_a_timeout_rather_than_a_hang() {
-        let outcome = outcome(Err(ClientError::Timeout));
+        let outcome = outcome(Err(ClientError::Timeout(REPLY_TIMEOUT)));
         assert_ne!(outcome.code, 0);
         let message = outcome.message.expect("a message");
         assert!(message.contains("did not answer"), "got {message:?}");
+        assert!(
+            message.contains("2 seconds"),
+            "it names what it waited: {message:?}"
+        );
     }
 
     #[test]
-    fn the_reply_timeout_is_bounded_and_short() {
-        assert!(REPLY_TIMEOUT <= std::time::Duration::from_secs(5));
+    fn the_short_bound_stays_short_and_the_long_one_is_still_bounded() {
+        assert!(REPLY_TIMEOUT <= Duration::from_secs(5));
+        assert!(WORKING_TIMEOUT <= Duration::from_secs(300));
+        assert!(WORKING_TIMEOUT > REPLY_TIMEOUT);
+    }
+
+    #[test]
+    fn the_command_that_waits_on_work_gets_the_long_bound() {
+        assert_eq!(timeout_for("dictate"), WORKING_TIMEOUT);
+        assert_eq!(timeout_for("cancel"), REPLY_TIMEOUT);
+        assert_eq!(timeout_for("ptt"), REPLY_TIMEOUT);
+    }
+
+    #[test]
+    fn the_message_names_the_bound_that_was_actually_used() {
+        let outcome = outcome(Err(ClientError::Timeout(WORKING_TIMEOUT)));
+        let message = outcome.message.expect("a message");
+        assert!(message.contains("120 seconds"), "got {message:?}");
     }
 
     #[test]
