@@ -16,18 +16,26 @@
 - artifact: `AC_21.md`
 - produced: 2026-08-26
 
-No production code exists for this concern yet: `src/context.rs` is the
-unrelated invocation-context parser, `src/config.rs` has no `[context]` table,
-and the recognition engine the bias string would feed (issues #13, #15, #16) is
-not built either. The acceptance criteria therefore stop at producing a capped
-bias string through an interface a later stage can consume, rather than at
-wiring a call to an engine.
+No production code assembles a bias string yet: `src/context.rs` is the
+unrelated invocation-context parser, and `src/config.rs` has no `[context]`
+table. Issue #13 closed after this stage's first draft and landed the
+recognition engine's interface — `Engine::transcribe(&self, audio: &Path)` in
+`src/stt.rs`, and the `command` engine in `src/stt/command.rs` — but that
+interface has no place for a bias string: the model and the language are baked
+into `CommandEngine` once at construction, while a bias string is per-take.
+The acceptance criteria therefore still stop at producing a capped bias string
+through an interface a later change can consume, but for a real reason now —
+widening `Engine::transcribe`'s signature is an interface decision this stage
+should not make silently — rather than because no engine exists.
 
-Four items the issue names as genuinely unresolved were left to design rather
-than answered here: how the transcript file is found reliably, which agents
-beyond the one proven have a known conversation location, what happens when no
-conversation can be found at all, and (already settled by the owner, not left
-open) that no privacy handling beyond the prototype's is added.
+Five items the issue names as genuinely unresolved, or that this stage's second
+pass surfaced, were left to design rather than answered here: how the transcript
+file is found reliably, which agents beyond the one proven have a known
+conversation location, what happens when no conversation can be found at all,
+how the bias string is threaded into `Engine::transcribe` (a `{prompt}`
+placeholder alongside `{audio}`/`{model}`/`{language}` is plausible but not
+decided), and (already settled by the owner, not left open) that no privacy
+handling beyond the prototype's is added.
 
 ```yaml
 gate:
@@ -42,9 +50,10 @@ gate:
 
 <!-- Anything a later stage needs and the artifacts do not carry. -->
 
-`docs/evidence.md` has no section titled "Recognition, by hand on macOS" as the
-issue's account of the "пули квест" / "pull request" take might suggest; the
-closest sections are "Context and its effect on the transcript"
-(`docs/evidence.md:22-36`) and "Pane screen versus conversation transcript"
-(`docs/evidence.md:62-66`). The facts given for this run rest on those sections
-plus the issue text itself, not on a section that does not exist.
+This worktree was created from `main` before pull request #20 (issue #13,
+recognition) merged. After the first `AC_21.md`/`RUN_21.md` commit, the
+coordinator rebased `feat/21-context` onto the post-#20 `main` (`27f57b0`); the
+S1 commit now sits on top of it as `9564b65`. `AC_21.md` and `RUN_21.md` were
+revised in a second commit to reflect the recognition code and the
+"Recognition, by hand on macOS" evidence section that landed with #20/#13 —
+both exist now and are cited directly; no discrepancy remains.
