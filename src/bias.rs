@@ -9,6 +9,7 @@
 pub mod files;
 pub mod pane;
 pub mod source;
+pub mod transcript;
 
 /// The three values `[context] source` can resolve to. `Auto` is a member in
 /// its own right, not an absence of one — `bias::source::resolve("auto")`
