@@ -229,3 +229,41 @@ Three consequences for the plan of this run:
 
 This is sequencing between two runs rather than a change to either design, so
 neither artifact is reopened.
+
+## Gate S3
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_21.md
+  reviewer: implementer
+  verdict: BLOCKED
+  date: 2026-08-26
+  questions: []
+  blocker: "Tasks 8, 9 and 10 edit the daemon's shared state bundle and the herdr-binary helper, neither of which exists in this worktree until issue 22 merges. Tasks 11 and 12 depend on them transitively. Owner: the run for issue 22."
+```
+
+Everything the gate checked in the executable portion holds: every citation in
+tasks 1 to 7 matches the code, the prototype's four contracts are quoted as they
+stand, and the two character counts added beyond the design are pinned precisely
+enough to implement and test while staying counts rather than content, so the rule
+against putting the collected string in a log is not weakened by them.
+
+One citation is wrong and does not stop anything: a task points at a constant in
+`src/main.rs` as precedent for an attribute it does not carry. The instruction
+around it is self-contained; only the analogy is weaker than claimed.
+
+### How this run proceeds
+
+Tasks 1 to 7 start now. They are the whole of the collection work — the three
+sources, resolving the source key, assembly and the cap — and the gate found them
+executable start to finish without inventing anything. They touch no file the
+delivery run edits except the configuration reader, where the two runs add
+different tables.
+
+Tasks 8 to 10 wait for issue 22 to merge, and the blocker is recorded above rather
+than worked around: the daemon work is written against the merged code, not against
+a guess at its shape.
+
+Holding tasks 1 to 7 idle until the blocker clears would buy nothing. The verdict
+stands as BLOCKED for the run as a whole, and the part that can move, moves.
