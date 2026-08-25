@@ -318,3 +318,7 @@ clippy clean under `-D warnings`, format clean, manifest 11 entries.
 byte, the toast gate, the agent fallback at both levels, the absence of any reachable
 panic or unwrap, the take surviving a failed delivery, the pinned target, the
 configuration defaults, and the absence of a lock held across the subprocess call.
+
+The reviewer corrected its own report after filing: the findings are its own trace
+of the files, not a merge with a dispatched subagent's report as first stated. The
+verdict and the substance stand; only the attribution was wrong.
