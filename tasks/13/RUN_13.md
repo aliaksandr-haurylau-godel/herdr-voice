@@ -155,6 +155,44 @@ minimal `PATH`, and the daemon is started by herdr. A program found in an
 interactive shell may be absent from the daemon's, so "not found" reports the `PATH`
 it actually searched.
 
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_13.md
+  reviewer: planner
+  verdict: QUESTIONS
+  date: 2026-08-25
+  questions:
+    - "Section 5 transcribes before replying, and nothing touches the client's bound. `src/client.rs:18` waits two seconds and a test asserts it stays at or under five, while `docs/evidence.md:29` measures two seconds of transcription for a two-second take. So AC-11's done-criterion would usually become 'the daemon did not answer within 2 seconds', with the failure landing on a take that succeeded. Whether the fix is a larger bound, a per-command bound, a configured one, or a reply that does not wait is undecided, and it decides whether `src/client.rs` is in this plan at all."
+    - "Section 3 says the model check does not apply without a `{model}` placeholder, and that `doctor` and the engine cannot disagree. That leaves the `doctor` model line undefined for the state a fresh install is in — engine not built, command empty, no argument list to ask for a model — so the task rewriting `model_finding` has no checkable done-criterion there."
+  blocker: null
+  notes:
+    - "Everything else cuts: four independent tasks with real edges and a test list each that needs no model, microphone or network. The dependency graph is unambiguous."
+    - "Separate note: the design replaces the `dictate` reply with the transcript without saying whether the measured level survives, which #8 kept deliberately. I can plan either way."
+```
+
+### S2 Design — answers to the gate
+- artifact: `DESIGN_13.md`, a new section 4a and two additions
+- produced: 2026-08-25
+
+The first question is the best catch of the night, because it would have shipped: a
+take that worked would have been reported as a daemon that never answered, and the
+failure would have landed on the successful case. The bound now belongs to the
+command — two seconds for `cancel`, two minutes for the `dictate` that finishes a
+take — and the test changes from "the bound is short" to "the short one stays short
+and the long one is bounded". A bound exists to turn a hang into a message, not to
+cap work somebody asked for.
+
+The second is answered by a sentence `doctor` did not have: when the configuration
+cannot ask for a model, the model line says it is not used by this configuration
+rather than missing. "Missing" would send somebody to download a file that nothing
+would read, and a fresh install is exactly that state.
+
+The separate note is taken as well: the level stays beside the transcript, as issue
+8 decided.
+
+A revised artifact needs a new verdict; the gate runs again.
+
 ## Notes
 
 The prototype passed a bias prompt to `whisper-cli`. That prompt is context, and

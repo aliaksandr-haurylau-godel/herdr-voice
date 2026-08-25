@@ -85,6 +85,13 @@ tolerated rather than fatal.
 placeholder brings its own model, and demanding one this plugin manages would refuse
 a working setup. The model is resolved and checked only when the list asks for it.
 
+**And what `doctor` says then.** The same thing, which is the point of one function:
+when the configuration cannot ask for a model — the engine is not built, or the
+argument list has no `{model}` — the model line says the model is not used by this
+configuration, and names `[stt] model` and the directory it would be looked for in.
+That is the state a fresh install is actually in, and it is a different sentence
+from "missing", which would send somebody to download a file nothing would read.
+
 ## 4 When the engine cannot run
 
 **Context.** The default engine is `candle` and it is not built. `[stt] command`
@@ -112,9 +119,38 @@ project treats as a defect of the same weight as a wrong transcript.
 that is. Somebody who believes the built-in engine is running while an external one
 is finds out at the worst possible moment.
 
+## 4a How long the client waits
+
+**Context.** The client gives the daemon two seconds to answer
+(`src/client.rs`, `REPLY_TIMEOUT`), and a test asserts that bound stays short. That
+was written when every answer was a few bytes. `docs/evidence.md` measures two
+seconds of transcription for a two-second take.
+
+**Problem.** Transcribing before replying turns a take that worked into "the
+daemon did not answer within 2 seconds". The failure would land on the successful
+case, which is the worst place to put one.
+
+**Decision.** The bound belongs to the command, not to the client. `cancel` — and
+`ptt` when it arrives — keep two seconds. The half of `dictate` that finishes a
+take gets two minutes, because that is the one command whose answer waits on real
+work. The existing test changes from "the bound is short" to "the short bound stays
+short and the long one is still bounded".
+
+**Why.** A bound exists to turn a hang into a message, not to cap work somebody
+asked for. Two seconds is right for a command that only writes a few bytes and
+wrong for one that runs a speech model; a single number cannot be both. Two minutes
+is far past any transcription measured here and still far short of forever.
+
+**What this does not do.** It does not make the person wait less. Delivery — the
+stage that puts text into a pane — is where a take stops blocking whoever started
+it, and that is another issue. Until then the wait is real and the bound only
+decides whether it ends in a transcript or in a lie.
+
 ## 5 What the daemon answers
 
 A finished take is transcribed before `dictate` replies. The reply carries the
+transcript, and keeps the measured level beside it as issue 8 decided: a level next
+to an accepted take is what makes a marginal input visible before it becomes a bad
 transcript. A take that transcribes to nothing is reported as such, not as an empty
 success — a blank reply is indistinguishable from a working one that had nothing to
 say.
@@ -131,6 +167,7 @@ consumes them will decide when they stop being useful.
 | `stt::command` | placeholder substitution, running the program, reading it | substitution of each placeholder, an appended path, `auto`, a program that is absent, one that fails, one that prints nothing |
 | `config` | `[stt] engine`, `language`, `command` | defaults, partial file, unknown key |
 | `daemon` | transcribing a finished take | a fake engine returning text, and one returning an error |
+| `client` | the reply bound, per command | the short bound stays short, the long one is bounded, and `dictate` gets the long one |
 | `doctor` | the engine line and the model line | the same states the engine reports |
 
 The program tests use a shell command rather than a real transcriber: `echo` for a
@@ -159,7 +196,7 @@ no microphone, no network — like every stage before this one.
 | AC-8, AC-8a an unknown name, an empty list | 4 |
 | AC-9 the exact file name | 3 |
 | AC-10 the damaged model | 3 |
-| AC-11 the transcript in the reply | 5 |
+| AC-11 the transcript in the reply | 4a, 5 |
 | AC-12 the language, `auto` included | 2 |
 | AC-13 `doctor` agrees with the engine | 3, 4 |
 | AC-14 the README line | 4 |
