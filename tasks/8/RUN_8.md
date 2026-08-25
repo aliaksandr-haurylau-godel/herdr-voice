@@ -128,6 +128,24 @@ discretion, and they are what the plan will say: the `dictate` that reports a
 remembered failure only reports and clears it, and the reply for an accepted take
 carries the path and the measured level.
 
+### S3 Plan — a reversal withdrawn
+
+The plan's task 7 proposed taking `dictate` out of `needs_target_pane`, on the
+argument that a take needs no pane because the pane matters at delivery. That
+argument is incomplete and the proposal is withdrawn.
+
+The pane is needed while recording, for two reasons. The indicator of
+`docs/design.md` section 6 blinks in the sidebar token of an agent's row and in the
+tab label, and it is drawn on a specific pane from the moment recording starts.
+And a target chosen at the end follows the focus: somebody speaks looking at one
+agent, switches while thinking, and the text lands in another. The prototype pins
+the target at the start and keeps it in the run's state for exactly that reason.
+
+So `dictate` stays where issue 3 put it. The target is pinned when a take begins
+and held until delivery, and a take does not start when no pane can be determined —
+losing a take is worse than nothing, and better than delivering it to the wrong
+agent.
+
 ## Notes
 
 The probe used to establish the `cpal` facts was a throwaway crate outside the
