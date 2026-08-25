@@ -190,15 +190,32 @@ impl Default for HerdrDeliverer {
     }
 }
 
+/// The argument list for `herdr pane send-text`, built as data so a test can
+/// assert on it directly rather than only through a fake that never checks
+/// what a real subcommand expects.
+fn insert_args<'a>(pane: &'a str, text: &'a str) -> Vec<&'a str> {
+    vec!["pane", "send-text", pane, text]
+}
+
+/// The argument list for `herdr agent prompt`.
+fn submit_args<'a>(pane: &'a str, text: &'a str) -> Vec<&'a str> {
+    vec!["agent", "prompt", pane, text]
+}
+
+/// The argument list for `herdr notification show ... --body ...`.
+fn notify_args<'a>(title: &'a str, body: &'a str) -> Vec<&'a str> {
+    vec!["notification", "show", title, "--body", body]
+}
+
 impl Deliverer for HerdrDeliverer {
     fn insert(&self, pane: &str, text: &str) -> Result<(), DeliveryError> {
-        self.run(&["pane", "send-text", pane, text])
+        self.run(&insert_args(pane, text))
     }
     fn submit(&self, pane: &str, text: &str) -> Result<(), DeliveryError> {
-        self.run(&["agent", "prompt", pane, text])
+        self.run(&submit_args(pane, text))
     }
     fn notify(&self, title: &str, body: &str) -> Result<(), DeliveryError> {
-        self.run(&["notification", "show", title, "--body", body])
+        self.run(&notify_args(title, body))
     }
 }
 
@@ -221,6 +238,36 @@ mod tests {
         assert_eq!(
             extract_reason(b"herdr: unknown flag --bogus\n"),
             "herdr: unknown flag --bogus"
+        );
+    }
+
+    #[test]
+    fn insert_args_call_herdr_pane_send_text() {
+        assert_eq!(
+            insert_args("w1:p2", "hello"),
+            vec!["pane", "send-text", "w1:p2", "hello"]
+        );
+    }
+
+    #[test]
+    fn submit_args_call_herdr_agent_prompt() {
+        assert_eq!(
+            submit_args("w1:p2", "hello"),
+            vec!["agent", "prompt", "w1:p2", "hello"]
+        );
+    }
+
+    #[test]
+    fn notify_args_call_herdr_notification_show_with_a_body_flag() {
+        assert_eq!(
+            notify_args("Delivery failed", "w1:p2: the text is in the plugin log"),
+            vec![
+                "notification",
+                "show",
+                "Delivery failed",
+                "--body",
+                "w1:p2: the text is in the plugin log"
+            ]
         );
     }
 
