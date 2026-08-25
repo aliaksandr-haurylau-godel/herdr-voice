@@ -236,3 +236,30 @@ omits the daemon's dependency on delivery and configuration, which the prose
 states — the plan makes it explicit.
 
 S2 is closed.
+
+## Gate S3
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_22.md
+  reviewer: implementer
+  verdict: READY
+  date: 2026-08-26
+  questions: []
+  blocker: null
+```
+
+The reviewer checked every file the plan touches against the worktree. Every line
+citation matches the code, the two JSON refusal shapes are quoted byte for byte
+against the measurement they come from, and the three user-visible strings match
+the design word for word. No placeholder, no forward reference to something a later
+task defines, no test whose expected output is left to the implementer.
+
+The three points the gate was asked to scrutinise hold: the audible test source is
+concrete and the task that needs it names where; the interim `None` for the agent
+is stated as a temporary lie closed by the last task rather than a finished
+feature; and the refusal parser quotes both shapes rather than pointing at them.
+
+S3 is closed. Next is S4 Implement, whose gate is a review of the diff before any
+pull request exists.
