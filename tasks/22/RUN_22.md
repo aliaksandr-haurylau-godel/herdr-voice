@@ -78,3 +78,31 @@ reply becomes a confirmation of where it was delivered and at what level, rather
 than the text itself. That is a change to what the client prints, in the same class
 as the earlier decision that made it print anything at all, and it is recorded in
 `docs/decisions.md` when the criteria are revised.
+
+### S1 Assess — revised after the gate
+- artifact: `AC_22.md`, `docs/decisions.md`
+- produced: 2026-08-26
+
+Both questions are answered in the artifact, with facts rather than choices where
+a fact settled it.
+
+The as-is section is rewritten against `main` as it stands after pull request
+#20: recognition is in, `dictate` already produces real text on a finished take,
+and delivery is now written as a called stage (AC-2), not only a tested module.
+That changes what `dictate`'s reply carries: a successful delivery is confirmed by
+where the text went, not repeated (AC-11); a failed one carries the text itself
+and the reason (AC-12), since neither the pane nor the client's own output has
+the text otherwise. Recorded in `docs/decisions.md`.
+
+The pane-gone question is answered by the measurement in `docs/evidence.md`,
+"Delivering into a pane that is gone": both `herdr pane send-text` and `herdr
+agent prompt` refuse a nonexistent pane with exit 1 and a machine-readable error
+code. The old AC-5 (pane gone treated as a failure, not a silent no-op) is now
+one instance of AC-6 (any rejected call is a failed delivery); no existence check
+and no dedicated fake are needed.
+
+The reviewer's note on AC-3 is acted on rather than left as a note: the
+prototype's fallback — `submit = true` still inserts without submitting when the
+pinned pane has no agent — is restored as AC-4, using `Invocation.
+focused_pane_agent`, already captured at pin time, so no new herdr call is
+needed to keep the condition.
