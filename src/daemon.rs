@@ -168,9 +168,9 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take) -> Reply {
                     "Delivery failed",
                     &format!("{target}: the text is in the plugin log"),
                 ) {
-                    runtime
-                        .journal
-                        .write(&toast_failed_line(&toast_why.to_string().replace('\n', " ")));
+                    runtime.journal.write(&toast_failed_line(
+                        &toast_why.to_string().replace('\n', " "),
+                    ));
                 }
             }
             Reply::Error(format!(
@@ -656,15 +656,24 @@ mod tests {
     }
     impl crate::delivery::Deliverer for TracingDeliverer {
         fn insert(&self, pane: &str, text: &str) -> Result<(), crate::delivery::DeliveryError> {
-            self.trace.lock().unwrap().push(format!("deliver:insert:{pane}"));
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("deliver:insert:{pane}"));
             self.inner.insert(pane, text)
         }
         fn submit(&self, pane: &str, text: &str) -> Result<(), crate::delivery::DeliveryError> {
-            self.trace.lock().unwrap().push(format!("deliver:submit:{pane}"));
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("deliver:submit:{pane}"));
             self.inner.submit(pane, text)
         }
         fn notify(&self, title: &str, body: &str) -> Result<(), crate::delivery::DeliveryError> {
-            self.trace.lock().unwrap().push("deliver:notify".to_string());
+            self.trace
+                .lock()
+                .unwrap()
+                .push("deliver:notify".to_string());
             self.inner.notify(title, body)
         }
     }
@@ -745,7 +754,11 @@ mod tests {
         answer(&request, &recorder, &runtime);
 
         let lines = journal.0.lock().unwrap();
-        assert_eq!(lines.len(), 3, "the toast's own failure must be journaled too, got {lines:?}");
+        assert_eq!(
+            lines.len(),
+            3,
+            "the toast's own failure must be journaled too, got {lines:?}"
+        );
         assert!(lines[0].contains("fix the worklog entry"), "got {lines:?}");
         assert!(
             lines[1].contains("w1:p2") && lines[1].contains("pane_not_found"),
