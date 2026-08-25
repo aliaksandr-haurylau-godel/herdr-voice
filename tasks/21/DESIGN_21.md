@@ -1,12 +1,14 @@
 # DESIGN_21 — context: bias recognition with what the agent is talking about
 
 Covers `AC_21.md` in full, and closes the five open questions it left to this
-stage. Revised after the S2 gate returned `QUESTIONS` (`tasks/21/RUN_21.md`,
+stage. Revised twice after the S2 gate. First pass (`tasks/21/RUN_21.md`,
 "Gate S2"): `bias::collect`'s return type is now named, an unrecognised
-`[context] source` value has a defined effect, the transcript root and its test
-seam are named, every section is checked against AC-9 rather than only the
-assembly step, and `Engine::transcribe` is left untouched rather than
-half-decided.
+`[context] source` value has a defined effect, the transcript root and its
+test seam are named, every section is checked against AC-9 rather than only
+the assembly step, and `Engine::transcribe` is left untouched rather than
+half-decided. Second pass ("Gate S2, second pass"): `Source` grows a third
+member, `Auto`, so `resolve("auto")` and `bias::collect`'s parameter type are
+both named rather than one of them being inferred from the other's absence.
 
 Decides nine things: the module and its boundary with `src/context.rs`, the
 control flow `[context] source` selects, what `bias::collect` returns and how
@@ -46,13 +48,14 @@ readable without also reading how a `.jsonl` file is parsed.
 `docs/design.md` section 4 does not yet describe the pane source at all (noted
 out of scope for this stage — see section 11).
 
-**Decision.** `bias::collect` dispatches on `[context] source` before doing
-anything else:
+**Decision.** `bias::collect` takes a resolved `Source` (section 2a, which
+names the type — this section only fixes the behaviour per value) and
+dispatches on it before doing anything else:
 
 ```
-transcript  -> transcript::find(...)                         (herdr never called)
-pane        -> pane::read(...)                                (transcript never sought)
-auto        -> transcript::find(...); if empty, pane::read(...)
+Source::Transcript -> transcript::find(...)                    (herdr never called)
+Source::Pane        -> pane::read(...)                          (transcript never sought)
+Source::Auto         -> transcript::find(...); if empty, pane::read(...)
 ```
 
 Each branch produces a conversation component (possibly empty) and a "found"
@@ -76,35 +79,56 @@ section); and that refusal's own effect on the take, which has to be a
 checkable outcome and not left implicit.
 
 **Decision.** `[context] source` is resolved once, at daemon start, the same
-moment and the same shape recognition already is:
+moment and the same shape recognition already is. `Source` has three members,
+naming exactly the three values `AC_21.md` names:
 
 ```
-pub enum Source { Transcript, Pane }
+pub enum Source { Transcript, Pane, Auto }
 pub fn resolve(value: &str) -> Result<Source, String>;  // Err names the three
 type ContextSource = Result<Source, String>;              // held beside `Recognition`
 ```
 
-An unrecognised value — anything but `auto`, `transcript` or `pane` — is `Err`,
+`resolve("auto")` is `Ok(Source::Auto)` — not an absence of a member, and not
+something `bias::collect`'s caller decides on `resolve`'s behalf. An
+unrecognised value — anything but `auto`, `transcript` or `pane` — is `Err`,
 carrying a message that lists the three valid values, the same shape
 `EngineError::Unknown` already gives an unrecognised `[stt] engine`
-(`src/stt.rs`). `Source` itself has only two members: `auto` is
-`bias::collect`'s own dispatch (section 2) — try `Transcript`, then `Pane` if
-it found nothing — not a third value something downstream has to match on.
+(`src/stt.rs`).
 
-`bias::collect` takes an already-resolved `Source` (or the caller's instruction
-to try both) and never itself fails. What it returns on success:
+An earlier version of this section gave `Source` two members and treated
+`auto` as `bias::collect`'s own dispatch rather than a resolved value, on the
+reasoning that `auto` is a fallback *behaviour*, not a source. That reasoning
+still holds — `Auto` names no filesystem or herdr call of its own, section 2's
+table still dispatches on it into the same two calls — but the type built from
+it could not say what `resolve("auto")` returns, and left `collect`'s
+parameter unnamed, which is exactly the gap that made `bias::source`,
+section 2's dispatch, and the daemon's start-up resolution three tasks each
+free to invent their own answer. A third member that stands for the
+behaviour, rather than a missing member that has to be reconstructed from
+`ContextSource`'s absence, is what let this section state `collect`'s
+parameter type directly instead of describing it in prose.
+
+`bias::collect(source: Source, ...) -> Collected` takes the resolved `Source`
+by value — `Auto` included — and never itself fails; a `source` that failed to
+resolve never reaches it (section 2a, "The refusal's effect on the take",
+below). What it returns on success:
 
 ```
 pub struct Collected {
     pub bias: String,                    // the finished, capped string — AC-6's interface
-    pub attempted: Vec<(Source, bool)>,  // each source tried, and whether it found anything
+    pub attempted: Vec<(Source, bool)>,  // each source actually tried, and whether it found anything
     pub file_count: usize,
     pub truncated: bool,
 }
 ```
 
-`bias` is the only field that ever holds conversation or file content; the
-other three are counts and flags a caller can log without reading it.
+`attempted`'s entries are always `Transcript` or `Pane` — never `Auto`, which
+names a mode `collect` runs under, not a call it makes; a `Source::Auto` input
+produces one entry when the transcript is found and two when it is not, in
+the order they were tried, which is what lets the log line in section 8 name
+both attempts under `auto` without the log line itself knowing what `auto`
+means. `bias` is the only field that ever holds conversation or file content;
+the other three are counts and flags a caller can log without reading it.
 
 **Why this shape, and not a bare `String`.** A single return type that carries
 the finished string alongside what a log line needs about it means the task
@@ -201,6 +225,17 @@ a project directory under a temporary path and passes that as `root` directly
 "a fixture `.jsonl` found by directory" and "a fake transcript reaching the log
 line" (section 11) are both exactly this: a scratch `root`, not a mock of the
 filesystem.
+
+`home` is `Option<String>` (`config::Vars`), and `find` takes a `Path`, not an
+`Option<&Path>`: the daemon computes `root` only when `home` is `Some`, and
+when it is `None` there is no root to compute at all. This is not a fourth
+outcome needing its own handling — it is the case section 8 already covers:
+transcript discovery never runs, `Source::Transcript` and `Source::Auto`'s
+first attempt both report a miss the same way an existing-but-empty search
+does, and the take proceeds on whatever else was collected. No home directory
+is exactly as findable as no transcript in the directory that would have held
+one, and this design treats them identically rather than adding a case for the
+first that the second does not have.
 
 **The service-turn filter (AC-2).** Once a transcript file is read, each line is
 a JSON record; `user`/`assistant` turns whose text begins with
@@ -385,28 +420,33 @@ trait issue #13 already shipped, and with it the `candle` (#15) and `http`
 (#16) engines, neither built, to a new parameter that this same document never
 once passes to anything. Whoever plans #21 would cut a task to change the
 signature and every call site, and the take still would not transcribe with
-context afterward — the very next issue would have to touch that signature
-again, either to use it or to discover the shape chosen here does not fit what
-it needs.
+context afterward — issue #26, which the owner has set to follow this one
+specifically to pass the bias string to the engine, would have to touch that
+signature again anyway, either to use it or to discover the shape chosen here
+does not fit what it needs.
 
 **Decision.** `Engine::transcribe` is not touched by this design. The shape of
 the widening — whether the bias string is a second call argument, a value set
 before the call, or something `CommandEngine`'s per-take state does not have
-room for yet — is decided by the issue that also passes it to the engine, not
-by this one. `bias::collect` and the `Collected` type (section 2a) are the
-whole of what #21 exposes; AC-6 is satisfied by that exposure existing and
-being callable, not by a trait signature nothing in this issue calls.
+room for yet — is decided by #26, the issue the owner has set to follow this
+one and pass the bias string to the engine, not by this one. `bias::collect`
+and the `Collected` type (section 2a) are the whole of what #21 exposes; AC-6
+is satisfied by that exposure existing and being callable, not by a trait
+signature nothing in this issue calls.
 
 **Why not decide the shape anyway, as a non-binding note.** A shape written
 down here is still a decision, whether or not this issue's own code follows
-it: the next issue either follows it or reopens it, and reopening a choice its
-own predecessor made reads as the predecessor having been wrong, not as the
+it: #26 either follows it or reopens it, and reopening a choice its own
+predecessor made reads as the predecessor having been wrong, not as the
 question having been legitimately left open. A design is only honest about an
 interface if it also exercises it; this one does not, so the accurate account
 of what this stage actually knows is that the shape is undecided, not that it
 is decided-but-dormant. AC-6's invitation to settle this "as an open question
 for design" is answered here by declining, with the reason written down,
-rather than left unaddressed.
+rather than left unaddressed. That #26 follows this issue immediately, rather
+than at some unscheduled later point, is the owner's decision, not this
+design's — it changes when the benefit arrives, not whether deciding the
+shape now would have been premature.
 
 **What #21 itself does.** `bias::collect` is `pub`, tested, and called from
 exactly one place: `src/daemon.rs`'s `dictate` handler, to produce the log
@@ -417,8 +457,17 @@ than only from tests — the same reason `IMPLEMENTED` in `src/main.rs:107` is
 about that call requires `Engine` to change: it is a plain function call whose
 `Collected` is inspected for its metadata (section 8) and then dropped.
 
-**What the next issue inherits.** A working, tested `bias::collect` to call,
-and no interface commitment to work around or unwind. It decides, with a
+That call needs the working directory and the agent name, not only the pane
+id `dictate` receives today (`fn dictate(recorder: &Recorder, recognition:
+&Recognition, pane: &str)`, `src/daemon.rs`). Both already exist one frame up,
+on the `Invocation` `answer` parses before calling `dictate`
+(`focused_pane_cwd`, `focused_pane_agent`, `src/context.rs`); threading them
+into `dictate`'s own parameters is a signature change inside one file, not a
+design decision — noted so the plan does not treat it as a missing piece of
+this document.
+
+**What #26 inherits.** A working, tested `bias::collect` to call, and no
+interface commitment to work around or unwind. It decides, with a
 concrete consumer in hand — the recognition it is trying to improve — whether
 the bias string becomes a second `transcribe` argument or something else, and
 it makes that decision the way #13 made its own: settled once, for all three
