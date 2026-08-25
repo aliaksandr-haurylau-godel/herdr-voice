@@ -99,7 +99,10 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("herdr-voice-bias-files-{tag}-{}", std::process::id()));
+        path.push(format!(
+            "herdr-voice-bias-files-{tag}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create scratch");
         path

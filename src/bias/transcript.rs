@@ -54,7 +54,13 @@ pub fn find(cwd: &str, agent: Option<&str>, root: &Path) -> Option<PathBuf> {
 
 fn slugify(cwd: &str) -> String {
     cwd.chars()
-        .map(|c| if c == '/' || c == '.' || c == '@' { '-' } else { c })
+        .map(|c| {
+            if c == '/' || c == '.' || c == '@' {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -121,7 +127,9 @@ fn extract_text(content: Option<&serde_json::Value>) -> Option<String> {
 
 fn is_service_turn(text: &str) -> bool {
     let trimmed = text.trim_start();
-    SERVICE_MARKERS.iter().any(|marker| trimmed.starts_with(marker))
+    SERVICE_MARKERS
+        .iter()
+        .any(|marker| trimmed.starts_with(marker))
 }
 
 #[cfg(test)]

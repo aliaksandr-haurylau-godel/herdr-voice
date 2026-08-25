@@ -91,7 +91,10 @@ mod tests {
 
     fn scratch_script(tag: &str, contents: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("herdr-voice-bias-pane-{tag}-{}.sh", std::process::id()));
+        path.push(format!(
+            "herdr-voice-bias-pane-{tag}-{}.sh",
+            std::process::id()
+        ));
         let mut file = std::fs::File::create(&path).expect("create script");
         file.write_all(contents.as_bytes()).expect("write script");
         drop(file);
