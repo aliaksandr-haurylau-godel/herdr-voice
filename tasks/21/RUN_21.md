@@ -57,3 +57,34 @@ S1 commit now sits on top of it as `9564b65`. `AC_21.md` and `RUN_21.md` were
 revised in a second commit to reflect the recognition code and the
 "Recognition, by hand on macOS" evidence section that landed with #20/#13 —
 both exist now and are cited directly; no discrepancy remains.
+
+## Gate S1
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_21.md
+  reviewer: designer
+  verdict: QUESTIONS
+  date: 2026-08-26
+  questions:
+    - "AC-3 requires that the conversation source — transcript file on disk versus pane contents read through herdr — be set by configuration and not hard-wired to the file, but AC-7 enumerates the [context] table as exactly three keys, and docs/design.md documents only those three. No name, no permitted values and no default are given for the key that selects the source. The config schema and the module's entry point cannot be written without inventing all three, and the default alone decides what a machine with no configuration file does."
+    - "AC-3's second sentence reads two ways with a different design behind each: (a) a mode the person sets, where the configured source is used and the other is never consulted, or (b) transcript first, pane contents as an automatic fallback when no transcript is found. The as-is section supports (b), the to-be section supports (a). They differ in the module's control flow, in whether herdr is called at all on the transcript-success path, and in what the open question about having no conversation at all even means."
+  blocker: null
+```
+
+Noted by the reviewer, not a gate question: nothing in `src/` can call herdr today
+— there is no client for reading a pane and no invocation of the `herdr` binary —
+so the pane source needs a new outward call. The prototype's exact command in
+`spike/context.sh` is a sufficient contract to design against.
+
+The reviewer had no shell and could not read the issue with `gh`; it checked the
+criteria against `docs/design.md`, `docs/evidence.md`, `spike/context.sh`,
+`src/stt.rs`, `src/context.rs` and `src/config.rs`, and every citation it checked
+held.
+
+### Answer pending
+
+The first question is the owner's: a configuration key is a user-visible name.
+Asked on 2026-08-26. The second follows from it — a third value that means "decide
+per take" is what makes a set mode and an automatic fallback the same mechanism.
