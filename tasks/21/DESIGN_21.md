@@ -1,11 +1,19 @@
 # DESIGN_21 — context: bias recognition with what the agent is talking about
 
 Covers `AC_21.md` in full, and closes the five open questions it left to this
-stage. Decides eight things: the module and its boundary with `src/context.rs`,
-the control flow `[context] source` selects, how the transcript file is found,
-which agents that reaches, how the pane is read, how file names are collected,
-what happens when nothing is found, and the shape a later issue will use to hand
-the bias string to `Engine::transcribe`.
+stage. Revised after the S2 gate returned `QUESTIONS` (`tasks/21/RUN_21.md`,
+"Gate S2"): `bias::collect`'s return type is now named, an unrecognised
+`[context] source` value has a defined effect, the transcript root and its test
+seam are named, every section is checked against AC-9 rather than only the
+assembly step, and `Engine::transcribe` is left untouched rather than
+half-decided.
+
+Decides nine things: the module and its boundary with `src/context.rs`, the
+control flow `[context] source` selects, what `bias::collect` returns and how
+an invalid `source` value behaves, how the transcript file is found, which
+agents that reaches, how the pane is read, how file names are collected, what
+happens when nothing is found and exactly what is logged about it, and why
+`Engine::transcribe` is not touched by this design.
 
 ## 1 The module
 
@@ -13,18 +21,22 @@ the bias string to `Engine::transcribe`.
 context herdr passes per request (`src/context.rs:1`) — and R8 asks for a name
 that does not collide with it.
 
-**Decision.** A new module, `src/bias.rs`, with three submodules:
+**Decision.** A new module, `src/bias.rs`, with four submodules:
 
-- `src/bias/transcript.rs` — finds and reads the target agent's transcript file.
+- `src/bias/source.rs` — resolves `[context] source` into a `Source`, or
+  refuses it (section 2a).
+- `src/bias/transcript.rs` — finds and reads the target agent's transcript
+  file, and filters out its service turns.
 - `src/bias/pane.rs` — reads the pane's screen contents through herdr.
 - `src/bias/files.rs` — collects recently touched file and directory names.
 
-`src/bias.rs` itself holds the `[context] source` control flow (section 2), the
-service-turn filter (section 3), and the assembly and cap (section 6). This
+`src/bias.rs` itself holds the `[context] source` dispatch (section 2), the
+`Collected` type (section 2a), and the assembly and cap (section 7). This
 mirrors how `src/stt.rs` holds `Engine`/`resolve` while `src/stt/command.rs` and
 `src/stt/model.rs` hold one concern each.
 
-**Why.** Three sources, three failure modes, three things to fake in a test. One
+**Why.** Four sources of failure — an unresolved `source`, a transcript miss, a
+pane miss, an empty repository — and four things to fake in a test. One
 file per source keeps each fake small and keeps the control flow in section 2
 readable without also reading how a `.jsonl` file is parsed.
 
@@ -52,6 +64,75 @@ calls, rather than one function with a fallback flag threaded through it, keeps
 the rule that `pane` never even builds a session-id lookup and `transcript` never
 even builds a pane-read command line — not just "doesn't call them", but doesn't
 construct the arguments it would call them with.
+
+## 2a `Collected`, and an unrecognised `source`
+
+**Context.** `bias::collect` cannot return a bare `String`. Three decisions
+elsewhere in this document need more than text to cross that boundary: the
+per-take log line naming which source was tried and what it found, with `auto`
+naming both attempts (section 8); an unrecognised `[context] source` refused
+with the three valid names listed, rather than silently defaulted (this
+section); and that refusal's own effect on the take, which has to be a
+checkable outcome and not left implicit.
+
+**Decision.** `[context] source` is resolved once, at daemon start, the same
+moment and the same shape recognition already is:
+
+```
+pub enum Source { Transcript, Pane }
+pub fn resolve(value: &str) -> Result<Source, String>;  // Err names the three
+type ContextSource = Result<Source, String>;              // held beside `Recognition`
+```
+
+An unrecognised value — anything but `auto`, `transcript` or `pane` — is `Err`,
+carrying a message that lists the three valid values, the same shape
+`EngineError::Unknown` already gives an unrecognised `[stt] engine`
+(`src/stt.rs`). `Source` itself has only two members: `auto` is
+`bias::collect`'s own dispatch (section 2) — try `Transcript`, then `Pane` if
+it found nothing — not a third value something downstream has to match on.
+
+`bias::collect` takes an already-resolved `Source` (or the caller's instruction
+to try both) and never itself fails. What it returns on success:
+
+```
+pub struct Collected {
+    pub bias: String,                    // the finished, capped string — AC-6's interface
+    pub attempted: Vec<(Source, bool)>,  // each source tried, and whether it found anything
+    pub file_count: usize,
+    pub truncated: bool,
+}
+```
+
+`bias` is the only field that ever holds conversation or file content; the
+other three are counts and flags a caller can log without reading it.
+
+**Why this shape, and not a bare `String`.** A single return type that carries
+the finished string alongside what a log line needs about it means the task
+that builds `bias::collect` and the task that logs about it can be planned
+separately without one guessing the other's shape — which is exactly what a
+bare `String` would force: either `bias` grows a side channel later, or the
+daemon re-derives "which source found something" by inspecting the text, which
+is the kind of inspection AC-9 exists to prevent.
+
+**The refusal's effect on the take.** An invalid `[context] source` never fails
+a `dictate` request — the same answer section 8 gives when a source resolves
+correctly but finds nothing, extended to the value not resolving at all. The
+daemon logs the configuration error once per take (the error, never the
+string), and calls `bias::files::collect` directly for the file-name
+component, since collecting file names does not depend on `source`. The
+conversation component is empty, exactly as if `transcript` or `pane` had been
+tried and missed. `[context] source = "vosk"` therefore behaves like a
+permanent miss, not like a broken take — every other config-driven gap in this
+design costs accuracy, not the recording, and this is that rule applied to a
+typo in a key nobody has set correctly yet.
+
+**Why resolved once, not per take.** `stt::resolve` already establishes the
+pattern this borrows: a configuration value that can be wrong is checked once,
+at daemon start, and the `Result` is held and consulted per request rather
+than re-validated on every `dictate` (`src/daemon.rs`, `Recognition`).
+Re-parsing `source` on every take would repeat work whose answer cannot change
+before a restart, since configuration is read once at daemon start
+(`docs/decisions.md`).
 
 ## 3 Finding the transcript file
 
@@ -100,6 +181,26 @@ begins is still "not found" for that take. Waiting would put a filesystem poll
 on the path that runs while somebody is speaking, which the project already
 avoids doing with configuration (`docs/decisions.md`, "configuration is read
 once at daemon start").
+
+**The root, named.** `transcript::find` takes the transcript root as a
+parameter, not something it computes for itself:
+
+```
+pub fn find(cwd: &str, agent: Option<&str>, root: &Path) -> Option<PathBuf>;
+```
+
+In production, `src/daemon.rs` computes `root` once, at daemon start, next to
+the rest of the configuration: `<home>/.claude/projects` — the directory the
+prototype searches (`spike/context.sh:79`) — built from
+`config::Vars::from_env().home`, the same environment capture
+`config::directory` already reads, rather than a second one. A test never
+touches the real home directory: it builds a small directory tree shaped like
+a project directory under a temporary path and passes that as `root` directly
+— the same kind of seam `bias::pane::read`'s `binary` parameter and
+`bias::files`'s repository directory (section 6) already give a test. AC-8's
+"a fixture `.jsonl` found by directory" and "a fake transcript reaching the log
+line" (section 11) are both exactly this: a scratch `root`, not a mock of the
+filesystem.
 
 **The service-turn filter (AC-2).** Once a transcript file is read, each line is
 a JSON record; `user`/`assistant` turns whose text begins with
@@ -233,13 +334,17 @@ be the worst outcome; the issue lists three candidates — fail the take, procee
 on file names alone, report once.
 
 **Decision.** All three sources, on a miss, take the same outcome: recognition
-is never blocked. The bias string is assembled from whatever was collected —
-file names alone, when the conversation component came back empty — and a
-single line is written to the daemon's existing per-request stderr log (the
+is never blocked. `Collected.bias` (section 2a) is assembled from whatever was
+found — file names alone, when the conversation component came back empty —
+and the daemon writes one line to its existing per-request stderr log (the
 channel `request_line` and `context_note` already write to, read with `herdr
-plugin log list`), naming which source was tried and that it found nothing.
-Under `auto`, that line names both attempts. The wording differs by source; the
-outcome — proceed, log once — does not.
+plugin log list`), built from `Collected`'s other three fields: `attempted`
+(which sources were tried and whether each found anything — both entries,
+under `auto`), `file_count`, and `truncated`. **That line never contains
+`Collected.bias` itself — on a miss or on a hit.** AC-9 says the bias string is
+not written to a log beyond what the take needs, and a take does not need its
+own bias string echoed back at it; "report once" is satisfied by the line
+existing and naming what happened, not by what it quotes.
 
 **Why this, and not failing the take.** The bias string biases recognition; it
 is not required for it to run. Failing a take over a missing transcript would
@@ -262,61 +367,62 @@ found" by a different route than `auto` does is already a structural
 difference (section 2); giving each a different *consequence* on top of that
 would be a second, needless one.
 
-## 9 Reaching `Engine::transcribe`
+## 9 `Engine::transcribe`, left alone
 
-**Context.** `Engine::transcribe(&self, audio: &Path)` has no place for a bias
-string; `CommandEngine` bakes model and language in at construction, once per
-daemon start, while a bias string depends on the take's target pane and cannot
-be known until then (`src/stt.rs:118-130`, `src/stt/command.rs:44-53`). AC-6
-forbids this issue from widening the trait or `CommandEngine`. The issue asks
-this stage to decide the shape anyway, so a later change executes it rather
-than inventing it.
+**Context.** `AC_21.md`'s reading of AC-6 calls the wiring's shape "an open
+question for design" — an invitation for this stage to decide it.
+`Engine::transcribe(&self, audio: &Path)` has no place for a bias string today;
+`CommandEngine` bakes model and language in at construction, once per daemon
+start, while a bias string depends on the take's target pane and cannot be
+known until then (`src/stt.rs:118-130`, `src/stt/command.rs:44-53`). AC-6
+itself forbids this issue from widening the trait or `CommandEngine`. And after
+section 8's correction, nothing in this design passes the bias string to
+anything: it is built, capped, and logged about only in aggregate —
+`Collected`'s counts and flags, never `Collected.bias`. `Engine` never sees it.
 
-**Decision.** The trait widens to carry the bias string as a second, per-call
-argument, not as construction state:
+**Problem.** Deciding a shape for `Engine::transcribe` here would commit a
+trait issue #13 already shipped, and with it the `candle` (#15) and `http`
+(#16) engines, neither built, to a new parameter that this same document never
+once passes to anything. Whoever plans #21 would cut a task to change the
+signature and every call site, and the take still would not transcribe with
+context afterward — the very next issue would have to touch that signature
+again, either to use it or to discover the shape chosen here does not fit what
+it needs.
 
-```
-fn transcribe(&self, audio: &Path, bias: &str) -> Result<String, EngineError>;
-```
+**Decision.** `Engine::transcribe` is not touched by this design. The shape of
+the widening — whether the bias string is a second call argument, a value set
+before the call, or something `CommandEngine`'s per-take state does not have
+room for yet — is decided by the issue that also passes it to the engine, not
+by this one. `bias::collect` and the `Collected` type (section 2a) are the
+whole of what #21 exposes; AC-6 is satisfied by that exposure existing and
+being callable, not by a trait signature nothing in this issue calls.
 
-`CommandEngine::render` gains a `{prompt}` placeholder, substituted from `bias`
-wherever an argument names it, alongside `{audio}`, `{model}` and `{language}`.
-Unlike `{audio}`, a missing `{prompt}` is not appended: there is no defined
-place to put free text the way there is an implicit place for the one file a
-program must be given. An argument list with no `{prompt}` simply runs without
-one — the same as recognition running with no context today, which
-`docs/evidence.md` already shows producing a readable, if term-poor, result.
+**Why not decide the shape anyway, as a non-binding note.** A shape written
+down here is still a decision, whether or not this issue's own code follows
+it: the next issue either follows it or reopens it, and reopening a choice its
+own predecessor made reads as the predecessor having been wrong, not as the
+question having been legitimately left open. A design is only honest about an
+interface if it also exercises it; this one does not, so the accurate account
+of what this stage actually knows is that the shape is undecided, not that it
+is decided-but-dormant. AC-6's invitation to settle this "as an open question
+for design" is answered here by declining, with the reason written down,
+rather than left unaddressed.
 
-**Why a second call argument and not construction state.** Construction state
-is for what a take cannot change — the model, the language — decided once at
-daemon start (`docs/decisions.md`, "the configuration is read once at daemon
-start"). A bias string is the opposite: it is unknown until the target pane is
-pinned, per take, exactly like the audio path already is. Giving it the same
-shape as the audio path, rather than inventing a second channel — a setter, an
-`Option` field mutated between calls — keeps `Engine` stateless between takes,
-which is the property issue #13 built it to have.
+**What #21 itself does.** `bias::collect` is `pub`, tested, and called from
+exactly one place: `src/daemon.rs`'s `dictate` handler, to produce the log
+line in section 8. This is what keeps the module reachable from `main` rather
+than only from tests — the same reason `IMPLEMENTED` in `src/main.rs:107` is
+`#[cfg(test)]` instead of simply unused, since CI runs clippy with
+`-D warnings` and an unreached `pub` item in a binary crate is flagged. Nothing
+about that call requires `Engine` to change: it is a plain function call whose
+`Collected` is inspected for its metadata (section 8) and then dropped.
 
-**What this costs, stated rather than hidden.** This is a breaking change to a
-trait issue #13 shipped and closed. Every current caller of `.transcribe(audio)`
-— today, only `src/daemon.rs`'s `transcribe` function — gains a second
-argument; every test that builds an `Engine` and calls it — in `src/stt.rs`,
-`src/stt/command.rs`, `src/daemon.rs` — is touched. The not-yet-built `candle`
-(#15) and `http` (#16) engines are affected before either exists: their
-interface is decided now, by a design for neither of them. That is the price of
-settling the question here rather than leaving each of the three engines to
-answer it separately, which is what the issue asked this stage not to do.
-
-**What #21 itself does with this.** Nothing changes in `src/stt.rs` or
-`src/stt/command.rs`. `bias::collect` is `pub` and returns the finished, capped
-string — the interface AC-6 asks for. It is called from exactly one place in
-this issue: `src/daemon.rs`'s `dictate` handler, on the same take that would
-later reach recognition, and the result is written to the per-request stderr
-log described in section 8, not passed to the engine. This keeps the module
-reachable from `main` rather than only from tests — the same reason
-`IMPLEMENTED` in `src/main.rs:107` is `#[cfg(test)]` instead of unused, CI runs
-clippy with `-D warnings` and an unreached `pub` item in a binary crate is
-flagged — and it gives the owner a way to see what the bias string would have
-been, in the daemon's own log, before the wiring issue lands.
+**What the next issue inherits.** A working, tested `bias::collect` to call,
+and no interface commitment to work around or unwind. It decides, with a
+concrete consumer in hand — the recognition it is trying to improve — whether
+the bias string becomes a second `transcribe` argument or something else, and
+it makes that decision the way #13 made its own: settled once, for all three
+engines, in one place, rather than reopened per engine as each is built.
 
 ## 10 Configuration
 
@@ -334,12 +440,12 @@ prompt_chars = 600
 Read the way every other table in `src/config.rs` is: `#[serde(default)]` on
 the struct and on every field, so a file that omits `[context]` entirely, or
 omits one key inside it, yields defaults for what it omits — the same shape
-`Audio`, `Stt` and `Rewrite` already have (`src/config.rs:27-70`). `source` is a
-`String` compared against `"auto"`/`"transcript"`/`"pane"` at the point
-`bias::collect` reads it, the same way `Stt::engine` is read, rather than an
-enum `serde` would refuse to deserialize on a typo — an unrecognised value is
-handled the same way `stt::resolve` handles an unknown engine name: refused
-with the three names listed, not silently defaulted.
+`Audio`, `Stt` and `Rewrite` already have (`src/config.rs:27-70`). `source`
+stays a `String` in `Config`, deserialized the same permissive way
+`Stt::engine` is, rather than an enum `serde` would refuse to parse on a typo
+— `bias::source::resolve` (section 2a) is where the string becomes a
+`Source` or an error, once, at daemon start, exactly where `stt::resolve`
+turns `Stt::engine` into an `Engine` or an error.
 
 `docs/design.md` section 7's `[context]` block gains the `source` line; this is
 a document edit this stage makes, since the key did not exist when that
@@ -350,25 +456,29 @@ key it reads.
 
 | module | owns | tested by |
 |---|---|---|
-| `bias` | `[context] source` dispatch, the service-turn filter, assembly and the character cap | each of the three `source` values against fakes for transcript and pane, service turns excluded from both count and content, the character cap on a string built to exceed it |
-| `bias::transcript` | directory-derived discovery, the one-agent gate | a fixture `.jsonl` found by directory, a `focused_pane_agent` that is not the known one, a working directory outside any project directory, an empty file |
+| `bias` | `[context] source` dispatch, assembling `Collected`, the character cap | each of the three `source` values against fakes for transcript and pane, the character cap on a string built to exceed it, `Collected.truncated` set exactly when the cap actually cut something |
+| `bias::source` | resolving `[context] source` into `Source`, refusing an unrecognised value | `auto`, `transcript`, `pane` each resolve; an unrecognised name is refused with all three listed |
+| `bias::transcript` | directory-derived discovery against an injected root, the one-agent gate, the service-turn filter | a fixture `.jsonl` found under a scratch `root` (section 3), a `focused_pane_agent` that is not the known one, a working directory outside any project directory under `root`, an empty file, service turns excluded from both the count and the content |
 | `bias::pane` | the argument list, running the program, filtering the output | `argv`'s exact output against the contract in `spike/context.sh:42-45`; `read` against a script that prints text, one that fails, one that is absent; the alnum-line filter and the 80-line cap |
 | `bias::files` | the two `git` commands, path-component splitting, the cap | a scratch repository with staged and committed changes, a working directory outside any repository, more entries than `file_names` |
-| `config` | `[context] source`/`conversation_turns`/`file_names`/`prompt_chars` and their defaults | defaults, a partial file, an unrecognised `source` value |
-| `daemon` | calling `bias::collect` for a `dictate` take and logging the result | a fake transcript and a fake pane read reaching the log line, a total miss reaching it under all three `source` values |
+| `config` | `[context] source`/`conversation_turns`/`file_names`/`prompt_chars` and their defaults | defaults, a partial file, `source` round-tripping as whatever string was written (validity is `bias::source`'s job, not `config`'s) |
+| `daemon` | resolving `[context] source` once at start; per take, calling `bias::collect` (or `bias::files::collect` alone, on an unresolved `source`) and logging `Collected`'s metadata | a fake transcript and a fake pane read reaching the log line with the right `attempted` entries; an unresolved `source` logging the configuration error and still producing a file-names-only `bias`; **the log line, in every case above, checked for the absence of the fixture content it was built from** — not merely for the presence of the counts |
 
 No test needs a microphone, a live herdr or a running model. `bias::pane`'s
 tests run a real, small program under `HERDR_BIN_PATH`, never `herdr` itself,
 following `src/stt/command.rs`'s tests exactly. `bias::files`'s tests run real
 `git` against a scratch directory, following `src/config.rs`'s tests. Nothing
-here needs a network.
+here needs a network. The last `daemon` test is the one AC-9's gate failure
+argues for directly: a positive assertion that logging happened is not
+evidence the string wasn't in it.
 
 ## 12 What this design does not decide
 
-- Wiring `bias::collect`'s result into `Engine::transcribe` beyond the shape
-  decided in section 9 — implementing the widened trait, `CommandEngine`'s
-  `{prompt}` substitution, and the `candle`/`http` engines' own handling of it —
-  is a later issue's work, per AC-6.
+- `Engine::transcribe`'s widened shape, and everything downstream of it —
+  `CommandEngine`'s placeholder substitution, and the `candle`/`http` engines'
+  own handling — belong to the issue that also passes the bias string to the
+  engine, per AC-6 and section 9's reasoning for declining to guess the shape
+  here.
 - Branch, pane title and agent kind, which `docs/design.md` section 4 also
   lists as context components: out of scope for this issue, per the S1 gate's
   note and the issue's own requirements, which cover conversation and file
@@ -382,11 +492,11 @@ here needs a network.
 | AC | decided in |
 |---|---|
 | AC-1 conversation turns from the transcript, capped at `conversation_turns` | 3, 4, 7 |
-| AC-2 service turns excluded from count and content | 1, 3 (filter lives in `bias.rs`, applied by both transcript and pane paths where relevant — pane's screen has no turns to filter by role, only the alnum-line rule in 5) |
-| AC-3 `[context] source`, three values, herdr-call rule per value | 2 |
+| AC-2 service turns excluded from count and content | 3 (the filter itself), 1 (module boundary) |
+| AC-3 `[context] source`, three values, herdr-call rule per value | 2, 2a |
 | AC-4 file and directory names, repository root, newest first, path components, capped | 6 |
 | AC-5 the finished string capped at `prompt_chars` | 7 |
-| AC-6 exposed through an interface, `Engine::transcribe` untouched by this issue | 9 |
+| AC-6 exposed through an interface, `Engine::transcribe` untouched by this issue | 2a, 9 |
 | AC-7 the four `[context]` keys and their defaults | 10 |
 | AC-8 no panic on a missing transcript, an unreadable pane, a pane outside a repository | 3, 5, 6, 8 |
-| AC-9 no filtering, redaction or persistence beyond AC-2/AC-4/AC-5 | 7, 8 |
+| AC-9 no filtering, redaction or persistence beyond AC-2/AC-4/AC-5; nothing logged beyond metadata | 2a, 7, 8, 11 |
