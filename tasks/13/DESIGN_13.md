@@ -85,7 +85,9 @@ tolerated rather than fatal.
 placeholder brings its own model, and demanding one this plugin manages would refuse
 a working setup. The model is resolved and checked only when the list asks for it.
 
-**And what `doctor` says then.** The same thing, which is the point of one function:
+**And what `doctor` says then.** The same thing, which is the point of one function
+— though this state is decided *before* the shared check runs rather than by it, and
+`doctor` gains a state for it beside `ok`, `default` and `missing`:
 when the configuration cannot ask for a model — the engine is not built, or the
 argument list has no `{model}` — the model line says the model is not used by this
 configuration, and names `[stt] model` and the directory it would be looked for in.
@@ -130,11 +132,21 @@ seconds of transcription for a two-second take.
 daemon did not answer within 2 seconds". The failure would land on the successful
 case, which is the worst place to put one.
 
-**Decision.** The bound belongs to the command, not to the client. `cancel` — and
-`ptt` when it arrives — keep two seconds. The half of `dictate` that finishes a
-take gets two minutes, because that is the one command whose answer waits on real
-work. The existing test changes from "the bound is short" to "the short bound stays
-short and the long one is still bounded".
+**Decision.** The bound belongs to the command name, not to the client and not to
+which half of a toggle a press turns out to be. `cancel` — and `ptt` when it
+arrives — keep two seconds. **`dictate` gets two minutes, both halves**, because
+the client chooses its bound before it sends and cannot know which half it is: the
+answer to that lives in the daemon (`Started::Began` against `AlreadyRunning`), and
+asking would mean a second round trip, a second command name, or a protocol that
+answers twice. The existing test changes from "the bound is short" to "the short
+bound stays short, the long one is still bounded, and `dictate` gets the long one".
+
+**What that costs, stated rather than hidden.** The press that *starts* a take is
+answered immediately, so the long bound never elapses in normal use — but if the
+daemon is wedged, that press now takes two minutes to say so instead of two
+seconds. A late message about a stuck daemon is worse than a prompt one, and it is
+better than a prompt lie about a take that was working; the take is the case that
+happens.
 
 **Why.** A bound exists to turn a hang into a message, not to cap work somebody
 asked for. Two seconds is right for a command that only writes a few bytes and
@@ -167,7 +179,8 @@ consumes them will decide when they stop being useful.
 | `stt::command` | placeholder substitution, running the program, reading it | substitution of each placeholder, an appended path, `auto`, a program that is absent, one that fails, one that prints nothing |
 | `config` | `[stt] engine`, `language`, `command` | defaults, partial file, unknown key |
 | `daemon` | transcribing a finished take | a fake engine returning text, and one returning an error |
-| `client` | the reply bound, per command | the short bound stays short, the long one is bounded, and `dictate` gets the long one |
+| `client` | the reply bound, chosen by command name | the short bound stays short, the long one is bounded, `dictate` gets the long one and `cancel` the short one |
+| `README.md` | the line that says recognition needs an external engine | read it: the section about installing names `[stt] engine` and `[stt] command` |
 | `doctor` | the engine line and the model line | the same states the engine reports |
 
 The program tests use a shell command rather than a real transcriber: `echo` for a
@@ -199,5 +212,5 @@ no microphone, no network — like every stage before this one.
 | AC-11 the transcript in the reply | 4a, 5 |
 | AC-12 the language, `auto` included | 2 |
 | AC-13 `doctor` agrees with the engine | 3, 4 |
-| AC-14 the README line | 4 |
+| AC-14 the README line | 6 |
 | AC-15 the tests and the checks | 6 |

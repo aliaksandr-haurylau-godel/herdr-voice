@@ -193,6 +193,43 @@ The separate note is taken as well: the level stays beside the transcript, as is
 
 A revised artifact needs a new verdict; the gate runs again.
 
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_13.md
+  reviewer: planner
+  verdict: QUESTIONS
+  date: 2026-08-25
+  questions:
+    - "Section 4a and the module table disagree about what the long bound applies to, and the code cannot express the narrower one. The client picks the bound before it sends — `src/main.rs:145` passes a command name only — while which half a `dictate` press is is daemon state. So the per-half rule needs something the design does not state, and the per-command rule means the first press also waits two minutes before reporting a hang. The client task has two done-criteria and no way to choose."
+  blocker: null
+  notes:
+    - "Separate note: the new `doctor` paragraph is plannable and checkable, though that state is decided before the shared check runs rather than by it, and it needs a `State` variant `src/doctor.rs` does not have."
+    - "Separate note: AC-14 maps to section 4, which says nothing about `README.md`, and no module row covers it. I can still cut that task from AC-14."
+    - "Everything else cuts: four tasks with real edges and an unambiguous graph once the bound is settled."
+```
+
+### S2 Design — the bound goes to the command name
+- artifact: `DESIGN_13.md`, section 4a and the module table
+- produced: 2026-08-25
+
+The reviewer is right that the narrower rule cannot be written: the client chooses
+its bound before it sends, and which half of the toggle a press turns out to be
+lives in the daemon. Telling them apart would take a second round trip, a second
+command name, or a protocol that answers twice, and none of those is worth it.
+
+So `dictate` gets two minutes on both halves. The cost is named in the design rather
+than left for somebody to discover: the press that starts a take is answered
+immediately, so the long bound never elapses in normal use, but a wedged daemon now
+takes two minutes to say so on that press instead of two seconds. A late message
+about a stuck daemon beats a prompt lie about a take that was working, and the take
+is the case that happens.
+
+Both separate notes are taken too: `doctor` gains a fourth state beside `ok`,
+`default` and `missing`, and the README line has a module row of its own.
+
+A revised artifact needs a new verdict; the gate runs again.
+
 ## Notes
 
 The prototype passed a bias prompt to `whisper-cli`. That prompt is context, and
