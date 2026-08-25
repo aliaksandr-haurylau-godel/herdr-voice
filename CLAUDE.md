@@ -96,6 +96,11 @@ herdr plugin link .                 # install this checkout as a plugin
 herdr plugin log list --plugin haurylau.voice   # what herdr ran and what it returned
 ```
 
+One worktree per line of work. Two agents must not share a checkout: a branch
+switch in a shared working directory makes the other one's files vanish mid-edit.
+Use `git worktree add` for a second line of work, and read other branches with
+`git show` rather than by checking them out.
+
 `scripts/check_manifest.py` exists because the manifest is the only contract with
 herdr: a command named there but rejected by the binary produces a plugin that
 installs and then does nothing when its action is invoked. CI runs the same check.
