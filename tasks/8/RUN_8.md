@@ -184,6 +184,15 @@ step in CI — is untouched by all three and is independent of every other task,
 it proceeds while the gate runs again on the revised plan. Nothing else starts
 before that verdict.
 
+### S4 Implement — task 0
+- artifact: `.github/workflows/check.yml`
+- produced: 2026-08-25
+- verification: the `ubuntu-latest` job ran the step and installed
+  `libasound2-dev` 1.2.11-1ubuntu0.3; all five checks green on the branch
+
+Done before the dependency it exists for, so that the Linux job never goes red for
+a reason unrelated to the change that turned it red.
+
 ## Notes
 
 The probe used to establish the `cpal` facts was a throwaway crate outside the
