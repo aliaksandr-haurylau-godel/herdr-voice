@@ -96,33 +96,60 @@ silently", and filed as issue #19.
 `transcribe`, is the thing that decides success or failure: on success the text
 already reached the pane, so repeating it is noise; on failure it reached neither
 the pane nor the client unless the reply itself carries it. Whatever the wording
-is, it has to stay one line, since #19 is not this design's to fix.
+is, it has to stay one line, since #19 is not this design's to fix — but the
+transcript is exactly the value most likely to contain a newline, and it is the
+one AC-12 exists to preserve: a failure reply that puts the transcript before the
+path truncates the path along with the tail of the transcript the moment a take
+worth recovering — a long one — produces a multi-line transcript. That is a defect
+in this design, not in the protocol, and it is fixed here rather than left to #19.
 
 **Decision.**
 
-- **Success:** `format!("delivered to {target} [{level_dbfs:.1} dB]")` — for
-  example `delivered to w1:p2 [-46.9 dB]`. It names the pane and the measured
-  level, the two things AC-11 requires, and nothing else.
-- **Failure:** `format!("could not deliver to {target} ({why}); paste the text in \
-  by hand: {text} — the take is kept at {path}")` — for example `could not deliver
-  to w99:p99 (pane_not_found: pane w99:p99 not found); paste the text in by hand:
-  fix the worklog entry — the take is kept at
-  /state/takes/1234-5678-9.wav`. It carries the full text and the reason (AC-12),
-  and it names what to do next (CLAUDE.md, "Rules for the code"): paste the text by
-  hand, and the audio is not lost either.
+- **Success (unchanged):** `format!("delivered to {target} [{level_dbfs:.1} dB]")`
+  — for example `delivered to w1:p2 [-46.9 dB]`. It names the pane and the
+  measured level, the two things AC-11 requires, and nothing else.
+- **Failure:** `format!("could not deliver to {target} ({why}) — copy the text \
+  below, or open the take at {path}: {text}")` — for example, against the
+  pane-gone case measured in `docs/evidence.md`: `could not deliver to w99:p99
+  (pane_not_found) — copy the text below, or open the take at
+  /state/takes/1234-5678-9.wav: fix the worklog entry`. It carries the full text
+  and the reason (AC-12), and it names what the person can actually do: the text
+  is sitting in the line they are already reading, or the take is still on disk
+  and can be opened — not "paste it by hand," which points at a clipboard that
+  holds nothing.
 
-Both strings are built from values delivery itself controls or receives — the pane
-name, the level, `why` from the rejected herdr call, and the transcript. Two of
-those are outside this design's control: the transcript is whatever recognition
-returned, and `why` is whatever herdr printed. Neither is expected to contain a
-newline in ordinary operation, and this design does not add a defense against one
-that does; a multi-line transcript or a multi-line herdr error would be truncated
-by the same mechanism #19 already names, not by anything new here. Delivery does
-not depend on a reply carrying more than herdr's one line ever tests round-trip.
+Two changes from a first draft of this string, both made here rather than left for
+later:
 
-**Why.** The wording is left to design by AC_22.md itself ("Out of scope /
-noticed"); what is fixed is what each string must convey, and both satisfy that
-without assuming the newline bug is fixed underneath them.
+- **The transcript is the last field, and both `why` and the transcript have
+  their embedded newlines collapsed to a single space before the string is
+  built.** The reply protocol reads one line (`Reply::read_from`,
+  `src/proto.rs:167-177`); measured in `docs/evidence.md`, "a reply with a
+  newline in it is truncated silently" and filed as issue #19. Ordering the
+  transcript last means a newline inside it — the case that matters, since a long
+  take is the one worth recovering and the one most likely to produce one — costs
+  only its own tail, not the reason or the path that precede it. Collapsing
+  newlines removes the failure mode outright for this one reply. Neither of these
+  is a fix to issue #19: the protocol still reads one line by construction, and a
+  transcript or a herdr message that is merely *long* — no newline in it at all —
+  is still bounded only by whatever the client and the transport allow through.
+  This is formatting for a one-line channel, stated as that and nothing more.
+- **`why` is the herdr error code alone when the output parses as the shape
+  measured in `docs/evidence.md`** (section 4 already specifies this extraction;
+  the code, e.g. `pane_not_found`, carries no pane name), rather than the code
+  together with herdr's own message, which restates the pane. Combined with
+  `{target}` naming the pane once, the pane appears exactly once in the reply
+  instead of twice. Only the fallback case — herdr's output does not parse as
+  JSON at all — falls back to the raw text, which may restate the pane; that path
+  is not the one measured, and nothing here makes it worse than it already was.
+
+**Why.** The wording is left to design by `AC_22.md` itself ("Out of scope /
+noticed"); what is fixed is what each string must convey. Both changes above cost
+nothing — the field order was free to begin with, and the pane's identifier does
+not need to travel through herdr's own message to be present. The field order and
+the newline collapsing are recorded in `docs/decisions.md` ("The failed-delivery
+reply puts the transcript last…", 2026-08-26, #22) since they are a real decision
+about this reply's shape, not a detail folded silently into the string.
 
 ## 4 How the outward call is made and tested
 
@@ -358,14 +385,31 @@ too, since journalling is `daemon.rs`'s responsibility today, not delivery's.
 `transcribe` calls, in this order: `journal.write(&delivering_line(&text))`, then
 `delivery::deliver(...)`. On a rejected call it also calls
 `journal.write(&delivery_failed_line(&take.target, &why.to_string()))`, then, when
-`settings.toasts` is `true`, `deliverer.notify("Dictation failed", &format!("{}: \
-{why}", take.target))` — the same call the prototype makes in `note()`
-(`spike/spike.sh:96`), reached through the `Deliverer` trait (section 4), except
-without the prototype's `--sound` argument: no criterion asks for a sound, and
-`Deliverer::notify` (section 4) takes only a title and a body. A toast that fails
-to show — herdr itself unreachable, say — is written to the journal with one more
-line and nothing else; it must not stop the journal line or the client's reply
-from getting through, and must not panic (CLAUDE.md, "no panic paths").
+`settings.toasts` is `true`, `deliverer.notify("Delivery failed", &format!("{}: \
+the text is in the plugin log", take.target))` — the same call the prototype
+makes in `note()` (`spike/spike.sh:96`), reached through the `Deliverer` trait
+(section 4), except without the prototype's `--sound` argument: no criterion asks
+for a sound, and `Deliverer::notify` (section 4) takes only a title and a body.
+
+**Title and body, and why they read this way.** "Dictation failed" was the first
+draft and it is false: recording, conversion and recognition all worked, the take
+is kept, and only the hand-off to the pane failed. A person who reads that
+dictation failed dictates the same thing again; a person who reads that delivery
+failed goes and gets the text that already exists. The title says only that:
+`"Delivery failed"`. The body was first `"{pane}: {why}"` — a pane identifier and
+an error code, neither of which says what to do, and `CLAUDE.md` requires every
+user-visible failure to name a next action. The body instead names where the text
+already is — `herdr plugin log list` already carries the full transcript, ahead
+of the client's own failure reply and unconditional on `[ui] toasts` (section 6)
+— so a glance at the toast is enough to know both that something needs picking up
+and where to pick it up from, without repeating the reason a toast has no room to
+explain anyway (AC-8's own "Out of scope" note already leaves the reason out of
+the toast).
+
+A toast that fails to show — herdr itself unreachable, say — is written to the
+journal with one more line and nothing else; it must not stop the journal line or
+the client's reply from getting through, and must not panic (CLAUDE.md, "no panic
+paths").
 
 **Threading it through, as one bundle rather than four.** `recognition` is already
 threaded as `Arc<Recognition>` from `daemon::start` down through `serve`,
@@ -491,8 +535,12 @@ other table in `Config` already follows.
 - Rewriting the text before delivery — out of bounds per the issue.
 - Deleting old take files at all, on any outcome — deferred since #8, unchanged
   here.
-- Fixing issue #19, the truncated multi-line reply. Section 3 states that this
-  design does not depend on it being fixed, not that it fixes it.
+- Fixing issue #19, the truncated multi-line reply, as a property of the
+  protocol. Section 3 collapses newlines out of the one reply this design builds
+  from values it does not fully control, so that reply is safe; the protocol
+  still reads one line by construction, and any other message that overruns it —
+  through sheer length, or a value this design does not touch — is #19's to fix,
+  not this one's.
 - The rest of `[ui]` beyond `toasts` — belongs to the indicator work this issue
   puts out of bounds.
 - Whether `herdr notification show`'s own failure should itself be visible beyond
