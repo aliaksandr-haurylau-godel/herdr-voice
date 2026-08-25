@@ -34,6 +34,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: audio headers (Linux)
+        # cpal builds against ALSA on Linux, and without these headers nothing here
+        # builds at all — not the tests, not clippy, not the format check.
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: format
         run: cargo fmt --check
       - name: clippy

@@ -33,9 +33,12 @@ pub struct Outcome {
 
 pub fn outcome(result: Result<Reply, ClientError>) -> Outcome {
     match result {
-        Ok(Reply::Ok(_)) => Outcome {
+        // What the daemon says about a success is not noise: for `dictate` it is
+        // where the take went and how loud it was, and throwing it away leaves the
+        // caller with a silent exit 0.
+        Ok(Reply::Ok(text)) => Outcome {
             code: 0,
-            message: None,
+            message: (!text.is_empty()).then_some(text),
         },
         Ok(Reply::Error(text)) => Outcome {
             code: 1,
@@ -121,8 +124,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_ok_reply_is_success_and_says_nothing() {
+    fn an_ok_reply_succeeds_and_passes_on_what_the_daemon_said() {
         let outcome = outcome(Ok(Reply::Ok("nothing to cancel".into())));
+        assert_eq!(outcome.code, 0);
+        assert_eq!(outcome.message.as_deref(), Some("nothing to cancel"));
+    }
+
+    #[test]
+    fn an_ok_reply_with_nothing_to_say_says_nothing() {
+        let outcome = outcome(Ok(Reply::Ok(String::new())));
         assert_eq!(outcome.code, 0);
         assert_eq!(outcome.message, None);
     }

@@ -226,3 +226,73 @@ that the server can run its `[[startup]]` entry.
 
 Not established here: audio capture on Linux, anything involving a real
 microphone, and the `x86_64` architecture — this run was `aarch64`.
+## What the capture library offers
+
+Measured on macOS 25.6, Apple silicon, with `cpal` 0.18.2 in a throwaway crate
+outside this repository, before capture was designed. Two facts, both of which
+change what the capture stage has to do.
+
+**No input device on this machine offers 16 kHz.** Enumerating the CoreAudio host
+gave three input devices: a USB device, the built-in microphone, and a virtual
+device installed by a conferencing application. Each reports a single supported
+input configuration of 48 kHz, one channel, 32-bit float; the built-in microphone
+additionally offers 44.1, 88.2 and 96 kHz. Not one offers 16 kHz.
+
+The prototype never met this. It recorded through `ffmpeg` with `-ar 16000 -ac 1`
+(`spike/spike.sh:254`), so the resampling happened inside a program the plugin does
+not have. Producing 16 kHz mono is therefore work this plugin must do itself, and
+opening a device at 16 kHz is not an option to fall back on.
+
+**A device's name comes from `Display`.** In 0.18 `DeviceTrait` requires `Display`
+and offers `description()` and an `id()` documented as stable across runs,
+disconnections and reboots. The `name() -> Result<String>` of earlier versions is
+gone, so selection by name reads the `Display` form.
+
+The existence of a stable identifier is worth recording next to this, because it
+addresses exactly the failure that "select by name, never by index" was written
+against. Moving to it would change a rule in `CLAUDE.md` and was left alone.
+
+## Capture, by hand on macOS
+
+macOS 25.6, Apple silicon, herdr 0.8.2, release build. Nobody spoke: everything
+below is either a refusal or a measurement of a quiet room, and a take containing
+speech is still unverified.
+
+| what | result |
+|---|---|
+| a take on the default input, twice through `dictate` | started and finished; refused at −100.0 dB |
+| the same, with the floor lowered to −200 so the file survives | 32 426 samples, 2.03 s, and `afinfo` reports `1 ch, 16000 Hz, Int16` — but every sample is zero |
+| a take on the built-in microphone | refused at −62.9 dB |
+| `[audio] input` set to a name no device has | refused, listing the three names that exist, exit 1 |
+| `[audio] input` set to a name that exists | opened that device and recorded from it |
+
+**The default input is not the microphone.** The first two rows look like a broken
+capture and are not: the machine's default input is a USB interface that delivers
+digital silence, and the same code on the built-in microphone returns −62.9 dB of
+ordinary room tone. The conversion, the container and the length were all correct
+throughout — 2.03 seconds of 16 kHz mono, sixteen bits — so what the silence check
+caught was exactly what it exists to catch, a take from an input nobody speaks
+into.
+
+An earlier reading of this attributed the zeros to a denied microphone permission,
+which the built-in microphone then disproved. The message a refused take prints
+does name permission among the things to check, because on macOS a denied
+permission also delivers silence rather than an error, and the two are
+indistinguishable from inside the process.
+
+**A quiet room measures −62.9 dB against a −60 floor.** The threshold sits just
+above room tone on this machine, which is what it is for — but it means the margin
+between "nobody spoke" and "somebody spoke quietly" is not large, and the first
+person to be refused mid-sentence will be the one to say so.
+
+**Found by running it, not by reading it:** the configured device name never
+reached the device. The name was a per-call argument and the daemon passed nothing,
+so `[audio] input` was ignored and every take came from the default — in silence,
+which is the precise failure that selecting by name exists to prevent. The
+recorder now takes the name from the configuration it was given, and a test asserts
+the name reaches the source; that test fails against the old behaviour.
+
+**Also found by running it:** a successful take printed nothing at all. The daemon
+answered with the path and the level, and the client discarded everything it was
+told on success, so a take that worked was indistinguishable from a take that did
+nothing. Results now go to standard output and failures to standard error.

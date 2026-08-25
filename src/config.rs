@@ -14,20 +14,44 @@ use crate::transport::PLUGIN_ID;
 
 pub const FILE_NAME: &str = "config.toml";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+// `Eq` is absent on purpose: `silence_db` is an `f32`, which has no total
+// ordering. Nothing here needs more than `PartialEq`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub audio: Audio,
     pub stt: Stt,
     pub rewrite: Rewrite,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Audio {
+    /// The input device's name. Empty means the system default. Never an index:
+    /// indices shift when a headset is connected and the recording goes elsewhere
+    /// in silence.
+    pub input: String,
+    /// A take quieter than this, in decibels relative to full scale, is refused as
+    /// the wrong input rather than passed on as speech.
+    pub silence_db: f32,
+}
+
+impl Default for Audio {
+    fn default() -> Self {
+        Audio {
+            input: String::new(),
+            silence_db: -60.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Stt {
     pub model: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Rewrite {
     pub engine: String,
@@ -142,6 +166,8 @@ mod tests {
     #[test]
     fn every_key_has_a_default() {
         let defaults = Config::default();
+        assert_eq!(defaults.audio.input, "");
+        assert_eq!(defaults.audio.silence_db, -60.0);
         assert_eq!(defaults.stt.model, "large-v3-turbo");
         assert_eq!(defaults.rewrite.engine, "agent");
         assert_eq!(defaults.rewrite.agent, "auto");
@@ -177,7 +203,7 @@ mod tests {
         let directory = scratch("future");
         std::fs::write(
             directory.join("config.toml"),
-            "[ptt]\nrelease_ms = 250\n\n[audio]\ninput = \"\"\n\n[stt]\nmodel = \"small\"\n",
+            "[ptt]\nrelease_ms = 250\n\n[stt]\nmodel = \"small\"\n",
         )
         .unwrap();
         let loaded = load(Some(&directory));
@@ -185,6 +211,38 @@ mod tests {
         assert!(
             matches!(loaded.source, Source::File(_)),
             "got {:?}",
+            loaded.source
+        );
+    }
+
+    #[test]
+    fn the_audio_table_is_read_now_that_capture_uses_it() {
+        let directory = scratch("audio");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[audio]\ninput = \"Headset\"\nsilence_db = -55.5\n",
+        )
+        .unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(loaded.config.audio.input, "Headset");
+        assert_eq!(loaded.config.audio.silence_db, -55.5);
+        // The rest still comes from the defaults.
+        assert_eq!(loaded.config.stt.model, "large-v3-turbo");
+    }
+
+    #[test]
+    fn an_unknown_key_inside_audio_is_ignored() {
+        let directory = scratch("audio-unknown");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[audio]\ninput = \"Headset\"\nchannels = 2\n",
+        )
+        .unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(loaded.config.audio.input, "Headset");
+        assert!(
+            matches!(loaded.source, Source::File(_)),
+            "an unknown key must not make the file invalid, got {:?}",
             loaded.source
         );
     }
