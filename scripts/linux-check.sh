@@ -18,6 +18,9 @@
 #   HERDR_VOICE_REPO      the repository to clone when there is no checkout
 #   HERDR_VOICE_REF       the branch or tag to clone (default: the default branch)
 #   HERDR_VOICE_WORK      where the clone and the logs go (default: /tmp/herdr-voice-check)
+#   HERDR_VOICE_REVISION  the revision to record when the checkout is not a git
+#                         one — a worktree mounted into a container has its `.git`
+#                         pointing outside the mount, so `git rev-parse` fails there
 #
 # It is safe to re-run: it unlinks a plugin it linked before, stops a daemon and
 # a server it started before, and reuses the work directory.
@@ -83,12 +86,61 @@ cleanup() {
     if [ -n "${DAEMON_PID:-}" ]; then
         kill "${DAEMON_PID}" >/dev/null 2>&1 || true
     fi
+    # Every daemon, not only one this script started. herdr starts one from the
+    # manifest's [[startup]] entry, and a run that leaves it behind poisons the
+    # next one: the second run finds a daemon that is on its way out, connects to
+    # it, and gets a closed connection instead of a reply.
+    pkill -f 'herdr-voice daemon' >/dev/null 2>&1 || true
     if [ -n "${SERVER_PID:-}" ]; then
         herdr server stop >/dev/null 2>&1 || true
         kill "${SERVER_PID}" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# What herdr recorded about a plugin command
+#
+# `herdr plugin action invoke` returns 0 for "the action was started", never the
+# plugin's own exit code: the record herdr keeps is the only place that code and
+# the plugin's standard error appear. So an assertion about what a command did is
+# an assertion about that record, and a record that never leaves `running` is the
+# hang.
+# ---------------------------------------------------------------------------
+
+# The id of the newest record herdr holds for an action, or nothing.
+newest_log_id() {
+    herdr plugin log list --plugin "${PLUGIN_ID}" --limit 30 2>/dev/null \
+        | jq -r --arg id "$1" \
+            '[.result.logs[] | select(.action_id == $id)] | last | .log_id // empty'
+}
+
+# Wait for a record that is newer than the one named and has finished. Prints it
+# as one JSON object on success; prints nothing and returns 1 on a timeout.
+await_new_log() {
+    # action id, the log id to ignore, seconds to wait
+    _waited=0
+    while [ "${_waited}" -lt "$3" ]; do
+        _record="$(herdr plugin log list --plugin "${PLUGIN_ID}" --limit 30 2>/dev/null \
+            | jq -c --arg id "$1" --arg seen "$2" \
+                '[.result.logs[]
+                  | select(.action_id == $id)
+                  | select(.log_id != $seen)
+                  | select(.status != "running")] | last // empty')"
+        if [ -n "${_record}" ]; then
+            printf '%s\n' "${_record}"
+            return 0
+        fi
+        sleep 1
+        _waited=$((_waited + 1))
+    done
+    return 1
+}
+
+field() {
+    # a record, a jq path
+    printf '%s' "$1" | jq -r "$2 // empty"
+}
 
 # ---------------------------------------------------------------------------
 # Step 1: the machine itself
@@ -125,21 +177,21 @@ if command -v apt-get >/dev/null 2>&1; then
     apt-get update -qq
     apt-get install -y -qq \
         ca-certificates curl git build-essential pkg-config libasound2-dev \
-        procps coreutils >"${LOGS}/packages.log" 2>&1
+        procps coreutils jq >"${LOGS}/packages.log" 2>&1
 elif command -v dnf >/dev/null 2>&1; then
     PM="dnf"
     dnf install -y -q \
         ca-certificates curl git gcc gcc-c++ make pkgconf-pkg-config \
-        alsa-lib-devel procps-ng coreutils >"${LOGS}/packages.log" 2>&1
+        alsa-lib-devel procps-ng coreutils jq >"${LOGS}/packages.log" 2>&1
 elif command -v apk >/dev/null 2>&1; then
     PM="apk"
     apk add --no-cache \
         ca-certificates curl git build-base pkgconf alsa-lib-dev \
-        procps coreutils >"${LOGS}/packages.log" 2>&1
+        procps coreutils jq >"${LOGS}/packages.log" 2>&1
 elif command -v pacman >/dev/null 2>&1; then
     PM="pacman"
     pacman -Sy --noconfirm --needed \
-        ca-certificates curl git base-devel pkgconf alsa-lib procps-ng \
+        ca-certificates curl git base-devel pkgconf alsa-lib procps-ng jq \
         >"${LOGS}/packages.log" 2>&1
 else
     skip_as_failure "packages" \
@@ -147,7 +199,7 @@ else
         "run this on an image with one of those package managers, or install curl, git, a C toolchain, pkg-config and the ALSA development headers by hand first"
 fi
 
-for tool in curl git cc pkg-config timeout; do
+for tool in curl git cc pkg-config timeout jq; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
         skip_as_failure "packages" \
             "${tool} is still missing after installing with ${PM}" \
@@ -237,7 +289,12 @@ if [ ! -f "${ROOT}/herdr-plugin.toml" ]; then
     fail "repo" "-" "no herdr-plugin.toml under ${ROOT}" \
         "point HERDR_VOICE_CHECKOUT at a checkout of this repository, or unset it so the script clones one"
 fi
-REVISION="$(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')"
+REVISION="$(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo '')"
+if [ -z "${REVISION}" ]; then
+    # A worktree mounted into a container keeps its `.git` outside the mount, so
+    # git cannot answer here. The revision still has to reach the report.
+    REVISION="${HERDR_VOICE_REVISION:-not a git checkout}"
+fi
 printf 'root:     %s\n' "${ROOT}"
 printf 'source:   %s\n' "${SOURCE}"
 printf 'revision: %s\n' "${REVISION}"
@@ -325,6 +382,40 @@ if ! server_is_up; then
 fi
 herdr status server --json >"${LOGS}/herdr-status.log" 2>&1 || true
 record "server" "0" "herdr server running and answering on its socket"
+
+# ---------------------------------------------------------------------------
+# Step 8b: a focused pane
+#
+# `dictate` delivers into a pane and refuses to start a take without one, so a
+# server with no workspace at all can only ever produce "the invocation context
+# names no focused pane" — which says nothing about audio. One workspace is
+# created here so that the capture steps below are about capture.
+# ---------------------------------------------------------------------------
+
+printf '\n== step: pane ==\n'
+focused_pane() {
+    herdr pane current 2>/dev/null | jq -r '.result.pane.pane_id // empty'
+}
+PANE="$(focused_pane)"
+if [ -z "${PANE}" ]; then
+    herdr workspace create --focus --cwd "${WORK}" --label check \
+        >"${LOGS}/workspace.log" 2>&1 || true
+    waited=0
+    while [ "${waited}" -lt "${START_TIMEOUT}" ]; do
+        PANE="$(focused_pane)"
+        if [ -n "${PANE}" ]; then
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+fi
+if [ -z "${PANE}" ]; then
+    fail "pane" "-" "herdr has no focused pane after creating a workspace" \
+        "read ${LOGS}/workspace.log; without a pane the dictate action cannot be exercised at all"
+fi
+printf 'focused pane: %s\n' "${PANE}"
+record "pane" "0" "herdr names the focused pane ${PANE}"
 
 # Step 9: the daemon
 #
@@ -435,53 +526,46 @@ record "action" "0" "herdr invoked cancel and it returned 0"
 #
 # The interesting field is `status`, not the fact that a line exists: herdr keeps
 # one record per plugin command, and a `cancel` that ran but failed is recorded
-# just as faithfully as one that worked. The daemon's own standard error reaches
-# the same place, but only once the process has finished — while it runs, its
-# record carries no stderr at all.
+# just as faithfully as one that worked. herdr writes the record when the command
+# ends, not when it starts, so the record has to be waited for — reading the log
+# the instant the action returns finds it still `running`.
 # ---------------------------------------------------------------------------
 
 printf '\n== step: herdr-log ==\n'
-set +e
-timeout "${CLIENT_TIMEOUT}" herdr plugin log list --plugin "${PLUGIN_ID}" --limit 10 \
-    >"${LOGS}/plugin-log.log" 2>&1
-LOG_CODE="$?"
-set -e
+CANCEL_RECORD="$(await_new_log "cancel" "" "${START_TIMEOUT}" || true)"
+herdr plugin log list --plugin "${PLUGIN_ID}" --limit 10 \
+    >"${LOGS}/plugin-log.log" 2>&1 || true
 cat "${LOGS}/plugin-log.log"
-if [ "${LOG_CODE}" != "0" ]; then
-    fail "herdr-log" "${LOG_CODE}" "herdr plugin log list failed" \
-        "read ${LOGS}/plugin-log.log"
+if [ -z "${CANCEL_RECORD}" ]; then
+    fail "herdr-log" "-" "herdr kept no finished record of the cancel invocation" \
+        "the action returned 0; compare ${LOGS}/action.log with ${LOGS}/plugin-log.log"
 fi
-if ! grep -q '"action_id":"cancel"' "${LOGS}/plugin-log.log"; then
-    fail "herdr-log" "0" "herdr logged no cancel invocation" \
-        "the action returned 0 but herdr kept no record of it; compare with ${LOGS}/action.log"
-fi
-if ! grep -q '"status":"succeeded"' "${LOGS}/plugin-log.log"; then
-    fail "herdr-log" "0" "herdr recorded the cancel invocation as something other than succeeded" \
+CANCEL_STATUS="$(field "${CANCEL_RECORD}" '.status')"
+CANCEL_EXIT="$(field "${CANCEL_RECORD}" '.exit_code')"
+if [ "${CANCEL_STATUS}" != "succeeded" ]; then
+    fail "herdr-log" "${CANCEL_EXIT}" \
+        "herdr recorded the cancel invocation as ${CANCEL_STATUS}, not succeeded" \
         "read ${LOGS}/plugin-log.log; the status field is what herdr shows the person"
 fi
-LOG_NOTE="herdr recorded cancel as succeeded"
+LOG_NOTE="herdr recorded cancel as succeeded with exit_code ${CANCEL_EXIT}"
 if grep -q '"event":"startup"' "${LOGS}/plugin-log.log"; then
     LOG_NOTE="${LOG_NOTE}; the [[startup]] daemon has a record too"
 fi
 record "herdr-log" "0" "${LOG_NOTE}"
 
 # ---------------------------------------------------------------------------
-# Step 13: no capture device
+# Step 13: a take with no capture device
 #
-# This is the step the whole exercise is for. A container has no ALSA, no
-# PipeWire and no microphone, which is the state a headless Linux machine is in
-# and the state no macOS check can produce. The requirement is that the plugin
-# names what is missing and exits: not a hang, not a panic, not silence.
+# This is the step the whole exercise is for. A container has no sound hardware,
+# which is the state a headless Linux machine is in and the state no macOS check
+# can produce. A take is driven the way a person drives one — the `dictate`
+# action, through herdr — and the requirement is that it names what is missing
+# and exits: not a hang, not a panic, not silence, and not a success.
 #
-# Capture is issue #8 and is not on main, so today the capture-facing commands
-# exit 69, "not implemented yet". That is recorded as pending, never as a pass.
-#
-# ONCE ISSUE #8 LANDS, extend this step:
-#   - invoke the `dictate` action through herdr rather than running `mic`, since
-#     a take is driven by that action;
-#   - require a non-zero exit, output naming the device or the host that is
-#     missing, and no line matching "panicked at";
-#   - drop 69 from the accepted codes, so "not built yet" stops passing here.
+# The plugin's own exit code is not what `herdr plugin action invoke` returns.
+# That command returns 0 for "the action was started" and herdr writes the code
+# and the standard error into its plugin log when the command ends, so every
+# assertion below reads that record.
 # ---------------------------------------------------------------------------
 
 printf '\n== step: no-device ==\n'
@@ -501,36 +585,172 @@ printf 'devices:  %s\n' "${DEVICE_STATE}"
 printf 'pipewire: %s\n' "${PIPEWIRE_STATE}"
 printf 'alsa cli: %s\n' "${ARECORD_STATE}"
 
+# Judges one finished plugin-log record of a take that had no device to open.
+# Every branch that is not "named it and exited non-zero" is a failure. It is
+# called as a plain command and never inside `$(...)`: `fail` ends the run, and a
+# subshell would swallow both the exit and the report. What it wants to hand back
+# — the first line the plugin printed — goes into TAKE_SAID.
+TAKE_SAID=""
+judge_take() {
+    # step name, the record
+    _step="$1"
+    _record="$2"
+    _code="$(field "${_record}" '.exit_code')"
+    _stderr="$(field "${_record}" '.stderr')"
+    _stdout="$(field "${_record}" '.stdout')"
+    printf 'exit_code: %s\nstderr: %s\nstdout: %s\n' "${_code}" "${_stderr}" "${_stdout}"
+    case "${_code}" in
+        ''|*[!0-9]*)
+            fail "${_step}" "${_code:--}" "herdr recorded no usable exit code for the take" \
+                "read ${LOGS}/${_step}-record.json"
+            ;;
+    esac
+    if [ "${_code}" -ge 128 ]; then
+        fail "${_step}" "${_code}" "the take died on a signal with no device present" \
+            "a panic or an abort here is a defect, not a report; read ${LOGS}/${_step}-record.json"
+    fi
+    case "${_stderr}${_stdout}" in
+        *"panicked at"*)
+            fail "${_step}" "${_code}" "the take panicked with no device present" \
+                "the absence of a device is an expected state and must be reported, not asserted against"
+            ;;
+    esac
+    if [ "${_code}" = "0" ]; then
+        fail "${_step}" "${_code}" "the take succeeded with no device present" \
+            "there is no microphone on this machine, so a success means the device was never opened"
+    fi
+    if [ "${_code}" = "69" ]; then
+        fail "${_step}" "${_code}" "the take reported 'not implemented yet'" \
+            "capture has landed; a command that still answers 69 here is a regression, and it is not a pass"
+    fi
+    if [ -z "${_stderr}" ]; then
+        fail "${_step}" "${_code}" "the take failed without saying anything" \
+            "silence is a defect of the same weight as a wrong transcript; the failure must name what is missing"
+    fi
+    case "${_stderr}" in
+        *device*|*Device*|*input*)
+            ;;
+        *)
+            fail "${_step}" "${_code}" "the failure does not name the input it could not open" \
+                "the message is what the person acts on: read ${LOGS}/${_step}-record.json"
+            ;;
+    esac
+    TAKE_SAID="$(printf '%s' "${_stderr}" | head -n 1 | cut -c 1-120)"
+}
+
+SEEN_DICTATE="$(newest_log_id 'dictate')"
 set +e
-timeout "${CLIENT_TIMEOUT}" "${BIN}" mic >"${LOGS}/no-device.log" 2>&1
-MIC_CODE="$?"
+timeout "${CLIENT_TIMEOUT}" herdr plugin action invoke dictate --plugin "${PLUGIN_ID}" \
+    >"${LOGS}/no-device.log" 2>&1
+INVOKE_CODE="$?"
 set -e
 cat "${LOGS}/no-device.log"
-if [ "${MIC_CODE}" = "124" ]; then
-    fail "no-device" "${MIC_CODE}" "the capture path hung with no device present" \
-        "a hang is the worst of the three outcomes: the plugin must name the missing device and exit"
+if [ "${INVOKE_CODE}" = "124" ]; then
+    fail "no-device" "${INVOKE_CODE}" "herdr did not return from invoking dictate within ${CLIENT_TIMEOUT}s" \
+        "read ${LOGS}/no-device.log"
 fi
-if [ "${MIC_CODE}" -ge 128 ]; then
-    fail "no-device" "${MIC_CODE}" "the capture path died on a signal with no device present" \
-        "read ${LOGS}/no-device.log; a panic or an abort here is a defect, not a report"
+NO_DEVICE_RECORD="$(await_new_log "dictate" "${SEEN_DICTATE}" "${CLIENT_TIMEOUT}" || true)"
+if [ -z "${NO_DEVICE_RECORD}" ]; then
+    fail "no-device" "-" "the dictate take never finished within ${CLIENT_TIMEOUT}s" \
+        "a hang is the worst of the outcomes: the plugin must name the missing device and exit. The record is still 'running' in herdr plugin log list"
 fi
-if grep -q "panicked at" "${LOGS}/no-device.log"; then
-    fail "no-device" "${MIC_CODE}" "the capture path panicked with no device present" \
-        "read ${LOGS}/no-device.log; the absence of a device is an expected state and must be reported, not asserted against"
+printf '%s\n' "${NO_DEVICE_RECORD}" >"${LOGS}/no-device-record.json"
+judge_take "no-device" "${NO_DEVICE_RECORD}"
+record "no-device" "$(field "${NO_DEVICE_RECORD}" '.exit_code')" \
+    "named what is missing and exited, ${DEVICE_STATE}: ${TAKE_SAID}"
+
+# ---------------------------------------------------------------------------
+# Step 13b: a configured input that no device answers to
+#
+# The other half of device selection, and the one that decides where a recording
+# comes from: a name in `[audio] input` that matches nothing must be refused with
+# the names that do exist, never quietly replaced by the default. A fall back is
+# silent, and a recording from an input nobody speaks into is the failure the
+# whole "by name, never by index" rule was written against.
+#
+# The configuration is read once when the daemon starts, so the daemon is
+# restarted here by hand. From this point on the daemon is this script's, not
+# herdr's, which is also what lets the last step take it away again.
+# ---------------------------------------------------------------------------
+
+printf '\n== step: named-device ==\n'
+WRONG_NAME="No Such Microphone $$"
+if [ "${CONFIG_DIR}" = "not printed" ] || [ -z "${CONFIG_DIR}" ]; then
+    skip_as_failure "named-device" \
+        "herdr did not print a config directory at the link step" \
+        "read ${LOGS}/link.log; without the directory there is nowhere to put config.toml"
 fi
-if [ ! -s "${LOGS}/no-device.log" ]; then
-    fail "no-device" "${MIC_CODE}" "the capture path printed nothing with no device present" \
-        "silence is a defect of the same weight as a wrong transcript; the failure must name what is missing"
+mkdir -p "${CONFIG_DIR}"
+CONFIG_FILE="${CONFIG_DIR}/${PLUGIN_ID}-config-backup"
+if [ -f "${CONFIG_DIR}/config.toml" ]; then
+    cp "${CONFIG_DIR}/config.toml" "${CONFIG_FILE}"
 fi
-if [ "${MIC_CODE}" = "69" ]; then
-    record "no-device" "${MIC_CODE}" \
-        "pending: capture is not built yet (issue #8); binary said so and exited, ${DEVICE_STATE}"
-elif [ "${MIC_CODE}" = "0" ]; then
-    fail "no-device" "${MIC_CODE}" "the capture path succeeded with no device present" \
-        "there is no microphone in this container, so a success means the device was never opened"
-else
-    record "no-device" "${MIC_CODE}" \
-        "named what is missing and exited, ${DEVICE_STATE}"
+printf '[audio]\ninput = "%s"\n' "${WRONG_NAME}" >"${CONFIG_DIR}/config.toml"
+printf 'wrote %s with [audio] input = %s\n' "${CONFIG_DIR}/config.toml" "\"${WRONG_NAME}\""
+
+pkill -f 'herdr-voice daemon' >/dev/null 2>&1 || true
+waited=0
+while [ "${waited}" -lt 10 ]; do
+    if ! daemon_is_up; then
+        break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+"${BIN}" daemon >"${LOGS}/daemon-named.log" 2>&1 &
+DAEMON_PID="$!"
+waited=0
+while [ "${waited}" -lt "${START_TIMEOUT}" ]; do
+    if daemon_is_up; then
+        break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+if ! daemon_is_up; then
+    tail -n 20 "${LOGS}/daemon-named.log" >&2 || true
+    fail "named-device" "-" "no daemon came back after writing config.toml" \
+        "read ${LOGS}/daemon-named.log; a configuration file that does not parse is the usual cause"
+fi
+
+SEEN_DICTATE="$(newest_log_id 'dictate')"
+set +e
+timeout "${CLIENT_TIMEOUT}" herdr plugin action invoke dictate --plugin "${PLUGIN_ID}" \
+    >"${LOGS}/named-device.log" 2>&1
+INVOKE_CODE="$?"
+set -e
+cat "${LOGS}/named-device.log"
+NAMED_RECORD="$(await_new_log "dictate" "${SEEN_DICTATE}" "${CLIENT_TIMEOUT}" || true)"
+if [ -z "${NAMED_RECORD}" ]; then
+    fail "named-device" "-" "the dictate take never finished within ${CLIENT_TIMEOUT}s" \
+        "a configured name that matches nothing must be refused at once; the record is still 'running'"
+fi
+printf '%s\n' "${NAMED_RECORD}" >"${LOGS}/named-device-record.json"
+judge_take "named-device" "${NAMED_RECORD}"
+NAMED_STDERR="$(field "${NAMED_RECORD}" '.stderr')"
+case "${NAMED_STDERR}" in
+    *"${WRONG_NAME}"*) ;;
+    *)
+        fail "named-device" "$(field "${NAMED_RECORD}" '.exit_code')" \
+            "the refusal does not repeat the name that was configured" \
+            "read ${LOGS}/named-device-record.json; a person has to see which name was not found"
+        ;;
+esac
+case "${NAMED_STDERR}" in
+    *"the ones that exist are"*|*"no input devices"*) ;;
+    *)
+        fail "named-device" "$(field "${NAMED_RECORD}" '.exit_code')" \
+            "the refusal does not say what names do exist" \
+            "read ${LOGS}/named-device-record.json; the list is what turns the refusal into an action"
+        ;;
+esac
+record "named-device" "$(field "${NAMED_RECORD}" '.exit_code')" \
+    "refused and listed what exists: ${TAKE_SAID}"
+
+# Put the configuration back the way it was found, so a re-run starts clean.
+rm -f "${CONFIG_DIR}/config.toml"
+if [ -f "${CONFIG_FILE}" ]; then
+    mv "${CONFIG_FILE}" "${CONFIG_DIR}/config.toml"
 fi
 
 # ---------------------------------------------------------------------------
