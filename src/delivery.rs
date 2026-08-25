@@ -58,7 +58,7 @@ pub fn deliver(
 
 #[cfg(test)]
 pub mod tests_support {
-    use super::{DeliveryError, Deliverer};
+    use super::{Deliverer, DeliveryError};
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,40 +200,62 @@ mod tests {
     fn a_structured_rejection_yields_its_code() {
         let text = br#"{"error":{"code":"pane_not_found","message":"pane w99:p99 not found"}}"#;
         assert_eq!(extract_reason(text), "pane_not_found");
-        let text = br#"{"error":{"code":"agent_not_found","message":"agent target w99:p99 not found"}}"#;
+        let text =
+            br#"{"error":{"code":"agent_not_found","message":"agent target w99:p99 not found"}}"#;
         assert_eq!(extract_reason(text), "agent_not_found");
     }
 
     #[test]
     fn text_that_is_not_the_structured_shape_is_kept_as_is() {
-        assert_eq!(extract_reason(b"herdr: unknown flag --bogus\n"), "herdr: unknown flag --bogus");
+        assert_eq!(
+            extract_reason(b"herdr: unknown flag --bogus\n"),
+            "herdr: unknown flag --bogus"
+        );
     }
 
     #[test]
     fn insert_only_never_calls_submit() {
         let fake = FakeDeliverer::ok();
-        assert_eq!(deliver(&fake, false, Some("claude"), "w1:p2", "hello"), Ok(()));
-        assert_eq!(fake.calls(), vec![Call::Insert("w1:p2".into(), "hello".into())]);
+        assert_eq!(
+            deliver(&fake, false, Some("claude"), "w1:p2", "hello"),
+            Ok(())
+        );
+        assert_eq!(
+            fake.calls(),
+            vec![Call::Insert("w1:p2".into(), "hello".into())]
+        );
     }
 
     #[test]
     fn submit_calls_submit_when_an_agent_is_named() {
         let fake = FakeDeliverer::ok();
-        assert_eq!(deliver(&fake, true, Some("claude"), "w1:p2", "hello"), Ok(()));
-        assert_eq!(fake.calls(), vec![Call::Submit("w1:p2".into(), "hello".into())]);
+        assert_eq!(
+            deliver(&fake, true, Some("claude"), "w1:p2", "hello"),
+            Ok(())
+        );
+        assert_eq!(
+            fake.calls(),
+            vec![Call::Submit("w1:p2".into(), "hello".into())]
+        );
     }
 
     #[test]
     fn submit_falls_back_to_insert_when_no_agent_is_named() {
         let fake = FakeDeliverer::ok();
         assert_eq!(deliver(&fake, true, None, "w1:p2", "hello"), Ok(()));
-        assert_eq!(fake.calls(), vec![Call::Insert("w1:p2".into(), "hello".into())]);
+        assert_eq!(
+            fake.calls(),
+            vec![Call::Insert("w1:p2".into(), "hello".into())]
+        );
     }
 
     #[test]
     fn a_rejected_call_is_propagated_unchanged() {
         let fake = FakeDeliverer::failing(DeliveryError::Rejected("pane_not_found".into()));
         let result = deliver(&fake, false, None, "w99:p99", "hello");
-        assert_eq!(result, Err(DeliveryError::Rejected("pane_not_found".into())));
+        assert_eq!(
+            result,
+            Err(DeliveryError::Rejected("pane_not_found".into()))
+        );
     }
 }

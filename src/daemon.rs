@@ -379,16 +379,25 @@ mod tests {
     }
 
     fn dictate_request() -> Request {
-        request("dictate", br#"{"focused_pane_id":"w1:p2","focused_pane_agent":"claude"}"#)
+        request(
+            "dictate",
+            br#"{"focused_pane_id":"w1:p2","focused_pane_agent":"claude"}"#,
+        )
     }
 
-    fn runtime_with(deliverer: crate::delivery::tests_support::FakeDeliverer, submit: bool) -> Runtime {
+    fn runtime_with(
+        deliverer: crate::delivery::tests_support::FakeDeliverer,
+        submit: bool,
+    ) -> Runtime {
         Runtime {
             recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
                 "fix the worklog entry".to_string(),
             )))),
             deliverer: Box::new(deliverer),
-            delivery_settings: crate::delivery::Settings { submit, toasts: false },
+            delivery_settings: crate::delivery::Settings {
+                submit,
+                toasts: false,
+            },
             journal: Box::new(StderrJournal),
         }
     }
@@ -480,7 +489,13 @@ mod tests {
             "got {text:?}"
         );
         assert!(text.contains("text: fix the worklog entry"), "got {text:?}");
-        let path = text.split("kept at ").nth(1).unwrap().split(';').next().unwrap();
+        let path = text
+            .split("kept at ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
         assert!(std::path::Path::new(path).exists(), "AC-10: {path}");
         std::fs::remove_file(path).ok();
     }

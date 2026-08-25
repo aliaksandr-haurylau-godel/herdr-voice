@@ -193,7 +193,11 @@ impl Recorder {
 
             while let Ok(order) = orders.recv() {
                 match order {
-                    Command::Start { target, agent, reply } => {
+                    Command::Start {
+                        target,
+                        agent,
+                        reply,
+                    } => {
                         let answer = start_one(
                             source.as_mut(),
                             &audio,
