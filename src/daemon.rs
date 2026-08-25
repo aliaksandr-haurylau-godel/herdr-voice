@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use crate::capture::{CaptureError, Recorder, Started};
+use crate::config;
 use crate::context;
 use crate::proto::{Reply, Request};
 use crate::transport::{self, Address, TransportError};
@@ -37,7 +39,7 @@ pub fn needs_target_pane(command: &str) -> bool {
     matches!(command, "dictate" | "ptt")
 }
 
-pub fn answer(request: &Request) -> (Reply, Control) {
+pub fn answer(request: &Request, recorder: &Recorder) -> (Reply, Control) {
     match request.command.as_str() {
         "stop" => (Reply::Ok("stopping".to_string()), Control::Stop),
         "cancel" => (
@@ -55,6 +57,7 @@ pub fn answer(request: &Request) -> (Reply, Control) {
                     ),
                     Control::Continue,
                 ),
+                Some(pane) if command == "dictate" => (dictate(recorder, pane), Control::Continue),
                 Some(_) => (
                     Reply::Ok(format!("{command}: not implemented yet")),
                     Control::Continue,
@@ -65,6 +68,31 @@ pub fn answer(request: &Request) -> (Reply, Control) {
             Reply::Error(format!("unknown command: {other}")),
             Control::Continue,
         ),
+    }
+}
+
+/// One keypress of the dictation toggle, against the pane herdr named.
+///
+/// The pane is pinned here, when the take begins, and kept with it until delivery.
+/// Choosing it at the end would follow the focus: somebody speaks looking at one
+/// agent, switches while thinking, and the text lands in another.
+fn dictate(recorder: &Recorder, pane: &str) -> Reply {
+    match recorder.start(pane, None) {
+        Started::Began => Reply::Ok(format!("recording for {pane}")),
+        Started::CouldNotStart(why) => Reply::Error(why),
+        Started::PreviousFailure(why) => Reply::Error(why),
+        Started::AlreadyRunning => match recorder.stop() {
+            Ok(take) => Reply::Ok(format!(
+                "{} at {:.1} dB for {}",
+                take.path.display(),
+                take.level_dbfs,
+                take.target
+            )),
+            Err(CaptureError::NothingRunning) => {
+                Reply::Error(CaptureError::NothingRunning.to_string())
+            }
+            Err(why) => Reply::Error(why.to_string()),
+        },
     }
 }
 
@@ -102,11 +130,25 @@ pub fn start() -> Result<Outcome, TransportError> {
 
     let listener = transport::listen(&address)?;
     eprintln!("listening at {}", address.display());
-    serve(listener, address);
+
+    // The configuration is read once, here, and handed to the recorder's thread:
+    // re-reading it per take would put file system access on the path that runs
+    // while somebody is speaking.
+    let loaded = config::load(config::directory(&config::Vars::from_env()).as_deref());
+    let takes = transport::state_directory(&transport::Vars::from_env())
+        .map(|state| state.join("takes"))
+        .unwrap_or_else(|| std::path::PathBuf::from("takes"));
+    let recorder = Recorder::spawn(
+        || Box::new(crate::capture::cpal_source::CpalSource::new()),
+        loaded.config.audio,
+        takes,
+    );
+
+    serve(listener, address, Arc::new(recorder));
     Ok(Outcome::Served)
 }
 
-fn serve(listener: transport::Listener, address: Address) {
+fn serve(listener: transport::Listener, address: Address, recorder: Arc<Recorder>) {
     let stop = Arc::new(AtomicBool::new(false));
     loop {
         let connection = match listener.accept() {
@@ -121,8 +163,9 @@ fn serve(listener: transport::Listener, address: Address) {
         }
         let stop = Arc::clone(&stop);
         let address = address.clone();
+        let recorder = Arc::clone(&recorder);
         thread::spawn(move || {
-            if let Err(e) = serve_one(connection, &stop, &address) {
+            if let Err(e) = serve_one(connection, &stop, &address, &recorder) {
                 eprintln!("connection failed: {e}");
             }
         });
@@ -133,6 +176,7 @@ fn serve_one(
     connection: transport::Stream,
     stop: &AtomicBool,
     address: &Address,
+    recorder: &Recorder,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = BufReader::new(connection);
     let request = match Request::read_from(&mut reader) {
@@ -146,7 +190,7 @@ fn serve_one(
     if let Some(note) = context_note(&request) {
         eprintln!("{note}");
     }
-    let (reply, control) = answer(&request);
+    let (reply, control) = answer(&request, recorder);
     reply.write_to(reader.get_mut())?;
     if control == Control::Stop {
         stop.store(true, Ordering::SeqCst);
@@ -159,6 +203,16 @@ fn serve_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A recorder that hears one quiet moment and stops. Enough for the dispatch
+    /// tests, which are about which branch runs, not about audio.
+    fn silent_recorder() -> Recorder {
+        Recorder::spawn(
+            || Box::new(crate::capture::tests_support::SilentSource),
+            crate::config::Audio::default(),
+            std::env::temp_dir().join(format!("daemon-takes-{}", std::process::id())),
+        )
+    }
 
     fn request(command: &str, context: &[u8]) -> Request {
         Request {
@@ -177,20 +231,20 @@ mod tests {
 
     #[test]
     fn cancel_works_with_no_context_at_all() {
-        let (reply, control) = answer(&request("cancel", b""));
+        let (reply, control) = answer(&request("cancel", b""), &silent_recorder());
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
         assert!(matches!(control, Control::Continue));
     }
 
     #[test]
     fn cancel_works_with_a_malformed_context() {
-        let (reply, _) = answer(&request("cancel", b"{not json"));
+        let (reply, _) = answer(&request("cancel", b"{not json"), &silent_recorder());
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
     }
 
     #[test]
     fn a_command_that_needs_a_pane_says_what_was_missing() {
-        let (reply, _) = answer(&request("dictate", b""));
+        let (reply, _) = answer(&request("dictate", b""), &silent_recorder());
         match reply {
             Reply::Error(text) => assert!(
                 text.contains("HERDR_PLUGIN_CONTEXT_JSON"),
@@ -201,14 +255,38 @@ mod tests {
     }
 
     #[test]
-    fn a_command_that_needs_a_pane_accepts_one() {
-        let (reply, _) = answer(&request("dictate", br#"{"focused_pane_id":"w1:p2"}"#));
-        assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
+    fn dictate_with_a_pane_starts_a_take_and_names_the_pane() {
+        let recorder = silent_recorder();
+        let (reply, _) = answer(
+            &request("dictate", br#"{"focused_pane_id":"w1:p2"}"#),
+            &recorder,
+        );
+        match reply {
+            Reply::Ok(text) => assert!(text.contains("w1:p2"), "got {text:?}"),
+            other => panic!("expected the take to begin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_second_dictate_finishes_the_take_rather_than_starting_another() {
+        let recorder = silent_recorder();
+        let request = request("dictate", br#"{"focused_pane_id":"w1:p2"}"#);
+        answer(&request, &recorder);
+        let (reply, _) = answer(&request, &recorder);
+        // The take is silence, so it is refused — which is itself proof that the
+        // second keypress finished it instead of starting a second one.
+        match reply {
+            Reply::Error(text) => assert!(
+                text.contains("below") && text.contains("dB"),
+                "got {text:?}"
+            ),
+            other => panic!("expected the silent take to be refused, got {other:?}"),
+        }
     }
 
     #[test]
     fn an_unknown_command_is_refused_by_name() {
-        let (reply, _) = answer(&request("transcribe", b""));
+        let (reply, _) = answer(&request("transcribe", b""), &silent_recorder());
         match reply {
             Reply::Error(text) => assert!(text.contains("transcribe"), "got {text:?}"),
             other => panic!("expected an error, got {other:?}"),
@@ -217,7 +295,7 @@ mod tests {
 
     #[test]
     fn the_stop_request_ends_the_loop() {
-        let (reply, control) = answer(&request("stop", b""));
+        let (reply, control) = answer(&request("stop", b""), &silent_recorder());
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
         assert!(matches!(control, Control::Stop));
     }
@@ -267,7 +345,8 @@ mod tests {
                 accepted.send(()).expect("announce the accept");
                 let stop = AtomicBool::new(false);
                 // The error type is not Send, so the verdict crosses the join, not it.
-                super::serve_one(connection, &stop, &address).map_err(|e| e.to_string())
+                super::serve_one(connection, &stop, &address, &silent_recorder())
+                    .map_err(|e| e.to_string())
             })
         };
 
@@ -295,7 +374,7 @@ mod tests {
         let served = {
             let address = address.clone();
             std::thread::spawn(move || {
-                super::serve(listener, address);
+                super::serve(listener, address, Arc::new(silent_recorder()));
                 let _ = ended.send(());
             })
         };
