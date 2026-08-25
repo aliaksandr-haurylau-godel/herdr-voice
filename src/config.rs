@@ -24,6 +24,7 @@ pub struct Config {
     pub rewrite: Rewrite,
     pub ui: Ui,
     pub delivery: Delivery,
+    pub context: Context,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -103,6 +104,33 @@ impl Default for Ui {
 #[serde(default)]
 pub struct Delivery {
     pub submit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Context {
+    /// `auto`, `transcript` or `pane`. Kept as a plain string here, the same
+    /// permissive way `Stt::engine` is read; `bias::source::resolve` is where
+    /// this becomes a checked `Source` or an error, once, at daemon start.
+    pub source: String,
+    /// How many of the target agent's conversation turns to keep, after the
+    /// service-turn filter.
+    pub conversation_turns: usize,
+    /// How many recently touched file and directory names to keep.
+    pub file_names: usize,
+    /// The character cap on the finished bias string.
+    pub prompt_chars: usize,
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Context {
+            source: "auto".to_string(),
+            conversation_turns: 6,
+            file_names: 40,
+            prompt_chars: 600,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -354,6 +382,38 @@ mod tests {
             "an unknown key must not make the file invalid, got {:?}",
             loaded.source
         );
+    }
+
+    #[test]
+    fn the_context_table_defaults() {
+        let defaults = Config::default();
+        assert_eq!(defaults.context.source, "auto");
+        assert_eq!(defaults.context.conversation_turns, 6);
+        assert_eq!(defaults.context.file_names, 40);
+        assert_eq!(defaults.context.prompt_chars, 600);
+    }
+
+    #[test]
+    fn a_partial_context_table_keeps_the_other_defaults() {
+        let directory = scratch("context-partial");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[context]\nsource = \"pane\"\n",
+        )
+        .unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(loaded.config.context.source, "pane");
+        assert_eq!(loaded.config.context.conversation_turns, 6);
+        assert_eq!(loaded.config.context.file_names, 40);
+        assert_eq!(loaded.config.context.prompt_chars, 600);
+    }
+
+    #[test]
+    fn a_file_without_a_context_table_yields_all_four_defaults() {
+        let directory = scratch("context-absent");
+        std::fs::write(directory.join("config.toml"), "[stt]\nmodel = \"small\"\n").unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(loaded.config.context, Context::default());
     }
 
     #[test]
