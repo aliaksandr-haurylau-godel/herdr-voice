@@ -513,6 +513,60 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    #[test]
+    fn the_failure_reply_survives_one_read_line_when_the_transcript_and_the_reason_carry_newlines()
+    {
+        let recorder = tone_recorder("newlines");
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane\nnot\nfound".into()),
+        );
+        let runtime = Runtime {
+            recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+                "line one\nline two".to_string(),
+            )))),
+            deliverer: Box::new(fake),
+            delivery_settings: crate::delivery::Settings {
+                submit: false,
+                toasts: false,
+            },
+            journal: Box::new(StderrJournal),
+        };
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        let (reply, _) = answer(&request, &recorder, &runtime);
+
+        // No embedded newline may reach the wire: writeln! adds exactly one
+        // trailing '\n', and if either collapse were dropped, an embedded one
+        // would create a second line the protocol's single read_line can never
+        // see.
+        let mut buffer = Vec::new();
+        reply.write_to(&mut buffer).expect("write");
+        assert_eq!(
+            buffer.iter().filter(|&&b| b == b'\n').count(),
+            1,
+            "the frame must carry exactly one newline, got {:?}",
+            String::from_utf8_lossy(&buffer)
+        );
+
+        let mut reader = std::io::BufReader::new(&buffer[..]);
+        let round_tripped = Reply::read_from(&mut reader).expect("read");
+        let text = match round_tripped {
+            Reply::Error(text) => text,
+            other => panic!("expected Reply::Error, got {other:?}"),
+        };
+        assert!(text.contains("line one line two"), "got {text:?}");
+        assert!(text.contains("pane not found"), "got {text:?}");
+        let path = text
+            .split("kept at ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        assert!(std::path::Path::new(path).exists(), "AC-10: {path}");
+        std::fs::remove_file(path).ok();
+    }
+
     /// Records every line written, in order.
     #[derive(Default)]
     struct RecordingJournal(std::sync::Mutex<Vec<String>>);
