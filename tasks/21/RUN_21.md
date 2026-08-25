@@ -137,3 +137,31 @@ Notes the reviewer left for the design, none of them gate questions:
   not ask for the other three, so their absence is scope rather than a gap.
 
 S1 is closed. Next is S2 Design.
+
+## Gate S2
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_21.md
+  reviewer: planner
+  verdict: QUESTIONS
+  date: 2026-08-26
+  questions:
+    - "bias::collect is stated to be pub and to return the finished, capped string, but three other decisions need more than a string to cross that boundary: a log line naming which source was tried and that it found nothing, with auto naming both attempts; an unrecognised source value refused with the three names listed rather than silently defaulted; and the logging assigned to the daemon rather than to bias. A String return carries none of that and nothing states what does, so the bias task and the daemon task cannot be cut independently — one side would invent the return type and the other would guess it. The refusal case also has no stated effect on the take: reply with an error and record nothing, or log and proceed with an empty conversation component, are different checkable outcomes."
+    - "Discovery is decided as walking up to the first existing directory under the transcript root, but the transcript root is never named and no seam for it is given — while the pane seam and the files seam are both stated exactly. The done-criteria nevertheless include a fixture .jsonl found by directory and a fake transcript reaching the log line. Neither is reachable without an injection point, and the injection point is part of collect's parameter list, which the first question already shows is unstated."
+    - "One section decides that the collected string is written to the per-request log so the owner can see what the bias string would have been. AC-9 says the opposite in its own words: the bias string is not written to a log or a file beyond what the take already needs. An implementer producing the full string would satisfy the design and fail the criterion, and it is not stated which a reviewer is meant to accept, nor at what granularity — the whole string, a prefix, or only its length and which sources contributed."
+  blocker: null
+```
+
+### Raised by the run, not by the gate
+
+The design widens `Engine::transcribe` to take a bias argument and adds a
+`{prompt}` placeholder to the command engine — a breaking change to the trait that
+shipped in `main`, which also commits the two engines that are not built yet to
+that shape. In the same document, this issue does not pass a bias string to any
+engine: `bias::collect` is called only so its result can be logged. So the
+interface breaks here and the benefit arrives later. Either the widening belongs
+to this issue together with the passing, or the trait is left alone until the
+issue that uses it. The gate did not raise this; it is raised here because the
+decision to open S3 is the run's.
