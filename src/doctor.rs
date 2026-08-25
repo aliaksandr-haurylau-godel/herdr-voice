@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{self, Source};
+use crate::stt::{self, model};
 use crate::transport;
 use crate::MIN_HERDR_VERSION;
 
@@ -22,6 +23,10 @@ pub enum State {
     Ok,
     Default,
     Missing,
+    /// Nothing in this configuration would ever look for a model: the engine is
+    /// not built, or its argument list has no `{model}` placeholder. Distinct from
+    /// `Missing`, which would send somebody to download a file nothing would read.
+    NotUsed,
 }
 
 impl State {
@@ -30,6 +35,7 @@ impl State {
             State::Ok => "ok",
             State::Default => "default",
             State::Missing => "missing",
+            State::NotUsed => "unused",
         }
     }
 }
@@ -185,26 +191,52 @@ pub fn config_finding(loaded: &config::Loaded) -> Finding {
     }
 }
 
-pub fn model_finding(models: &Path, model: &str) -> Finding {
-    let found = std::fs::read_dir(models).ok().and_then(|entries| {
-        entries
-            .filter_map(Result::ok)
-            .find(|entry| entry.file_name().to_string_lossy().contains(model))
-    });
-    match found {
-        Some(entry) => Finding {
-            name: "model",
+/// What `stt::resolve` reports for the configured engine, printed exactly as the
+/// daemon would print it — so doctor and the daemon can never disagree.
+pub fn engine_finding(stt: &config::Stt, models: &Path) -> Finding {
+    match stt::resolve(stt, models) {
+        Ok(_) => Finding {
+            name: "engine",
             state: State::Ok,
-            detail: format!("{}", entry.path().display()),
+            detail: format!("{:?} is ready", stt.engine),
         },
-        None => Finding {
-            name: "model",
+        Err(e) => Finding {
+            name: "engine",
             state: State::Missing,
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// Whether this configuration ever asks for a model at all: only `command` with an
+/// argument list containing `{model}` does. See `tasks/13/DESIGN_13.md`, section 3.
+fn asks_for_a_model(stt: &config::Stt) -> bool {
+    stt.engine == "command" && stt::wants_our_model(&stt.command)
+}
+
+pub fn model_finding(stt: &config::Stt, models: &Path) -> Finding {
+    if !asks_for_a_model(stt) {
+        return Finding {
+            name: "model",
+            state: State::NotUsed,
             detail: format!(
-                "no file naming {model} in {}; put a speech model there — \
-                 the chooser is not built yet",
+                "[stt] model ({}) is not used by this configuration; nothing in it \
+                 asks for one. It would be looked for in {}",
+                stt.model,
                 models.display()
             ),
+        };
+    }
+    match model::locate(models, &stt.model) {
+        Ok(path) => Finding {
+            name: "model",
+            state: State::Ok,
+            detail: format!("{}", path.display()),
+        },
+        Err(e) => Finding {
+            name: "model",
+            state: State::Missing,
+            detail: e.to_string(),
         },
     }
 }
@@ -263,22 +295,32 @@ fn models_directory() -> Option<PathBuf> {
 
 pub fn run() -> u8 {
     let loaded = config::load(config::directory(&config::Vars::from_env()).as_deref());
-    let findings = vec![
-        herdr_finding(),
-        daemon_finding(),
-        config_finding(&loaded),
-        match models_directory() {
-            Some(models) => model_finding(&models, &loaded.config.stt.model),
-            None => Finding {
+    let mut findings = vec![herdr_finding(), daemon_finding(), config_finding(&loaded)];
+    match models_directory() {
+        Some(models) => {
+            findings.push(engine_finding(&loaded.config.stt, &models));
+            findings.push(model_finding(&loaded.config.stt, &models));
+        }
+        None => {
+            let detail = "cannot tell where models live: neither HERDR_PLUGIN_STATE_DIR, \
+                           XDG_STATE_HOME nor HOME is set"
+                .to_string();
+            findings.push(Finding {
+                name: "engine",
+                state: State::Missing,
+                detail: detail.clone(),
+            });
+            findings.push(Finding {
                 name: "model",
                 state: State::Missing,
-                detail: "cannot tell where models live: neither HERDR_PLUGIN_STATE_DIR, \
-                         XDG_STATE_HOME nor HOME is set"
-                    .to_string(),
-            },
-        },
-        rewrite_finding(&loaded.config.rewrite.engine, &loaded.config.rewrite.agent),
-    ];
+                detail,
+            });
+        }
+    }
+    findings.push(rewrite_finding(
+        &loaded.config.rewrite.engine,
+        &loaded.config.rewrite.agent,
+    ));
     print!("{}", render(&findings));
     exit_code(&findings)
 }
@@ -368,17 +410,123 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_model_is_present_when_a_file_carries_its_name() {
-        let directory = std::env::temp_dir().join(format!("doctor-model-{}", std::process::id()));
+    fn command_stt(argv: &[&str]) -> config::Stt {
+        config::Stt {
+            engine: "command".to_string(),
+            command: argv.iter().map(|s| s.to_string()).collect(),
+            ..config::Stt::default()
+        }
+    }
+
+    fn scratch_models(tag: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("doctor-model-{tag}-{}", std::process::id()));
         let models = directory.join("models");
         std::fs::create_dir_all(&models).unwrap();
-        assert_eq!(
-            model_finding(&models, "large-v3-turbo").state,
-            State::Missing
+        models
+    }
+
+    fn write_real_model(models: &Path, name: &str) {
+        let mut content = vec![0x6C, 0x6D, 0x67, 0x67];
+        content.resize(2 * 1024 * 1024, 0u8);
+        std::fs::write(models.join(format!("ggml-{name}.bin")), content).unwrap();
+    }
+
+    #[test]
+    fn the_model_line_is_ok_when_the_shared_check_finds_it() {
+        let models = scratch_models("ok");
+        write_real_model(&models, "large-v3-turbo");
+        let stt = command_stt(&["prog", "-m", "{model}"]);
+        let finding = model_finding(&stt, &models);
+        assert_eq!(finding.state, State::Ok);
+        assert!(finding.detail.contains("large-v3-turbo"), "got {finding:?}");
+    }
+
+    #[test]
+    fn the_model_line_is_missing_when_the_shared_check_refuses_it() {
+        let models = scratch_models("missing");
+        let stt = command_stt(&["prog", "-m", "{model}"]);
+        let finding = model_finding(&stt, &models);
+        assert_eq!(finding.state, State::Missing);
+        // The shared check's own message, not a substring rule.
+        assert!(
+            finding.detail.contains("no speech model"),
+            "got {finding:?}"
         );
-        std::fs::write(models.join("ggml-large-v3-turbo.bin"), b"x").unwrap();
-        assert_eq!(model_finding(&models, "large-v3-turbo").state, State::Ok);
+    }
+
+    #[test]
+    fn the_model_line_is_not_used_when_the_engine_is_not_built() {
+        let models = scratch_models("not-built");
+        for engine in ["candle", "http"] {
+            let stt = config::Stt {
+                engine: engine.to_string(),
+                ..config::Stt::default()
+            };
+            let finding = model_finding(&stt, &models);
+            assert_eq!(finding.state, State::NotUsed, "engine {engine}");
+            assert!(finding.detail.contains("[stt] model"), "got {finding:?}");
+        }
+    }
+
+    #[test]
+    fn the_model_line_is_not_used_when_the_argument_list_has_no_placeholder() {
+        let models = scratch_models("no-placeholder");
+        let stt = command_stt(&["prog", "{audio}"]);
+        let finding = model_finding(&stt, &models);
+        assert_eq!(finding.state, State::NotUsed);
+        assert!(finding.detail.contains("[stt] model"), "got {finding:?}");
+    }
+
+    #[test]
+    fn no_test_asserts_the_substring_rule_any_more() {
+        // A file merely containing the model name must not be found: the shared
+        // check requires the exact name, the size floor and the ggml magic bytes.
+        let models = scratch_models("substring");
+        std::fs::write(
+            models.join("old-ggml-large-v3-turbo.bin"),
+            vec![0u8; 2 * 1024 * 1024],
+        )
+        .unwrap();
+        let stt = command_stt(&["prog", "-m", "{model}"]);
+        assert_eq!(model_finding(&stt, &models).state, State::Missing);
+    }
+
+    #[test]
+    fn the_engine_line_names_what_resolve_reports_for_each_engine() {
+        let models = scratch_models("engine-candle");
+        let candle = config::Stt {
+            engine: "candle".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_finding(&candle, &models);
+        assert_eq!(finding.state, State::Missing);
+        assert!(finding.detail.contains("candle"), "got {finding:?}");
+        assert!(finding.detail.contains("#15"), "got {finding:?}");
+
+        let models = scratch_models("engine-http");
+        let http = config::Stt {
+            engine: "http".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_finding(&http, &models);
+        assert_eq!(finding.state, State::Missing);
+        assert!(finding.detail.contains("http"), "got {finding:?}");
+        assert!(finding.detail.contains("#16"), "got {finding:?}");
+
+        let models = scratch_models("engine-command");
+        let command = command_stt(&["prog", "{audio}"]);
+        let finding = engine_finding(&command, &models);
+        assert_eq!(finding.state, State::Ok);
+
+        let models = scratch_models("engine-unknown");
+        let unknown = config::Stt {
+            engine: "vosk".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_finding(&unknown, &models);
+        assert_eq!(finding.state, State::Missing);
+        assert!(finding.detail.contains("vosk"), "got {finding:?}");
     }
 
     #[test]
