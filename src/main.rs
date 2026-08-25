@@ -144,7 +144,13 @@ fn main() -> ExitCode {
         other @ (Command::Cancel | Command::Dictate) => {
             let outcome = client::send(other.name());
             if let Some(message) = outcome.message {
-                eprintln!("{message}");
+                // A result on standard output, a failure on standard error, so a
+                // caller can read one without the other.
+                if outcome.code == 0 {
+                    println!("{message}");
+                } else {
+                    eprintln!("{message}");
+                }
             }
             ExitCode::from(outcome.code)
         }

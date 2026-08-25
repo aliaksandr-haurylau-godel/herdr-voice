@@ -134,8 +134,10 @@ impl fmt::Display for CaptureError {
             } => write!(
                 f,
                 "the take from {device:?} measured {level_dbfs:.1} dB, below the \
-                 {threshold_dbfs:.1} dB floor, so it was discarded as the wrong input. \
-                 Check that {device:?} is the microphone you speak into and is not muted"
+                 {threshold_dbfs:.1} dB floor, so it was discarded. Check that {device:?} \
+                 is the microphone you speak into, that it is not muted, and that this \
+                 program is allowed to use it — a denied microphone permission delivers \
+                 silence rather than an error"
             ),
             CaptureError::Unusable(why) => write!(f, "{why}"),
         }
@@ -147,7 +149,6 @@ impl std::error::Error for CaptureError {}
 enum Command {
     Start {
         target: String,
-        device: Option<String>,
         reply: mpsc::Sender<Started>,
     },
     Stop {
@@ -186,19 +187,15 @@ impl Recorder {
 
             while let Ok(order) = orders.recv() {
                 match order {
-                    Command::Start {
-                        target,
-                        device,
-                        reply,
-                    } => {
+                    Command::Start { target, reply } => {
                         let answer = start_one(
                             source.as_mut(),
+                            &audio,
                             &takes,
                             &mut running,
                             &mut remembered,
                             &mut counter,
                             target,
-                            device,
                         );
                         let _ = reply.send(answer);
                     }
@@ -215,12 +212,11 @@ impl Recorder {
         }
     }
 
-    pub fn start(&self, target: &str, device: Option<&str>) -> Started {
+    pub fn start(&self, target: &str) -> Started {
         let (reply, answer) = mpsc::channel();
         let sent = self.commands.lock().map(|commands| {
             commands.send(Command::Start {
                 target: target.to_string(),
-                device: device.map(str::to_string),
                 reply,
             })
         });
@@ -252,13 +248,18 @@ impl Recorder {
 #[allow(clippy::too_many_arguments)]
 fn start_one(
     source: &mut dyn Source,
+    audio: &Audio,
     takes: &std::path::Path,
     running: &mut Option<Running>,
     remembered: &mut Option<String>,
     counter: &mut u64,
     target: String,
-    device: Option<String>,
 ) -> Started {
+    // The device comes from the configuration the recorder was given, not from the
+    // caller. An earlier version took it per call and the daemon passed nothing, so
+    // a configured name that matched no device recorded from the default in
+    // silence — the exact failure selecting by name exists to prevent.
+    let device = (!audio.input.is_empty()).then(|| audio.input.clone());
     // A device that died while nobody was asking is reported here, at the first
     // moment there is anywhere to report to.
     if let Some(running_now) = running.as_ref() {
@@ -393,6 +394,7 @@ mod tests {
         started: usize,
         stopped: usize,
         refuse: Option<String>,
+        asked_for: Arc<Mutex<Option<String>>>,
     }
 
     impl Fake {
@@ -406,12 +408,16 @@ mod tests {
                 started: 0,
                 stopped: 0,
                 refuse: None,
+                asked_for: Arc::new(Mutex::new(None)),
             }
         }
     }
 
     impl Source for Fake {
-        fn start(&mut self, _device: Option<&str>, sink: Sink) -> Result<Format, String> {
+        fn start(&mut self, device: Option<&str>, sink: Sink) -> Result<Format, String> {
+            if let Ok(mut asked) = self.asked_for.lock() {
+                *asked = device.map(str::to_string);
+            }
             if let Some(why) = &self.refuse {
                 return Err(why.clone());
             }
@@ -439,19 +445,19 @@ mod tests {
     }
 
     fn recorder_with(tag: &str, script: Vec<Event>) -> (Recorder, PathBuf) {
+        recorder_named(tag, script, Audio::default())
+    }
+
+    fn recorder_named(tag: &str, script: Vec<Event>, audio: Audio) -> (Recorder, PathBuf) {
         let takes = takes_dir(tag);
-        let recorder = Recorder::spawn(
-            move || Box::new(Fake::new(script)),
-            Audio::default(),
-            takes.clone(),
-        );
+        let recorder = Recorder::spawn(move || Box::new(Fake::new(script)), audio, takes.clone());
         (recorder, takes)
     }
 
     #[test]
     fn a_take_starts_stops_and_lands_on_disk() {
         let (recorder, _) = recorder_with("ok", vec![Event::Samples(tone(0.3, 1.0))]);
-        assert_eq!(recorder.start("w1:p2", None), Started::Began);
+        assert_eq!(recorder.start("w1:p2"), Started::Began);
         let take = recorder.stop().expect("a take");
         assert!(take.path.exists(), "the file must be where the take says");
         assert_eq!(take.target, "w1:p2", "the pane is pinned to the take");
@@ -473,8 +479,8 @@ mod tests {
     #[test]
     fn starting_twice_is_the_toggles_second_half() {
         let (recorder, _) = recorder_with("twice", vec![Event::Samples(tone(0.3, 0.1))]);
-        assert_eq!(recorder.start("w1:p2", None), Started::Began);
-        assert_eq!(recorder.start("w1:p2", None), Started::AlreadyRunning);
+        assert_eq!(recorder.start("w1:p2"), Started::Began);
+        assert_eq!(recorder.start("w1:p2"), Started::AlreadyRunning);
         let take = recorder.stop().expect("a take");
         std::fs::remove_file(&take.path).ok();
     }
@@ -497,7 +503,7 @@ mod tests {
                 Event::Failed("the device was unplugged".to_string()),
             ],
         );
-        assert_eq!(recorder.start("w1:p2", None), Started::Began);
+        assert_eq!(recorder.start("w1:p2"), Started::Began);
 
         let error = recorder.stop().expect_err("the take is gone");
         let message = error.to_string();
@@ -505,13 +511,20 @@ mod tests {
         assert!(message.contains("discarded"), "got {message}");
 
         // And the next start is a fresh one: the failure was reported at the stop.
-        assert_eq!(recorder.start("w1:p2", None), Started::Began);
+        assert_eq!(recorder.start("w1:p2"), Started::Began);
     }
 
     #[test]
     fn a_take_that_captured_nothing_is_refused_by_level_and_device() {
-        let (recorder, _) = recorder_with("quiet", vec![Event::Samples(tone(0.00002, 1.0))]);
-        assert_eq!(recorder.start("w1:p2", Some("Headset")), Started::Began);
+        let (recorder, _) = recorder_named(
+            "quiet",
+            vec![Event::Samples(tone(0.00002, 1.0))],
+            Audio {
+                input: "Headset".to_string(),
+                ..Audio::default()
+            },
+        );
+        assert_eq!(recorder.start("w1:p2"), Started::Began);
         let error = recorder.stop().expect_err("too quiet");
         let message = error.to_string();
         assert!(
@@ -531,7 +544,7 @@ mod tests {
     #[test]
     fn a_refused_take_leaves_no_file_behind() {
         let (recorder, takes) = recorder_with("cleanup", vec![Event::Samples(tone(0.00002, 0.5))]);
-        assert_eq!(recorder.start("w1:p2", None), Started::Began);
+        assert_eq!(recorder.start("w1:p2"), Started::Began);
         recorder.stop().expect_err("too quiet");
         let left = std::fs::read_dir(&takes)
             .map(|entries| entries.count())
@@ -540,11 +553,55 @@ mod tests {
     }
 
     #[test]
+    fn the_configured_device_reaches_the_source() {
+        // The defect this guards against: the device was once a per-call argument
+        // and the daemon passed nothing, so a configured name that matched no
+        // device recorded from the default in silence.
+        let asked_for = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&asked_for);
+        let recorder = Recorder::spawn(
+            move || {
+                let mut fake = Fake::new(vec![Event::Samples(vec![0.2; 480])]);
+                fake.asked_for = seen;
+                Box::new(fake)
+            },
+            Audio {
+                input: "Headset".to_string(),
+                ..Audio::default()
+            },
+            takes_dir("named"),
+        );
+        assert_eq!(recorder.start("w1:p2"), Started::Began);
+        assert_eq!(
+            asked_for.lock().unwrap().as_deref(),
+            Some("Headset"),
+            "the name in the configuration must be the name the device is opened by"
+        );
+    }
+
+    #[test]
+    fn an_empty_configured_name_asks_for_the_default() {
+        let asked_for = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&asked_for);
+        let recorder = Recorder::spawn(
+            move || {
+                let mut fake = Fake::new(vec![Event::Samples(vec![0.2; 480])]);
+                fake.asked_for = seen;
+                Box::new(fake)
+            },
+            Audio::default(),
+            takes_dir("default-name"),
+        );
+        assert_eq!(recorder.start("w1:p2"), Started::Began);
+        assert_eq!(asked_for.lock().unwrap().as_deref(), None);
+    }
+
+    #[test]
     fn two_takes_never_share_a_path() {
         let (recorder, _) = recorder_with("unique", vec![Event::Samples(tone(0.3, 0.1))]);
-        recorder.start("w1:p2", None);
+        recorder.start("w1:p2");
         let first = recorder.stop().expect("first");
-        recorder.start("w1:p2", None);
+        recorder.start("w1:p2");
         let second = recorder.stop().expect("second");
         assert_ne!(first.path, second.path);
         std::fs::remove_file(&first.path).ok();
@@ -560,10 +617,13 @@ mod tests {
                 fake.refuse = Some("no such device".to_string());
                 Box::new(fake)
             },
-            Audio::default(),
+            Audio {
+                input: "Studio".to_string(),
+                ..Audio::default()
+            },
             takes,
         );
-        match recorder.start("w1:p2", Some("Studio")) {
+        match recorder.start("w1:p2") {
             Started::CouldNotStart(why) => assert!(why.contains("no such device"), "got {why}"),
             other => panic!("expected CouldNotStart, got {other:?}"),
         }

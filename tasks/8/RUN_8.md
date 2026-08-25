@@ -193,6 +193,41 @@ before that verdict.
 Done before the dependency it exists for, so that the Linux job never goes red for
 a reason unrelated to the change that turned it red.
 
+### S4 Implement — tasks 1 to 8
+- artifact: `src/audio/{level,wav,device,resample}.rs`, `src/capture.rs`,
+  `src/capture/cpal_source.rs`, `[audio]` in `src/config.rs`, the `dictate` wiring
+  in `src/daemon.rs` and `src/main.rs`
+- produced: 2026-08-25
+- verification: 93 tests, clippy, format and the manifest check clean; hand
+  verification in `docs/evidence.md`, "Capture, by hand on macOS"
+
+Two defects were found by running it, and neither could have been found by reading
+it.
+
+**The configured device name never reached the device.** It was a per-call
+argument and the daemon passed nothing, so `[audio] input` was ignored and every
+take came from the default input — silently, which is the precise failure that
+selecting by name exists to prevent. A configured name that matched no device
+started recording quite happily. The recorder now takes the name from the
+configuration it holds, and a test asserts the name reaches the source; it fails
+against the old behaviour, which was checked.
+
+**A successful take printed nothing.** The daemon answered with the path and the
+level; the client kept only failures and discarded everything else, so a take that
+worked looked exactly like a take that did nothing.
+
+One reading was wrong and is corrected in the evidence rather than quietly
+dropped: a take of digital silence from the default input was attributed to a
+denied microphone permission, and the built-in microphone then returned −62.9 dB
+of ordinary room tone from the same code. The default input on this machine is a
+USB interface that hears nothing. The refusal message still names permission,
+because on macOS a denied permission also delivers silence and the two cannot be
+told apart from inside the process.
+
+Not verified: a take containing speech. Nobody spoke into a microphone at three in
+the morning, so what is proven is that a take is recorded, converted, measured and
+refused correctly — not that words survive the trip.
+
 ## Notes
 
 The probe used to establish the `cpal` facts was a throwaway crate outside the

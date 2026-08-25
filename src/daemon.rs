@@ -77,7 +77,7 @@ pub fn answer(request: &Request, recorder: &Recorder) -> (Reply, Control) {
 /// Choosing it at the end would follow the focus: somebody speaks looking at one
 /// agent, switches while thinking, and the text lands in another.
 fn dictate(recorder: &Recorder, pane: &str) -> Reply {
-    match recorder.start(pane, None) {
+    match recorder.start(pane) {
         Started::Began => Reply::Ok(format!("recording for {pane}")),
         Started::CouldNotStart(why) => Reply::Error(why),
         Started::PreviousFailure(why) => Reply::Error(why),
