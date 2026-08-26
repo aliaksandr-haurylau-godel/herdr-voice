@@ -455,3 +455,80 @@ take started with no working directory still records, recognises and delivers.
 `PaneError` can produce one, and the `Auto` arm of the attempted-source
 rendering is unreachable by construction. Both are harmless and both are
 commented as such.
+
+## Paused, 2026-08-26 09:21, resuming 22:00 the same day
+
+Work stopped mid-gate on the owner's instruction. Nothing is half-written: the
+working tree is clean at `987388d`, every change is committed, nothing is
+pushed and no pull request exists.
+
+### Where this stands
+
+Tasks 8, 9 and 10 of the plan are implemented and committed. The S4 gate has
+run twice and returned eighteen findings in total; all eighteen are fixed and
+committed. The two verdicts are recorded above, each with the reproduction that
+produced it.
+
+Verified directly on `987388d`, not taken on report: `cargo test` — 209 passed,
+0 failed; `cargo clippy --all-targets -- -D warnings` — no diagnostics;
+`cargo fmt --check` — no diff; `python3 scripts/check_manifest.py` — 11
+entries, all commands known. Working tree clean.
+
+### What was interrupted
+
+A third S4 pass, scoped to the delta `643e30a..987388d` alone. It was stopped
+before it read anything, so no partial result exists and nothing needs undoing.
+That delta is worth a pass because two of its three commits changed production
+code rather than tests: `transcript::find` stopped running `git` and took
+`repository_root` as a parameter, `files::collect` was split into `collect` and
+`collect_in`, and `bias::collect` now resolves the repository root once and
+passes it to both.
+
+### First thing to do after the pause
+
+Run that third pass over `643e30a..987388d` only — the earlier passes covered
+the rest of the branch. What it has to establish, because a bound that is now
+passed in rather than computed can be passed wrongly:
+
+- the ceiling still bounds the walk, proved by mutation from both sides —
+  `collect` passing `None`, and `find` ignoring the parameter;
+- ordinary discovery still works: a pane at a repository root whose session
+  directory exists finds it, and a pane deeper inside walks up and finds it;
+- `daemon::files_only` still resolves the root for itself, since it calls the
+  entry point that was split;
+- `git` runs three times per take and not four or two, measured with a shim on
+  the path rather than reasoned about;
+- the AC-9 leak guard goes red with either stdout or stderr folded into
+  `PaneError::Failed`, and the reordered assertions are both still reachable.
+
+Then, if it is clean, record a READY verdict for S4 and move to S5.
+
+### After that
+
+S5 verifies and writes `docs/evidence.md`, then the pull request. What S5 may
+claim is bounded and the boundary matters: this issue does not hand the bias
+string to the recognition engine — `Engine::transcribe` is untouched and the
+only caller of `bias::collect` discards its return value. So no statement of
+the form "recognition now returns the English terms" or "the transcript
+improved" belongs in the evidence; that is issue #26. The strongest true claim
+available is that a bias string of the configured shape is assembled per take,
+capped, and reported on without being written down.
+
+What a person can prove by hand, and only by hand: that one `bias` line appears
+per take in `herdr plugin log list --plugin haurylau.voice`, carrying counts
+and no fragment of the conversation; that `attempted=transcript:hit` proves the
+whole `auto` transcript path against a real projects tree rather than against
+fixtures; that `attempted=pane:hit` under `source = "pane"` proves the
+`herdr pane read` contract against a live herdr, which no test can do because
+the argument list is asserted against the prototype and not against herdr; that
+an unresolvable `source` value refuses at start, names the three valid values,
+and still lets a take complete and deliver; and that a pane outside any
+repository yields `file_count=0` with the take still succeeding.
+
+### Filed elsewhere during this run, so it is not lost
+
+Issue #28 gained a comment: the pane read is a third outward call with no time
+limit, on the take path, and until #26 lands it can block a take on a result
+nothing consumes. Issue #31 was opened for the order of assembly inside the
+cap — measured, with the numbers, and framed as a decision with evidence on
+both sides rather than a defect.
