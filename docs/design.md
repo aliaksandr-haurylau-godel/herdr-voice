@@ -122,12 +122,15 @@ The model name and the spoken language are configuration, not code.
 
 Assembled from herdr and from the repository the target agent works in:
 
-- The last turns of that agent's conversation, read from its session transcript.
-  Machine turns — task notifications, system reminders, cross-session messages —
-  are filtered out; they carry nothing about speech.
+- The last turns of that agent's conversation, read from its session transcript,
+  each turn cut to its first 300 characters. Machine turns — task notifications,
+  system reminders, cross-session messages — are filtered out; they carry nothing
+  about speech.
 - Recently touched file and directory names, taken from `git status` and the last
   commits, from the repository root rather than the agent's subdirectory.
-- The git branch, the pane title and the agent kind.
+
+Those two are the whole of it. The git branch, the pane title and the agent kind
+are not collected.
 
 When no transcript is found, or when `[context] source = "pane"`, the
 conversation component is read from the pane's screen through `herdr pane read`
