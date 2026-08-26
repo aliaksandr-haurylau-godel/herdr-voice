@@ -132,9 +132,11 @@ Assembled from herdr and from the repository the target agent works in:
 Those two are the whole of it. The git branch, the pane title and the agent kind
 are not collected.
 
-When no transcript is found, or when `[context] source = "pane"`, the
-conversation component is read from the pane's screen through `herdr pane read`
-instead.
+Where the conversation comes from is `[context] source`. `transcript` reads the
+session transcript and nothing else: when none is found, the take is biased on
+file names alone. `pane` reads the pane's screen through `herdr pane read` and
+never looks for a transcript. `auto`, the default, reads the transcript and
+falls back to the pane's screen when it finds none.
 
 The visible screen of a pane running a full-screen agent is deliberately **not**
 the main source: it is mostly frame. The conversation transcript carries the
