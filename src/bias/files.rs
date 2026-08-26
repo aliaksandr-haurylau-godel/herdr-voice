@@ -38,11 +38,15 @@ pub fn collect(cwd: &str, max: usize) -> Vec<String> {
     out
 }
 
-fn toplevel(cwd: &str) -> Option<String> {
-    // `git -C ""` is documented as a no-op, which would silently look at the
-    // daemon's own working directory instead of the agent's — file names from
-    // the wrong repository. No directory means no file names.
-    if cwd.is_empty() {
+/// The root of the repository containing `cwd`, or nothing when `cwd` names no
+/// directory of its own or lies outside a repository. Also the ceiling for
+/// `transcript::find`'s walk, which is why it is visible outside this module.
+pub fn toplevel(cwd: &str) -> Option<String> {
+    // `git -C ""` is documented as a no-op and `git -C .` resolves against the
+    // process's own directory, so either would silently look at the daemon's
+    // working directory instead of the agent's — file names from the wrong
+    // repository. A working directory that names nothing means no file names.
+    if cwd.is_empty() || cwd == "." {
         return None;
     }
     let output = Command::new("git")
@@ -157,6 +161,13 @@ mod tests {
         // guard an absent `focused_pane_cwd` would collect the daemon's own
         // repository instead of the agent's.
         assert!(collect("", 40).is_empty());
+    }
+
+    #[test]
+    fn a_relative_working_directory_yields_no_names() {
+        // `git -C .` resolves against the daemon's own working directory, the
+        // same hazard the empty case has.
+        assert!(collect(".", 40).is_empty());
     }
 
     #[test]

@@ -28,19 +28,30 @@ const SERVICE_MARKERS: &[&str] = &[
 /// Finds the target agent's transcript file. `None` when `agent` isn't the
 /// known one — no directory is derived, no search runs — or when no
 /// directory under `root` is found by walking up from `cwd`.
+///
+/// The walk stops at the repository root: above it, the first directory that
+/// happens to exist under `root` belongs to somebody else's session.
 pub fn find(cwd: &str, agent: Option<&str>, root: &Path) -> Option<PathBuf> {
     if agent != Some(KNOWN_TRANSCRIPT_AGENT) {
         return None;
     }
+    let ceiling = repository_ceiling(cwd);
     let mut dir = cwd.to_string();
     loop {
+        // A working directory that names no directory of its own slugifies to
+        // `root` itself, or to a name resolved against the daemon's own
+        // process — either way it would hand back a transcript belonging to
+        // nothing this take is about.
+        if dir.is_empty() || dir == "." {
+            return None;
+        }
         let project = root.join(slugify(&dir));
         if project.is_dir() {
             if let Some(newest) = newest_jsonl(&project) {
                 return Some(newest);
             }
         }
-        if dir == "/" || dir.is_empty() {
+        if dir == "/" || at_ceiling(&dir, ceiling.as_deref()) {
             return None;
         }
         match Path::new(&dir).parent() {
@@ -49,6 +60,23 @@ pub fn find(cwd: &str, agent: Option<&str>, root: &Path) -> Option<PathBuf> {
             }
             _ => return None,
         }
+    }
+}
+
+/// The repository root the walk may not climb above, resolved through symbolic
+/// links so that it can be compared with a directory the walk is holding.
+fn repository_ceiling(cwd: &str) -> Option<PathBuf> {
+    let root = crate::bias::files::toplevel(cwd)?;
+    std::fs::canonicalize(root).ok()
+}
+
+/// Whether the walk has reached that ceiling. A directory that cannot be
+/// resolved — one that does not exist — is never the ceiling, which leaves a
+/// working directory outside any repository walking up as before.
+fn at_ceiling(dir: &str, ceiling: Option<&Path>) -> bool {
+    match (ceiling, std::fs::canonicalize(dir)) {
+        (Some(ceiling), Ok(resolved)) => resolved == ceiling,
+        _ => false,
     }
 }
 
@@ -197,6 +225,51 @@ mod tests {
         // subdirectory of the project, and discovery must walk up to find it.
         let found = find("/work/example/project/sub/deeper", Some("claude"), &root);
         assert_eq!(found, Some(fixture));
+    }
+
+    #[test]
+    fn a_working_directory_that_names_nothing_finds_nothing() {
+        let root = scratch("no-cwd");
+        // A stray transcript sitting in the root itself, which an empty or
+        // relative working directory would otherwise slugify straight onto.
+        write_jsonl(&root, "session.jsonl", FIXTURE_TURNS);
+
+        assert_eq!(find("", Some("claude"), &root), None);
+        assert_eq!(find(".", Some("claude"), &root), None);
+    }
+
+    #[test]
+    fn the_walk_stops_at_the_repository_root() {
+        let root = scratch("ceiling-root");
+        let repo = scratch("ceiling-repo");
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.invalid"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            let status = std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(&args)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        }
+        let inner = repo.join("sub");
+        std::fs::create_dir_all(&inner).unwrap();
+
+        // A session directory exists for the repository's parent — the case
+        // the home directory presents on a real machine. It belongs to
+        // whatever else lives there, not to this repository.
+        let parent = repo
+            .parent()
+            .expect("a parent")
+            .to_string_lossy()
+            .to_string();
+        let elsewhere = root.join(slugify(&parent));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        write_jsonl(&elsewhere, "session.jsonl", FIXTURE_TURNS);
+
+        assert_eq!(find(&inner.to_string_lossy(), Some("claude"), &root), None);
     }
 
     #[test]
