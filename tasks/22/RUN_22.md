@@ -368,3 +368,39 @@ with `none`, `done` and `request`; the prototype passed `--sound none` explicitl
 this code passes nothing, so a failed delivery's toast uses herdr's default sound,
 which is not measured. Recorded rather than changed: no criterion asks for a sound
 either way.
+
+## Gate S4, third pass
+
+Narrow: only the two commits that pinned the trait method to its subcommand and made
+the test recorder cross-platform. Everything before them had been reviewed in full
+twice.
+
+```yaml
+gate:
+  stage: S4
+  artifact: the last two commits of feat/22-delivery
+  reviewer: superpowers:requesting-code-review
+  verdict: QUESTIONS
+  date: 2026-08-26
+  blocker: null
+```
+
+The pin was verified by execution, not by report: swapping the two method bodies in a
+scratch copy reddens exactly the two tests written for it, while the three
+argument-builder tests stay green. The production path is untouched by the refactor —
+the only non-test change is an additional constructor taking the binary path, and no
+platform gate appears anywhere outside tests.
+
+Two findings, neither blocking.
+
+- A comment misstates the mechanism it explains. It says Windows runs a `.cmd`
+  directly through `CreateProcess`, the way a shebang is honoured on Unix. It does
+  not: `CreateProcess` cannot execute a non-executable script, and it is the Rust
+  standard library that routes `.bat` and `.cmd` through the command interpreter. The
+  behaviour the test depends on is correct; the explanation of why is not.
+- The scratch directory is created before the value that owns its cleanup exists, so
+  a panic between the two leaves the directory behind. Narrow, and it needs a failure
+  in the temporary directory itself to reach.
+
+The Windows branch remains reasoned rather than observed: this machine has no Windows
+target, so it has never been compiled, let alone run. CI settles it.
