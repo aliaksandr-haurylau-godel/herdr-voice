@@ -143,7 +143,7 @@ fn dictate(
     cwd: Option<&str>,
     agent: Option<&str>,
 ) -> Reply {
-    match recorder.start(pane, agent) {
+    match recorder.start(pane, cwd, agent) {
         Started::Began => Reply::Ok(format!("recording for {pane}")),
         Started::CouldNotStart(why) => Reply::Error(why),
         Started::PreviousFailure(why) => Reply::Error(why),
@@ -156,7 +156,12 @@ fn dictate(
                 // issue's own contribution is that it exists, is capped, and
                 // is reported on without being written down
                 // (`tasks/21/DESIGN_21.md`, section 9).
-                take_bias(runtime, pane, cwd, agent);
+                take_bias(
+                    runtime,
+                    &take.target,
+                    take.cwd.as_deref(),
+                    take.agent.as_deref(),
+                );
                 transcribe(runtime, &take)
             }
         },
@@ -819,6 +824,7 @@ mod tests {
             level_dbfs: -10.0,
             target: "w1\n:p2".to_string(),
             agent: None,
+            cwd: None,
         };
         let fake = crate::delivery::tests_support::FakeDeliverer::failing(
             crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
@@ -1082,10 +1088,14 @@ mod tests {
     }
 
     fn cwd_request(cwd: &std::path::Path) -> Request {
+        pane_request("w1:p2", cwd)
+    }
+
+    fn pane_request(pane: &str, cwd: &std::path::Path) -> Request {
         request(
             "dictate",
             format!(
-                r#"{{"focused_pane_id":"w1:p2","focused_pane_cwd":{:?},"focused_pane_agent":"claude"}}"#,
+                r#"{{"focused_pane_id":{pane:?},"focused_pane_cwd":{:?},"focused_pane_agent":"claude"}}"#,
                 cwd.to_string_lossy()
             )
             .as_bytes(),
@@ -1155,6 +1165,45 @@ mod tests {
         assert_eq!(lines.len(), 1, "got {lines:?}");
         assert!(lines[0].contains("vosk"), "got {lines:?}");
         assert!(lines[0].contains("file_count="), "got {lines:?}");
+    }
+
+    #[test]
+    fn the_bias_is_built_from_the_pane_the_take_was_pinned_to() {
+        // The same rule `Take::target` exists for: somebody speaks looking at
+        // one agent and switches while thinking. The text goes to the pane the
+        // take began in, and so must the context it is recognised with.
+        const SENTENCE: &str = "the kettle argues with the lighthouse about tuesday";
+        let pinned = bias_scratch("bias-pinned-cwd");
+        git_repo(&pinned);
+        let switched = bias_scratch("bias-switched-cwd");
+        let root = bias_scratch("bias-pinned-root");
+        transcript_fixture(&root, &pinned.to_string_lossy(), SENTENCE);
+
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.bias_source = Ok(bias::Source::Auto);
+        runtime.transcript_root = Some(root);
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+
+        let recorder = tone_recorder("bias-pinned");
+        // The take begins in one pane, and the focus has moved by the time the
+        // second keypress arrives.
+        answer(&pane_request("w1:p2", &pinned), &recorder, &runtime);
+        answer(&pane_request("w9:p9", &switched), &recorder, &runtime);
+
+        let lines = journal.0.lock().unwrap();
+        let line = lines
+            .iter()
+            .find(|line| line.starts_with("bias "))
+            .unwrap_or_else(|| panic!("no bias line, got {lines:?}"));
+        assert!(
+            line.contains("attempted=transcript:hit"),
+            "the bias must come from the pinned working directory, got {line:?}"
+        );
+        assert!(
+            !line.contains("file_count=0"),
+            "the pinned working directory is a repository, got {line:?}"
+        );
     }
 
     #[test]
