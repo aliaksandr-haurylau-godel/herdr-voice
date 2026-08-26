@@ -1,0 +1,416 @@
+# RUN_22
+
+| field | value |
+|---|---|
+| issue | #22 — Delivery: put the transcript in the pane without submitting it |
+| input | GitHub issue, read with `gh issue view 22` |
+| stage | S1 |
+| branch | feat/22-delivery |
+| opened | 2026-08-26 |
+
+## Stages
+
+<!-- One block per stage, appended, never rewritten. -->
+
+### S1 Assess
+- artifact: `AC_22.md`
+- produced: 2026-08-26
+
+Transcription and rewrite (issues 13, 15, 16, 21) are not part of this branch, so
+the acceptance criteria treat delivery as an operation over a pane and a piece of
+text — testable with a fake pane call, per `CLAUDE.md`'s own description of how
+this stage is tested ("delivery through a recorded call") — rather than as an
+end-to-end pipeline from a real transcript. That gap is recorded under "Out of
+scope / noticed" in `AC_22.md`, not folded into an AC.
+
+No journal subsystem exists in `src/`; every existing visible failure in the
+daemon is a line on standard error, captured by herdr's own plugin log. "Journal
+line" in the acceptance criteria is read as one more line in that same channel.
+
+The take produces no separate text file, only a WAV. "The text must not be lost
+silently" is met two ways: the text is written to the journal line before
+delivery is attempted, and the WAV is kept rather than deleted on a failed
+delivery.
+
+## Gate S1
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_22.md
+  reviewer: designer
+  verdict: QUESTIONS
+  date: 2026-08-26
+  questions:
+    - "The as-is is contradicted by the worktree the design will be implemented in, and the contradiction changes the design. AC_22.md says the pipeline stops after capture and that there is no transcription because issues 13, 15, 16 and 21 are unmerged. Transcription is present and wired: dictate calls transcribe on a finished take and replies with the text, the level and the target. The scope decision rests on the false half. Which design is wanted: (a) delivery is called from dictate/transcribe with the real transcript, which also decides what the reply becomes now that the text goes to the pane instead of back to the client, or (b) delivery is a module with no caller, exercised only by AC-12's tests. AC-1 to AC-12 are satisfiable either way and name no caller."
+    - "AC-5 requires a delivery against a pane that no longer exists to be a failed delivery and explicitly not a silent no-op, but nothing states what herdr does against a pane id that is gone. If those commands exit non-zero, AC-5 is already AC-6. If they exit 0 and do nothing, AC-5 forces a pane-existence check against a herdr command nobody names, plus a fake for it in the tests. Two different designs and two different test surfaces."
+  blocker: null
+```
+
+Note recorded by the reviewer, not a reason to withhold READY: AC-3 makes
+`submit = true` always use `herdr agent prompt`, while the prototype gates that on
+the target pane actually having an agent and otherwise falls back to `send-text`.
+AC-6 makes a rejected call a visible failure, so the dropped condition is
+designable as written; it was dropped deliberately.
+
+### Answers
+
+**Question two is answered by measurement, not by choice.** Both commands refuse a
+pane that does not exist, with a code and a structured error:
+
+```
+$ herdr pane send-text "w99:p99" "probe"
+{"error":{"code":"pane_not_found","message":"pane w99:p99 not found"},...}
+exit=1
+$ herdr agent prompt "w99:p99" "probe"
+{"error":{"code":"agent_not_found","message":"agent target w99:p99 not found"},...}
+exit=1
+```
+
+So a pane that is gone is an ordinary rejected call. AC-5 collapses into AC-6, no
+existence check is needed before delivering, and the tests need no fake for one.
+
+**Question one is answered (a): delivery is called when a take finishes.** The
+goal of this issue is that the text lands in the pane's input — a module with no
+caller does not reach it, and an unreached goal is not something to plan around.
+What the client prints changes with it: the transcript goes to the pane, so the
+reply becomes a confirmation of where it was delivered and at what level, rather
+than the text itself. That is a change to what the client prints, in the same class
+as the earlier decision that made it print anything at all, and it is recorded in
+`docs/decisions.md` when the criteria are revised.
+
+### S1 Assess — revised after the gate
+- artifact: `AC_22.md`, `docs/decisions.md`
+- produced: 2026-08-26
+
+Both questions are answered in the artifact, with facts rather than choices where
+a fact settled it.
+
+The as-is section is rewritten against `main` as it stands after pull request
+#20: recognition is in, `dictate` already produces real text on a finished take,
+and delivery is now written as a called stage (AC-2), not only a tested module.
+That changes what `dictate`'s reply carries: a successful delivery is confirmed by
+where the text went, not repeated (AC-11); a failed one carries the text itself
+and the reason (AC-12), since neither the pane nor the client's own output has
+the text otherwise. Recorded in `docs/decisions.md`.
+
+The pane-gone question is answered by the measurement in `docs/evidence.md`,
+"Delivering into a pane that is gone": both `herdr pane send-text` and `herdr
+agent prompt` refuse a nonexistent pane with exit 1 and a machine-readable error
+code. The old AC-5 (pane gone treated as a failure, not a silent no-op) is now
+one instance of AC-6 (any rejected call is a failed delivery); no existence check
+and no dedicated fake are needed.
+
+The reviewer's note on AC-3 is acted on rather than left as a note: the
+prototype's fallback — `submit = true` still inserts without submitting when the
+pinned pane has no agent — is restored as AC-4, using `Invocation.
+focused_pane_agent`, already captured at pin time, so no new herdr call is
+needed to keep the condition.
+
+## Gate S1, second pass
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_22.md
+  reviewer: designer
+  verdict: READY
+  date: 2026-08-26
+  questions: []
+  blocker: null
+```
+
+The reviewer checked the one field a criterion depends on: `focused_pane_agent`
+exists in `src/context.rs` as `Option<String>`, is parsed from the invocation body
+and is covered by a test. So the agent name is available when the take is pinned,
+without a new call to herdr. Carrying it from the first `dictate` to delivery on
+the second is work the design adds — `answer` currently keeps only the pane string,
+and `Take` holds only the path, the level and the target.
+
+### One decision taken here, so the design does not have to guess
+
+`docs/design.md` documents `[ui] toasts = true`, a key that governs toasts, and
+AC-8 requires a toast without mentioning it. The toast obeys `[ui] toasts`: a
+documented key that some code ignores is a key that lies, and the journal line
+required by AC-7 is unconditional anyway, so a person who turned toasts off still
+has the failure recorded rather than lost. This is not a new user-visible name —
+the key already exists — and it is recorded in `docs/decisions.md`.
+
+S1 is closed. Next is S2 Design, which by its own rule stops for the owner's
+approval of the intent before anything is implemented.
+
+## Gate S2
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_22.md
+  reviewer: planner
+  verdict: QUESTIONS
+  date: 2026-08-26
+  questions:
+    - "The daemon test that proves delivery is called needs transcribe's success path to be reachable, which needs recorder.stop() to return a Take. The only source daemon.rs can reach is capture::tests_support::SilentSource, which pushes zero samples, so the take is refused as too quiet and transcribe is never entered — which is why the existing test asserts on 'below ... dB'. The audible source that would produce a real Take lives in capture.rs's private test module, not in tests_support. No section says who exports an audible source, and the capture row of the task table scopes capture to Take.agent only. The daemon-test task therefore has an input nobody produces and an undeclared dependency on the capture task."
+    - "The journal lines are specified as eprintln! inside transcribe, while the task table claims a daemon test proving that the line with the text appears before delivery is called. Standard error written by eprintln! is not readable from inside the test process, and no existing test asserts on it: this codebase makes journal text testable by returning it from a pure function and calling eprintln! at the call site, the way request_line and context_note do. Which shape delivery's journal lines take is not stated, and it changes transcribe's signature — a returned line or a passed writer rather than a bare eprintln!. That is the interface between the daemon-wiring task and the task that verifies the journal-line criteria."
+  blocker: null
+```
+
+Both citation checks the gate was asked to run hold: `spike/spike.sh` really calls
+`herdr notification show` with a `--body`, and the agent-name threading matches the
+shape of `src/capture.rs` — `Take`, `Command::Start`, `Running` and
+`Recorder::start` all take one more field beside `target` without resistance. The
+design drops the prototype's `--sound`, which no criterion asks for.
+
+Three citations in the design have drifted by a few lines each: `Command::Start`,
+`HERDR_BIN_PATH` in `src/doctor.rs`, and `stt::tests_support`.
+
+## Gate S2, second pass
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_22.md
+  reviewer: planner
+  verdict: READY
+  date: 2026-08-26
+  questions: []
+  blocker: null
+```
+
+Both claims the gate was asked to check hold. `capture::tests_support` exports only
+`SilentSource`, which pushes 4 800 zero samples; the scriptable fake and its tone
+generator are private to the test module, so the `ToneSource` the design adds is
+the minimal audible slice of them. It clears the floor with room to spare — the
+silence floor defaults to −60 dB and a 0.3-amplitude sine measures near −13 dB,
+the same amplitude an existing capture test already asserts stays above the floor.
+The step after the level check survives too: the WAV writer creates the take
+directory itself, so a daemon test whose takes directory does not exist still
+reaches transcription, which with the fake engine never opens the file.
+
+The `Runtime` change matches the code: `transcribe` is reached through `dictate`,
+`answer`, `serve_one`, `serve` and `start` — the five-function chain that threads
+the recognition engine today and that the design replaces with one bundle.
+
+Citations drift by a few lines in three more places, the same class as before. It
+changes no task boundary.
+
+S2 is closed. Next is S3 Plan.
+
+## Gate S2, third pass
+
+The artifact was re-judged in full, not only where it changed. The previous READY
+was reached on a document that carried a defect the gate had not been asked about
+and the run signed off on: the failure reply put the transcript ahead of the path
+to the take, and the reply protocol reads one line, so a transcript with a newline
+in it truncated and took the path with it — losing both things the criterion
+requires the reply to carry.
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_22.md
+  reviewer: planner
+  verdict: READY
+  date: 2026-08-26
+  questions: []
+  blocker: null
+```
+
+The gate checked the protocol against the code rather than taking the design's
+word: a reply is written with `writeln!` and read with a single `read_line`, so a
+newline anywhere in the body ends the read and everything after it is lost, while a
+lone carriage return does not truncate. With the transcript last and both fields
+that can carry a newline collapsed to spaces, nothing can cut off the reason or the
+take's path, and truncation is removed for this reply entirely. The design's refusal
+to call that a fix for issue 19 is accurate: nothing in it bounds length, and the
+engine-failure reply it does not touch still carries an embedded newline before its
+example — which is issue 19, and where it was first seen.
+
+Two things a task will settle by existing convention rather than by a design
+statement, named so nobody thinks they were missed: the failure reply must be the
+error variant, since the client maps that to exit 1 and both existing failure
+branches already use it; and the rejected-delivery error must print the extracted
+code alone for the reply's example to hold.
+
+The task graph comes out of the artifact without invention. The `depends on` column
+omits the daemon's dependency on delivery and configuration, which the prose
+states — the plan makes it explicit.
+
+S2 is closed.
+
+## Gate S3
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_22.md
+  reviewer: implementer
+  verdict: READY
+  date: 2026-08-26
+  questions: []
+  blocker: null
+```
+
+The reviewer checked every file the plan touches against the worktree. Every line
+citation matches the code, the two JSON refusal shapes are quoted byte for byte
+against the measurement they come from, and the three user-visible strings match
+the design word for word. No placeholder, no forward reference to something a later
+task defines, no test whose expected output is left to the implementer.
+
+The three points the gate was asked to scrutinise hold: the audible test source is
+concrete and the task that needs it names where; the interim `None` for the agent
+is stated as a temporary lie closed by the last task rather than a finished
+feature; and the refusal parser quotes both shapes rather than pointing at them.
+
+S3 is closed. Next is S4 Implement, whose gate is a review of the diff before any
+pull request exists.
+
+## Gate S4
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff of feat/22-delivery against main
+  reviewer: superpowers:requesting-code-review
+  verdict: QUESTIONS
+  date: 2026-08-26
+  blocker: null
+```
+
+Nine findings, three of them blocking. Build state at review time: 146 tests pass,
+clippy clean under `-D warnings`, format clean, manifest 11 entries.
+
+**Blocking.**
+
+1. A toast that fails to show leaves no record. The design requires one more journal
+   line when the toast itself cannot be raised; the requirement was dropped when the
+   plan was cut, and the code follows the plan. The original failure is not masked —
+   the journal line and the error reply are produced independently — so this is a
+   lost diagnostic rather than a lost failure, which is still what `CLAUDE.md` calls
+   a silent failure.
+2. The journal-order test does not pin the criterion. It asserts the order of the two
+   journal lines relative to each other, while the criterion is about the text
+   reaching the journal *before the delivery attempt*. Moving the write below the
+   delivery call leaves the test green and the transcript held only in memory across
+   an outward call. This is the group that went green on first run.
+3. The newline collapsing is exercised by no test. It is the whole content of the
+   third-pass fix, and no test passes a transcript or a reason containing a newline.
+   Drop either collapse and every test stays green until the first real multi-line
+   transcript truncates a reply.
+
+**Not blocking, weighed by the run.**
+
+4. The target pane and the take path are not collapsed although they sit ahead of the
+   transcript. Whether a pane id can carry a newline was not established; the code
+   defends neither way.
+5. Nothing verifies the argument lists of the real herdr calls. Every delivery test
+   runs through the fake, so a misspelt subcommand or swapped arguments would leave
+   the suite green and the plugin inert against a live herdr.
+6. An empty agent string defeats the fallback: `Some("")` passes an `is_some` check,
+   so a pane with no agent would be submitted to rather than inserted into. How herdr
+   encodes "no agent" was not established.
+7. The outward call to herdr has no bound. A wedged herdr leaks the connection thread
+   and produces no delivery-failed line.
+8. A rejected delivery prints herdr's bare code without naming what to do next, while
+   the not-found arm does.
+9. The reason parser keeps herdr's whole raw output when the refusal does not parse.
+
+**Checked and clean**: the exit code on every failure path, the reply strings byte for
+byte, the toast gate, the agent fallback at both levels, the absence of any reachable
+panic or unwrap, the take surviving a failed delivery, the pinned target, the
+configuration defaults, and the absence of a lock held across the subprocess call.
+
+The reviewer corrected its own report after filing: the findings are its own trace
+of the files, not a merge with a dispatched subagent's report as first stated. The
+verdict and the substance stand; only the attribution was wrong.
+
+## Gate S4, second pass
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff of feat/22-delivery against main
+  reviewer: superpowers:requesting-code-review
+  verdict: QUESTIONS
+  date: 2026-08-26
+  blocker: null
+```
+
+The six repairs were verified by mutation rather than by report: each behaviour was
+removed from a scratch copy and the suite run. Every one goes red, each on the test
+that names it — including the one that matters most, where moving the journal write
+below the delivery call reddens the new interleaved-trace test while the old
+order-only test stays green. That is the hole the first pass named, and it is closed.
+
+**One finding, and it is the worse half of a finding the first pass raised.** The
+argument lists are now asserted as data, so a misspelt subcommand is caught. The four
+lines binding each trait method to its builder are asserted by nothing: swapping the
+bodies of `insert` and `submit` leaves all 155 tests green and clippy clean, because
+both builders are still called. With the default configuration — submit off — a
+finished take would then run `herdr agent prompt`, which appends Enter, so the text is
+submitted to the agent instead of being left in the pane's input. The call succeeds,
+so there is no rejection, no journal line, no toast, and the reply says the text was
+delivered. The issue's central requirement is violated with no signal anywhere.
+
+It is a coverage gap rather than a live defect — the bindings as written are correct.
+Closing it needs a test that exercises the real deliverer rather than the builders,
+which today it cannot: the binary path is read from the environment at construction,
+and mutating the environment under a parallel suite is not an option. A constructor
+taking the path, pointed at a script that records its arguments, pins the whole chain.
+
+Nothing bypasses the builders: the private runner has exactly three callers, and no
+other delivery path constructs a process.
+
+### Measured while the gate was open
+
+`herdr notification show --help` on herdr 0.8.2 confirms the shape the code builds:
+`herdr notification show <TITLE> --body <TEXT>`. The subcommand also takes `--sound`,
+with `none`, `done` and `request`; the prototype passed `--sound none` explicitly and
+this code passes nothing, so a failed delivery's toast uses herdr's default sound,
+which is not measured. Recorded rather than changed: no criterion asks for a sound
+either way.
+
+## Gate S4, third pass
+
+Narrow: only the two commits that pinned the trait method to its subcommand and made
+the test recorder cross-platform. Everything before them had been reviewed in full
+twice.
+
+```yaml
+gate:
+  stage: S4
+  artifact: the last two commits of feat/22-delivery
+  reviewer: superpowers:requesting-code-review
+  verdict: QUESTIONS
+  date: 2026-08-26
+  blocker: null
+```
+
+The pin was verified by execution, not by report: swapping the two method bodies in a
+scratch copy reddens exactly the two tests written for it, while the three
+argument-builder tests stay green. The production path is untouched by the refactor —
+the only non-test change is an additional constructor taking the binary path, and no
+platform gate appears anywhere outside tests.
+
+Two findings, neither blocking.
+
+- A comment misstates the mechanism it explains. It says Windows runs a `.cmd`
+  directly through `CreateProcess`, the way a shebang is honoured on Unix. It does
+  not: `CreateProcess` cannot execute a non-executable script, and it is the Rust
+  standard library that routes `.bat` and `.cmd` through the command interpreter. The
+  behaviour the test depends on is correct; the explanation of why is not.
+- The scratch directory is created before the value that owns its cleanup exists, so
+  a panic between the two leaves the directory behind. Narrow, and it needs a failure
+  in the temporary directory itself to reach.
+
+The Windows branch remains reasoned rather than observed: this machine has no Windows
+target, so it has never been compiled, let alone run. CI settles it.
+
+Both findings of the third pass are closed. The comment now states the real
+mechanism — the command interpreter is reached through the standard library rather
+than by anything the operating system does with a script on its own, and the crate's
+minimum Rust version is what makes relying on it safe — and it warns which argument
+shapes the batch loop would mishandle. The scratch directory is now created by the
+value that owns its cleanup, so nothing fallible runs between the two.
+
+S4 is closed. 159 tests pass, clippy is clean under `-D warnings`, the format check
+is clean, and the manifest reports 11 entries with all commands known.

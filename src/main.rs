@@ -14,6 +14,7 @@ mod client;
 mod config;
 mod context;
 mod daemon;
+mod delivery;
 mod doctor;
 mod proto;
 mod stt;

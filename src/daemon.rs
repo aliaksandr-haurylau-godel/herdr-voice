@@ -45,11 +45,16 @@ pub fn needs_target_pane(command: &str) -> bool {
 /// run for `cancel` and for `doctor`, which is where somebody finds out what to fix.
 pub type Recognition = Result<Box<dyn Engine + Send + Sync>, String>;
 
-pub fn answer(
-    request: &Request,
-    recorder: &Recorder,
-    recognition: &Recognition,
-) -> (Reply, Control) {
+/// The four things resolved once, at daemon start, and needed everywhere a
+/// take can finish.
+pub struct Runtime {
+    pub recognition: Recognition,
+    pub deliverer: Box<dyn crate::delivery::Deliverer>,
+    pub delivery_settings: crate::delivery::Settings,
+    pub journal: Box<dyn Journal>,
+}
+
+pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Reply, Control) {
     match request.command.as_str() {
         "stop" => (Reply::Ok("stopping".to_string()), Control::Stop),
         "cancel" => (
@@ -67,9 +72,15 @@ pub fn answer(
                     ),
                     Control::Continue,
                 ),
-                Some(pane) if command == "dictate" => {
-                    (dictate(recorder, recognition, pane), Control::Continue)
-                }
+                Some(pane) if command == "dictate" => (
+                    dictate(
+                        recorder,
+                        runtime,
+                        pane,
+                        invocation.focused_pane_agent.as_deref(),
+                    ),
+                    Control::Continue,
+                ),
                 Some(_) => (
                     Reply::Ok(format!("{command}: not implemented yet")),
                     Control::Continue,
@@ -88,21 +99,23 @@ pub fn answer(
 /// The pane is pinned here, when the take begins, and kept with it until delivery.
 /// Choosing it at the end would follow the focus: somebody speaks looking at one
 /// agent, switches while thinking, and the text lands in another.
-fn dictate(recorder: &Recorder, recognition: &Recognition, pane: &str) -> Reply {
-    match recorder.start(pane) {
+fn dictate(recorder: &Recorder, runtime: &Runtime, pane: &str, agent: Option<&str>) -> Reply {
+    match recorder.start(pane, agent) {
         Started::Began => Reply::Ok(format!("recording for {pane}")),
         Started::CouldNotStart(why) => Reply::Error(why),
         Started::PreviousFailure(why) => Reply::Error(why),
         Started::AlreadyRunning => match recorder.stop() {
             Err(why) => Reply::Error(why.to_string()),
-            Ok(take) => transcribe(recognition, &take),
+            Ok(take) => transcribe(runtime, &take),
         },
     }
 }
 
-/// A finished take becomes text, or says why it did not.
-fn transcribe(recognition: &Recognition, take: &crate::capture::Take) -> Reply {
-    let engine = match recognition {
+/// A finished take becomes text, and the text is delivered — or, if either
+/// step fails, the reply is a Reply::Error naming why and what to do next
+/// (client::outcome maps Reply::Ok to exit 0, Reply::Error to exit 1).
+fn transcribe(runtime: &Runtime, take: &crate::capture::Take) -> Reply {
+    let engine = match &runtime.recognition {
         Ok(engine) => engine,
         // The take is on disk and named, so nothing is lost by the engine being
         // absent: somebody can fix the configuration and the file is still there.
@@ -113,15 +126,58 @@ fn transcribe(recognition: &Recognition, take: &crate::capture::Take) -> Reply {
             ))
         }
     };
-    match engine.transcribe(&take.path) {
-        Ok(text) => Reply::Ok(format!(
-            "{text} [{:.1} dB, {}]",
-            take.level_dbfs, take.target
+    let text = match engine.transcribe(&take.path) {
+        Ok(text) => text,
+        Err(why) => {
+            return Reply::Error(format!(
+                "{why} — the take is kept at {}",
+                take.path.display()
+            ))
+        }
+    };
+
+    // Written before the delivery attempt: the text must not be held only
+    // in memory while the outward call to herdr runs.
+    runtime.journal.write(&delivering_line(&text));
+
+    match crate::delivery::deliver(
+        runtime.deliverer.as_ref(),
+        runtime.delivery_settings.submit,
+        take.agent.as_deref(),
+        &take.target,
+        &text,
+    ) {
+        Ok(()) => Reply::Ok(format!(
+            "delivered to {} [{:.1} dB]",
+            take.target, take.level_dbfs
         )),
-        Err(why) => Reply::Error(format!(
-            "{why} — the take is kept at {}",
-            take.path.display()
-        )),
+        Err(why) => {
+            // Whether a pane id or a path can carry a newline was never
+            // established either way, and both sit ahead of the transcript in
+            // the reply below — collapsing them costs nothing and defends the
+            // reply regardless.
+            let target = take.target.replace('\n', " ");
+            let path = take.path.display().to_string().replace('\n', " ");
+            let why = why.to_string().replace('\n', " ");
+            runtime.journal.write(&delivery_failed_line(&target, &why));
+            if runtime.delivery_settings.toasts {
+                // A toast that could not be shown must not stop the journal
+                // line or the client's reply from getting through — but its
+                // own failure is still a lost diagnostic, so it is journaled.
+                if let Err(toast_why) = runtime.deliverer.notify(
+                    "Delivery failed",
+                    &format!("{target}: the text is in the plugin log"),
+                ) {
+                    runtime.journal.write(&toast_failed_line(
+                        &toast_why.to_string().replace('\n', " "),
+                    ));
+                }
+            }
+            Reply::Error(format!(
+                "could not deliver to {target} ({why}) — the take is kept at {path}; text: {}",
+                text.replace('\n', " "),
+            ))
+        }
     }
 }
 
@@ -147,6 +203,39 @@ pub fn request_line(request: &Request) -> String {
         request.entrypoint.as_deref().unwrap_or("-"),
         request.context.len()
     )
+}
+
+/// Where a journal line goes. Production writes to standard error, the
+/// channel request_line/context_note already use; a test substitutes
+/// something it can read back, in order, without touching real stderr.
+pub trait Journal: Send + Sync {
+    fn write(&self, line: &str);
+}
+
+pub struct StderrJournal;
+impl Journal for StderrJournal {
+    fn write(&self, line: &str) {
+        eprintln!("{line}");
+    }
+}
+
+/// Written before a delivery attempt, so the text is not held only in
+/// memory while the outward call to herdr runs.
+pub fn delivering_line(text: &str) -> String {
+    format!("delivering: {text}")
+}
+
+/// Written when a delivery attempt is rejected.
+pub fn delivery_failed_line(target: &str, why: &str) -> String {
+    format!("delivery failed: pane={target} reason={why}")
+}
+
+/// Written when the toast itself could not be raised — herdr's `notification
+/// show` failed on top of the delivery it was reporting. The delivery-failed
+/// line above already carries the pane and the reason; this line exists so
+/// that a toast nobody saw is not also a diagnostic nobody sees.
+pub fn toast_failed_line(why: &str) -> String {
+    format!("toast failed: {why}")
 }
 
 pub fn start() -> Result<Outcome, TransportError> {
@@ -183,7 +272,16 @@ pub fn start() -> Result<Outcome, TransportError> {
         takes,
     );
 
-    serve(listener, address, Arc::new(recorder), Arc::new(recognition));
+    let runtime = Runtime {
+        recognition,
+        deliverer: Box::new(crate::delivery::HerdrDeliverer::new()),
+        delivery_settings: crate::delivery::Settings {
+            submit: loaded.config.delivery.submit,
+            toasts: loaded.config.ui.toasts,
+        },
+        journal: Box::new(StderrJournal),
+    };
+    serve(listener, address, Arc::new(recorder), Arc::new(runtime));
     Ok(Outcome::Served)
 }
 
@@ -191,7 +289,7 @@ fn serve(
     listener: transport::Listener,
     address: Address,
     recorder: Arc<Recorder>,
-    recognition: Arc<Recognition>,
+    runtime: Arc<Runtime>,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
     loop {
@@ -208,9 +306,9 @@ fn serve(
         let stop = Arc::clone(&stop);
         let address = address.clone();
         let recorder = Arc::clone(&recorder);
-        let recognition = Arc::clone(&recognition);
+        let runtime = Arc::clone(&runtime);
         thread::spawn(move || {
-            if let Err(e) = serve_one(connection, &stop, &address, &recorder, &recognition) {
+            if let Err(e) = serve_one(connection, &stop, &address, &recorder, &runtime) {
                 eprintln!("connection failed: {e}");
             }
         });
@@ -222,7 +320,7 @@ fn serve_one(
     stop: &AtomicBool,
     address: &Address,
     recorder: &Recorder,
-    recognition: &Recognition,
+    runtime: &Runtime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = BufReader::new(connection);
     let request = match Request::read_from(&mut reader) {
@@ -236,7 +334,7 @@ fn serve_one(
     if let Some(note) = context_note(&request) {
         eprintln!("{note}");
     }
-    let (reply, control) = answer(&request, recorder, recognition);
+    let (reply, control) = answer(&request, recorder, runtime);
     reply.write_to(reader.get_mut())?;
     if control == Control::Stop {
         stop.store(true, Ordering::SeqCst);
@@ -260,12 +358,21 @@ mod tests {
         )
     }
 
-    /// A recognition that always produces the same text, so a dispatch test is
-    /// about which branch runs rather than about speech.
-    fn fake_recognition(text: &str) -> Recognition {
-        Ok(Box::new(crate::stt::tests_support::Fake(Ok(
-            text.to_string()
-        ))))
+    /// A runtime that always produces the same transcript, delivers against a
+    /// fake that never fails, and never submits or toasts — so a dispatch
+    /// test is about which branch runs rather than about speech or delivery.
+    fn fake_runtime(text: &str) -> Runtime {
+        Runtime {
+            recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+                text.to_string()
+            )))),
+            deliverer: Box::new(crate::delivery::tests_support::FakeDeliverer::ok()),
+            delivery_settings: crate::delivery::Settings {
+                submit: false,
+                toasts: false,
+            },
+            journal: Box::new(StderrJournal),
+        }
     }
 
     fn request(command: &str, context: &[u8]) -> Request {
@@ -274,6 +381,390 @@ mod tests {
             entrypoint: Some(command.to_string()),
             context: context.to_vec(),
         }
+    }
+
+    /// A recorder that hears one loud moment and stops — clears the silence
+    /// floor, so a test can reach transcription and delivery.
+    fn tone_recorder(tag: &str) -> Recorder {
+        Recorder::spawn(
+            || Box::new(crate::capture::tests_support::ToneSource),
+            crate::config::Audio::default(),
+            std::env::temp_dir().join(format!("daemon-takes-{tag}-{}", std::process::id())),
+        )
+    }
+
+    fn dictate_request() -> Request {
+        request(
+            "dictate",
+            br#"{"focused_pane_id":"w1:p2","focused_pane_agent":"claude"}"#,
+        )
+    }
+
+    fn runtime_with(
+        deliverer: crate::delivery::tests_support::FakeDeliverer,
+        submit: bool,
+    ) -> Runtime {
+        Runtime {
+            recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+                "fix the worklog entry".to_string(),
+            )))),
+            deliverer: Box::new(deliverer),
+            delivery_settings: crate::delivery::Settings {
+                submit,
+                toasts: false,
+            },
+            journal: Box::new(StderrJournal),
+        }
+    }
+
+    #[test]
+    fn a_finished_take_reaches_delivery_and_the_reply_confirms_the_pane_not_the_text() {
+        let recorder = tone_recorder("delivered");
+        let runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        let (reply, _) = answer(&request, &recorder, &runtime);
+        match reply {
+            Reply::Ok(text) => {
+                assert!(text.contains("delivered to w1:p2"), "got {text:?}");
+                assert!(text.contains("dB"), "got {text:?}");
+                assert!(!text.contains("fix the worklog entry"), "got {text:?}");
+            }
+            other => panic!("expected a confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_off_inserts_and_never_submits() {
+        let recorder = tone_recorder("insert-only");
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let runtime = runtime_with(fake.clone(), false);
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        assert_eq!(
+            fake.calls(),
+            vec![crate::delivery::tests_support::Call::Insert(
+                "w1:p2".into(),
+                "fix the worklog entry".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn submit_on_with_an_agent_submits() {
+        let recorder = tone_recorder("submit");
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let runtime = runtime_with(fake.clone(), true); // dictate_request() names "claude"
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        assert_eq!(
+            fake.calls(),
+            vec![crate::delivery::tests_support::Call::Submit(
+                "w1:p2".into(),
+                "fix the worklog entry".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn submit_on_with_no_agent_falls_back_to_insert() {
+        let recorder = tone_recorder("fallback");
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let runtime = runtime_with(fake.clone(), true);
+        let request = request("dictate", br#"{"focused_pane_id":"w1:p2"}"#); // no agent
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        assert_eq!(
+            fake.calls(),
+            vec![crate::delivery::tests_support::Call::Insert(
+                "w1:p2".into(),
+                "fix the worklog entry".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_rejected_call_fails_the_delivery_keeps_the_audio_and_carries_the_text_and_the_reason() {
+        let recorder = tone_recorder("rejected");
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        );
+        let runtime = runtime_with(fake, false);
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        let (reply, _) = answer(&request, &recorder, &runtime);
+        let text = match reply {
+            Reply::Error(text) => text,
+            other => panic!("expected a failed delivery (Reply::Error), got {other:?}"),
+        };
+        assert!(
+            text.contains("could not deliver to w1:p2 (pane_not_found)"),
+            "got {text:?}"
+        );
+        assert!(text.contains("text: fix the worklog entry"), "got {text:?}");
+        let path = text
+            .split("kept at ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        assert!(std::path::Path::new(path).exists(), "AC-10: {path}");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_failure_reply_survives_one_read_line_when_the_transcript_and_the_reason_carry_newlines()
+    {
+        let recorder = tone_recorder("newlines");
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane\nnot\nfound".into()),
+        );
+        let runtime = Runtime {
+            recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+                "line one\nline two".to_string(),
+            )))),
+            deliverer: Box::new(fake),
+            delivery_settings: crate::delivery::Settings {
+                submit: false,
+                toasts: false,
+            },
+            journal: Box::new(StderrJournal),
+        };
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        let (reply, _) = answer(&request, &recorder, &runtime);
+
+        // No embedded newline may reach the wire: writeln! adds exactly one
+        // trailing '\n', and if either collapse were dropped, an embedded one
+        // would create a second line the protocol's single read_line can never
+        // see.
+        let mut buffer = Vec::new();
+        reply.write_to(&mut buffer).expect("write");
+        assert_eq!(
+            buffer.iter().filter(|&&b| b == b'\n').count(),
+            1,
+            "the frame must carry exactly one newline, got {:?}",
+            String::from_utf8_lossy(&buffer)
+        );
+
+        let mut reader = std::io::BufReader::new(&buffer[..]);
+        let round_tripped = Reply::read_from(&mut reader).expect("read");
+        let text = match round_tripped {
+            Reply::Error(text) => text,
+            other => panic!("expected Reply::Error, got {other:?}"),
+        };
+        assert!(text.contains("line one line two"), "got {text:?}");
+        assert!(text.contains("pane not found"), "got {text:?}");
+        let path = text
+            .split("kept at ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        assert!(std::path::Path::new(path).exists(), "AC-10: {path}");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_pane_and_the_path_are_collapsed_too_although_they_precede_the_transcript() {
+        // Whether herdr can hand back a pane id with a newline in it is not
+        // established either way; the cost of defending against it is nothing,
+        // so both it and the take's path (also ahead of the transcript) are
+        // collapsed the same way the reason and the transcript already are.
+        let take = crate::capture::Take {
+            path: std::path::PathBuf::from("/tmp/oddly\nnamed.wav"),
+            level_dbfs: -10.0,
+            target: "w1\n:p2".to_string(),
+            agent: None,
+        };
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        );
+        let runtime = runtime_with(fake, false);
+        let reply = transcribe(&runtime, &take);
+        let text = match reply {
+            Reply::Error(text) => text,
+            other => panic!("expected Reply::Error, got {other:?}"),
+        };
+        assert!(!text.contains('\n'), "got {text:?}");
+        assert!(text.contains("w1 :p2"), "got {text:?}");
+        assert!(text.contains("/tmp/oddly named.wav"), "got {text:?}");
+    }
+
+    /// Records every line written, in order.
+    #[derive(Default)]
+    struct RecordingJournal(std::sync::Mutex<Vec<String>>);
+    impl Journal for RecordingJournal {
+        fn write(&self, line: &str) {
+            self.0.lock().unwrap().push(line.to_string());
+        }
+    }
+    /// Lets a Runtime own a Journal while the test keeps its own handle to read
+    /// what was written — the same shape FakeDeliverer::clone() gives above.
+    struct TestJournal(std::sync::Arc<RecordingJournal>);
+    impl Journal for TestJournal {
+        fn write(&self, line: &str) {
+            self.0.write(line);
+        }
+    }
+
+    #[test]
+    fn the_delivering_line_precedes_the_failure_line_and_names_the_reason() {
+        let recorder = tone_recorder("journal-order");
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        );
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = runtime_with(fake, false);
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        let lines = journal.0.lock().unwrap();
+        assert_eq!(lines.len(), 2, "got {lines:?}");
+        assert!(lines[0].contains("fix the worklog entry"), "got {lines:?}");
+        assert!(
+            lines[1].contains("w1:p2") && lines[1].contains("pane_not_found"),
+            "got {lines:?}"
+        );
+    }
+
+    /// A journal that pushes into a trace shared with a deliverer, so a test
+    /// can see the two interleaved rather than only each one's own order.
+    struct TracingJournal(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+    impl Journal for TracingJournal {
+        fn write(&self, line: &str) {
+            self.0.lock().unwrap().push(format!("journal:{line}"));
+        }
+    }
+
+    /// Wraps a `FakeDeliverer`, recording each call into the same trace a
+    /// `TracingJournal` writes to, before delegating to the fake's own
+    /// behavior (result and call log). This is what lets a test tell "the
+    /// journal line was written" apart from "the journal line was written
+    /// before delivery was attempted" — asserting only the two journal lines'
+    /// order relative to each other proves neither, since both are written
+    /// only after `deliver` returns.
+    struct TracingDeliverer {
+        trace: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        inner: crate::delivery::tests_support::FakeDeliverer,
+    }
+    impl crate::delivery::Deliverer for TracingDeliverer {
+        fn insert(&self, pane: &str, text: &str) -> Result<(), crate::delivery::DeliveryError> {
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("deliver:insert:{pane}"));
+            self.inner.insert(pane, text)
+        }
+        fn submit(&self, pane: &str, text: &str) -> Result<(), crate::delivery::DeliveryError> {
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("deliver:submit:{pane}"));
+            self.inner.submit(pane, text)
+        }
+        fn notify(&self, title: &str, body: &str) -> Result<(), crate::delivery::DeliveryError> {
+            self.trace
+                .lock()
+                .unwrap()
+                .push("deliver:notify".to_string());
+            self.inner.notify(title, body)
+        }
+    }
+
+    #[test]
+    fn the_delivering_line_is_written_before_delivery_is_attempted_not_merely_before_the_failure_line(
+    ) {
+        let recorder = tone_recorder("journal-pinned");
+        let trace = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let deliverer = TracingDeliverer {
+            trace: std::sync::Arc::clone(&trace),
+            inner: crate::delivery::tests_support::FakeDeliverer::failing(
+                crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+            ),
+        };
+        let mut runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.deliverer = Box::new(deliverer);
+        runtime.journal = Box::new(TracingJournal(std::sync::Arc::clone(&trace)));
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        let trace = trace.lock().unwrap();
+        assert_eq!(
+            *trace,
+            vec![
+                "journal:delivering: fix the worklog entry".to_string(),
+                "deliver:insert:w1:p2".to_string(),
+                "journal:delivery failed: pane=w1:p2 reason=pane_not_found".to_string(),
+            ],
+            "the delivering line must precede the delivery attempt itself, not just the failure line"
+        );
+    }
+
+    #[test]
+    fn a_toast_is_raised_on_a_failed_delivery_only_when_ui_toasts_is_on() {
+        for (toasts, expect_notify) in [(true, true), (false, false)] {
+            let recorder = tone_recorder(&format!("toast-{toasts}"));
+            let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+                crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+            );
+            let mut runtime = runtime_with(fake.clone(), false);
+            runtime.delivery_settings.toasts = toasts;
+            let request = dictate_request();
+            answer(&request, &recorder, &runtime);
+            answer(&request, &recorder, &runtime);
+            let notified = fake
+                .calls()
+                .iter()
+                .any(|c| matches!(c, crate::delivery::tests_support::Call::Notify(..)));
+            assert_eq!(notified, expect_notify, "toasts = {toasts}");
+            if notified {
+                assert!(matches!(
+                    fake.calls().last(),
+                    Some(crate::delivery::tests_support::Call::Notify(title, body))
+                        if title == "Delivery failed" && body == "w1:p2: the text is in the plugin log"
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn a_toast_that_cannot_be_raised_is_still_recorded_in_the_journal() {
+        let recorder = tone_recorder("toast-fails");
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        )
+        .and_notify_fails(crate::delivery::DeliveryError::NotFound {
+            binary: "herdr".into(),
+            path: "/usr/bin".into(),
+        });
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = runtime_with(fake, false);
+        runtime.delivery_settings.toasts = true;
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        let lines = journal.0.lock().unwrap();
+        assert_eq!(
+            lines.len(),
+            3,
+            "the toast's own failure must be journaled too, got {lines:?}"
+        );
+        assert!(lines[0].contains("fix the worklog entry"), "got {lines:?}");
+        assert!(
+            lines[1].contains("w1:p2") && lines[1].contains("pane_not_found"),
+            "got {lines:?}"
+        );
+        assert!(lines[2].contains("toast"), "got {lines:?}");
     }
 
     #[test]
@@ -288,7 +779,7 @@ mod tests {
         let (reply, control) = answer(
             &request("cancel", b""),
             &silent_recorder(),
-            &fake_recognition("x"),
+            &fake_runtime("x"),
         );
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
         assert!(matches!(control, Control::Continue));
@@ -299,7 +790,7 @@ mod tests {
         let (reply, _) = answer(
             &request("cancel", b"{not json"),
             &silent_recorder(),
-            &fake_recognition("x"),
+            &fake_runtime("x"),
         );
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
     }
@@ -309,7 +800,7 @@ mod tests {
         let (reply, _) = answer(
             &request("dictate", b""),
             &silent_recorder(),
-            &fake_recognition("x"),
+            &fake_runtime("x"),
         );
         match reply {
             Reply::Error(text) => assert!(
@@ -326,7 +817,7 @@ mod tests {
         let (reply, _) = answer(
             &request("dictate", br#"{"focused_pane_id":"w1:p2"}"#),
             &recorder,
-            &fake_recognition("hello"),
+            &fake_runtime("hello"),
         );
         match reply {
             Reply::Ok(text) => assert!(text.contains("w1:p2"), "got {text:?}"),
@@ -338,8 +829,8 @@ mod tests {
     fn the_second_dictate_finishes_the_take_rather_than_starting_another() {
         let recorder = silent_recorder();
         let request = request("dictate", br#"{"focused_pane_id":"w1:p2"}"#);
-        answer(&request, &recorder, &fake_recognition("hello"));
-        let (reply, _) = answer(&request, &recorder, &fake_recognition("hello"));
+        answer(&request, &recorder, &fake_runtime("hello"));
+        let (reply, _) = answer(&request, &recorder, &fake_runtime("hello"));
         // The take is silence, so it is refused — which is itself proof that the
         // second keypress finished it instead of starting a second one.
         match reply {
@@ -356,7 +847,7 @@ mod tests {
         let (reply, _) = answer(
             &request("transcribe", b""),
             &silent_recorder(),
-            &fake_recognition("x"),
+            &fake_runtime("x"),
         );
         match reply {
             Reply::Error(text) => assert!(text.contains("transcribe"), "got {text:?}"),
@@ -369,7 +860,7 @@ mod tests {
         let (reply, control) = answer(
             &request("stop", b""),
             &silent_recorder(),
-            &fake_recognition("x"),
+            &fake_runtime("x"),
         );
         assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
         assert!(matches!(control, Control::Stop));
@@ -407,6 +898,24 @@ mod tests {
     }
 
     #[test]
+    fn the_delivering_line_carries_the_text() {
+        assert!(delivering_line("fix the worklog entry").contains("fix the worklog entry"));
+    }
+
+    #[test]
+    fn the_delivery_failed_line_names_the_pane_and_the_reason() {
+        let line = delivery_failed_line("w99:p99", "pane_not_found");
+        assert!(line.contains("w99:p99"));
+        assert!(line.contains("pane_not_found"));
+    }
+
+    #[test]
+    fn the_toast_failed_line_names_the_reason() {
+        let line = toast_failed_line("herdr not found");
+        assert!(line.contains("herdr not found"), "got {line:?}");
+    }
+
+    #[test]
     fn a_liveness_probe_is_not_reported_as_a_failure() {
         // Connect, close, and let the daemon handle it. The assertion is that
         // serve_one treats it as nothing to do rather than as a broken peer.
@@ -425,7 +934,7 @@ mod tests {
                     &stop,
                     &address,
                     &silent_recorder(),
-                    &fake_recognition("x"),
+                    &fake_runtime("x"),
                 )
                 .map_err(|e| e.to_string())
             })
@@ -459,7 +968,7 @@ mod tests {
                     listener,
                     address,
                     Arc::new(silent_recorder()),
-                    Arc::new(fake_recognition("x")),
+                    Arc::new(fake_runtime("x")),
                 );
                 let _ = ended.send(());
             })

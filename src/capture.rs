@@ -98,6 +98,10 @@ pub struct Take {
     /// The pane this take was started for. Pinned when it began, so that switching
     /// focus while speaking cannot change where the text lands.
     pub target: String,
+    /// The agent running in that pane, if any, pinned at the same moment as
+    /// `target`. `None` means the pane had no agent — delivery falls back to
+    /// inserting rather than submitting.
+    pub agent: Option<String>,
 }
 
 #[derive(Debug)]
@@ -149,6 +153,7 @@ impl std::error::Error for CaptureError {}
 enum Command {
     Start {
         target: String,
+        agent: Option<String>,
         reply: mpsc::Sender<Started>,
     },
     Stop {
@@ -165,6 +170,7 @@ pub struct Recorder {
 
 struct Running {
     target: String,
+    agent: Option<String>,
     device: String,
     format: Format,
     sink: Sink,
@@ -187,7 +193,11 @@ impl Recorder {
 
             while let Ok(order) = orders.recv() {
                 match order {
-                    Command::Start { target, reply } => {
+                    Command::Start {
+                        target,
+                        agent,
+                        reply,
+                    } => {
                         let answer = start_one(
                             source.as_mut(),
                             &audio,
@@ -196,6 +206,7 @@ impl Recorder {
                             &mut remembered,
                             &mut counter,
                             target,
+                            agent,
                         );
                         let _ = reply.send(answer);
                     }
@@ -212,11 +223,12 @@ impl Recorder {
         }
     }
 
-    pub fn start(&self, target: &str) -> Started {
+    pub fn start(&self, target: &str, agent: Option<&str>) -> Started {
         let (reply, answer) = mpsc::channel();
         let sent = self.commands.lock().map(|commands| {
             commands.send(Command::Start {
                 target: target.to_string(),
+                agent: agent.map(|a| a.to_string()),
                 reply,
             })
         });
@@ -254,6 +266,7 @@ fn start_one(
     remembered: &mut Option<String>,
     counter: &mut u64,
     target: String,
+    agent: Option<String>,
 ) -> Started {
     // The device comes from the configuration the recorder was given, not from the
     // caller. An earlier version took it per call and the daemon passed nothing, so
@@ -294,6 +307,7 @@ fn start_one(
     let path = take_path(takes, *counter);
     *running = Some(Running {
         target,
+        agent,
         device: device.unwrap_or_else(|| "the default input".to_string()),
         format,
         sink,
@@ -344,6 +358,7 @@ fn stop_one(
         path: take.path,
         level_dbfs,
         target: take.target,
+        agent: take.agent,
     })
 }
 
@@ -379,6 +394,24 @@ pub mod tests_support {
             })
         }
 
+        fn stop(&mut self) {}
+    }
+
+    /// Hears one loud moment and stops — a take that clears the silence floor, so a
+    /// test past capture can reach recognition and delivery without a microphone.
+    pub struct ToneSource;
+
+    impl Source for ToneSource {
+        fn start(&mut self, _device: Option<&str>, sink: Sink) -> Result<Format, String> {
+            let samples: Vec<f32> = (0..4_800)
+                .map(|i| 0.3 * (i as f32 * std::f32::consts::TAU * 440.0 / 48_000.0).sin())
+                .collect();
+            sink.push(Event::Samples(samples));
+            Ok(Format {
+                rate: 48_000,
+                channels: 1,
+            })
+        }
         fn stop(&mut self) {}
     }
 }
@@ -457,7 +490,7 @@ mod tests {
     #[test]
     fn a_take_starts_stops_and_lands_on_disk() {
         let (recorder, _) = recorder_with("ok", vec![Event::Samples(tone(0.3, 1.0))]);
-        assert_eq!(recorder.start("w1:p2"), Started::Began);
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
         let take = recorder.stop().expect("a take");
         assert!(take.path.exists(), "the file must be where the take says");
         assert_eq!(take.target, "w1:p2", "the pane is pinned to the take");
@@ -477,10 +510,28 @@ mod tests {
     }
 
     #[test]
+    fn a_take_started_with_an_agent_reports_it() {
+        let (recorder, _) = recorder_with("agent-yes", vec![Event::Samples(tone(0.3, 0.1))]);
+        assert_eq!(recorder.start("w1:p2", Some("claude")), Started::Began);
+        let take = recorder.stop().expect("a take");
+        assert_eq!(take.agent.as_deref(), Some("claude"));
+        std::fs::remove_file(&take.path).ok();
+    }
+
+    #[test]
+    fn a_take_started_with_no_agent_reports_none() {
+        let (recorder, _) = recorder_with("agent-no", vec![Event::Samples(tone(0.3, 0.1))]);
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
+        let take = recorder.stop().expect("a take");
+        assert_eq!(take.agent, None);
+        std::fs::remove_file(&take.path).ok();
+    }
+
+    #[test]
     fn starting_twice_is_the_toggles_second_half() {
         let (recorder, _) = recorder_with("twice", vec![Event::Samples(tone(0.3, 0.1))]);
-        assert_eq!(recorder.start("w1:p2"), Started::Began);
-        assert_eq!(recorder.start("w1:p2"), Started::AlreadyRunning);
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
+        assert_eq!(recorder.start("w1:p2", None), Started::AlreadyRunning);
         let take = recorder.stop().expect("a take");
         std::fs::remove_file(&take.path).ok();
     }
@@ -503,7 +554,7 @@ mod tests {
                 Event::Failed("the device was unplugged".to_string()),
             ],
         );
-        assert_eq!(recorder.start("w1:p2"), Started::Began);
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
 
         let error = recorder.stop().expect_err("the take is gone");
         let message = error.to_string();
@@ -511,7 +562,7 @@ mod tests {
         assert!(message.contains("discarded"), "got {message}");
 
         // And the next start is a fresh one: the failure was reported at the stop.
-        assert_eq!(recorder.start("w1:p2"), Started::Began);
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
     }
 
     #[test]
@@ -524,7 +575,7 @@ mod tests {
                 ..Audio::default()
             },
         );
-        assert_eq!(recorder.start("w1:p2"), Started::Began);
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
         let error = recorder.stop().expect_err("too quiet");
         let message = error.to_string();
         assert!(
@@ -544,7 +595,7 @@ mod tests {
     #[test]
     fn a_refused_take_leaves_no_file_behind() {
         let (recorder, takes) = recorder_with("cleanup", vec![Event::Samples(tone(0.00002, 0.5))]);
-        assert_eq!(recorder.start("w1:p2"), Started::Began);
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
         recorder.stop().expect_err("too quiet");
         let left = std::fs::read_dir(&takes)
             .map(|entries| entries.count())
@@ -571,7 +622,7 @@ mod tests {
             },
             takes_dir("named"),
         );
-        assert_eq!(recorder.start("w1:p2"), Started::Began);
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
         assert_eq!(
             asked_for.lock().unwrap().as_deref(),
             Some("Headset"),
@@ -592,16 +643,16 @@ mod tests {
             Audio::default(),
             takes_dir("default-name"),
         );
-        assert_eq!(recorder.start("w1:p2"), Started::Began);
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
         assert_eq!(asked_for.lock().unwrap().as_deref(), None);
     }
 
     #[test]
     fn two_takes_never_share_a_path() {
         let (recorder, _) = recorder_with("unique", vec![Event::Samples(tone(0.3, 0.1))]);
-        recorder.start("w1:p2");
+        recorder.start("w1:p2", None);
         let first = recorder.stop().expect("first");
-        recorder.start("w1:p2");
+        recorder.start("w1:p2", None);
         let second = recorder.stop().expect("second");
         assert_ne!(first.path, second.path);
         std::fs::remove_file(&first.path).ok();
@@ -623,9 +674,26 @@ mod tests {
             },
             takes,
         );
-        match recorder.start("w1:p2") {
+        match recorder.start("w1:p2", None) {
             Started::CouldNotStart(why) => assert!(why.contains("no such device"), "got {why}"),
             other => panic!("expected CouldNotStart, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tone_source_clears_the_silence_floor() {
+        let recorder = Recorder::spawn(
+            || Box::new(tests_support::ToneSource),
+            Audio::default(),
+            takes_dir("tone-source"),
+        );
+        assert_eq!(recorder.start("w1:p2", None), Started::Began);
+        let take = recorder.stop().expect("a take that clears the floor");
+        assert!(
+            take.level_dbfs > Audio::default().silence_db,
+            "got {}",
+            take.level_dbfs
+        );
+        std::fs::remove_file(&take.path).ok();
     }
 }

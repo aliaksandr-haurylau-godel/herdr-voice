@@ -22,6 +22,8 @@ pub struct Config {
     pub audio: Audio,
     pub stt: Stt,
     pub rewrite: Rewrite,
+    pub ui: Ui,
+    pub delivery: Delivery,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -84,6 +86,23 @@ impl Default for Rewrite {
             agent: "auto".to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Ui {
+    pub toasts: bool,
+}
+impl Default for Ui {
+    fn default() -> Self {
+        Ui { toasts: true }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Delivery {
+    pub submit: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -185,6 +204,35 @@ mod tests {
         assert!(defaults.stt.command.is_empty());
         assert_eq!(defaults.rewrite.engine, "agent");
         assert_eq!(defaults.rewrite.agent, "auto");
+    }
+
+    #[test]
+    fn the_ui_and_delivery_defaults_are_set() {
+        let defaults = Config::default();
+        assert!(defaults.ui.toasts);
+        assert!(!defaults.delivery.submit);
+    }
+
+    #[test]
+    fn a_file_that_sets_neither_table_keeps_both_defaults() {
+        let directory = scratch("ui-delivery-absent");
+        std::fs::write(directory.join("config.toml"), "[stt]\nmodel = \"small\"\n").unwrap();
+        let loaded = load(Some(&directory));
+        assert!(loaded.config.ui.toasts);
+        assert!(!loaded.config.delivery.submit);
+    }
+
+    #[test]
+    fn the_ui_and_delivery_tables_are_read_when_present() {
+        let directory = scratch("ui-delivery-set");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[ui]\ntoasts = false\n\n[delivery]\nsubmit = true\n",
+        )
+        .unwrap();
+        let loaded = load(Some(&directory));
+        assert!(!loaded.config.ui.toasts);
+        assert!(loaded.config.delivery.submit);
     }
 
     #[test]
