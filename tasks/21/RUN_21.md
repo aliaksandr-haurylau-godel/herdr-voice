@@ -267,3 +267,121 @@ a guess at its shape.
 
 Holding tasks 1 to 7 idle until the blocker clears would buy nothing. The verdict
 stands as BLOCKED for the run as a whole, and the part that can move, moves.
+
+## Gate S4
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff on feat/21-context since d4a2d1b
+  reviewer: two independent reviews, one hunting defects by mutation, one
+    checking conformance and real behaviour
+  verdict: QUESTIONS
+  date: 2026-08-26
+  blocker: null
+```
+
+Two reviews ran against `651d071`. All four gates were green on that commit —
+194 tests, clippy, format, manifest — and the reviews found thirteen things
+anyway, nine of them reproduced on a scratch copy of the tree. The technique
+that produced most of them is the one this run keeps: delete or invert the
+behaviour a test claims to prove, then run that test.
+
+### Sent back for fixing, in this issue
+
+1. **The bias string is built for the pane focused when the take stops, not the
+   pane the take was pinned to.** `src/daemon.rs:159` passes `dictate`'s
+   current `pane`, `cwd` and `agent` to `take_bias`, while `transcribe` and
+   delivery use `take.target` and `take.agent`, pinned when recording began
+   (`src/capture.rs:98`). `cwd` is pinned nowhere. Reproduced by driving
+   `answer` twice with two different panes: the text goes to the first, the
+   bias comes from the second. This is the exact failure the comment at
+   `src/daemon.rs:131` says the pinning exists to prevent.
+
+2. **The whole `pane` source is untested.** Replacing `pane::read` with a hard
+   error — the pane never read under any `[context] source` — leaves all 194
+   tests passing. Every `collect` and daemon test points `herdr_binary` at a
+   path that cannot exist, so no test ever has a pane read succeed and reach
+   `Collected.bias`. AC-3's `pane` value and `auto`'s fallback-hit branch have
+   no coverage. Counting an empty pane read as a hit also passes.
+
+3. **AC-5's cap is proved by no test.** Replacing the truncation at
+   `src/bias.rs:130` with the uncapped string leaves all 194 tests passing.
+   The existing test asserts the `truncated` flag and the character count,
+   never that the finished string is at most `prompt_chars` long. The
+   files-only path at `src/daemon.rs:226` has the same gap.
+
+4. **AC-9 has a second log path and it is unguarded.** `bias_refused_line`
+   (`src/daemon.rs:279`) carries a `Collected` whose `bias` holds the
+   file-name string; appending the string to that line leaves every test
+   passing. The guarded path, `bias_line`, is real — the same mutation there
+   turns its test red.
+
+5. **`transcript::find` has the empty-and-relative working directory hole that
+   `files::toplevel` guards.** `src/bias/transcript.rs:31` joins the slug
+   before testing for an empty directory, so an absent `focused_pane_cwd`
+   returns any `.jsonl` sitting directly in the transcript root. `"."` is
+   unguarded in both modules, and there `git -C .` resolves against the
+   daemon's own working directory.
+
+6. **Discovery walks up until some ancestor's slug directory exists, and the
+   home directory's usually does.** A pane in a repository with no session of
+   its own is handed an unrelated conversation and reports `transcript:hit`,
+   so under `auto` the pane is never consulted. Every git worktree is that
+   case, and this project runs one worktree per line of work. Bound the walk
+   at the repository root.
+
+7. **The prototype's per-turn cut was dropped in the port.**
+   `spike/context.sh:107` truncates each turn to 300 characters and collapses
+   newlines; `src/bias/transcript.rs:106` does neither. Measured on a real
+   transcript, one kept turn ran to 7000 characters — more than the whole
+   600-character budget on its own.
+
+8. **`pane::read` ignores its `lines` argument**, capping on the constant
+   instead (`src/bias/pane.rs:82`). The parameter is a lie, and the test named
+   for the cap proves only the filtering.
+
+9. **`files::collect(cwd, 0)` returns one name**: the bound is checked after
+   the push (`src/bias/files.rs:32`). `file_names = 0` is a valid configured
+   state.
+
+10. **A failed pane read drops the reason.** `src/bias.rs:79` matches `_ =>`
+    and discards `PaneError`, whose text is the only thing that would say what
+    to fix. Every other outward herdr call in the tree names `HERDR_BIN_PATH`
+    in its failure.
+
+11. **Stale suppression and stale comment.** `src/bias/source.rs:12` still says
+    the function is not called from `main` yet and carries
+    `#[allow(dead_code)]`; this same diff wires it in.
+
+12. **`docs/design.md:129` still lists branch, pane title and agent kind as
+    context components.** No code collects any of them. By this repository's
+    own standard a documented claim the code does not meet is a defect; the
+    document is what changes, since the three are out of this issue's scope.
+
+### Deferred, with the reason
+
+- **No time limit on the pane read.** `src/bias.rs:80` spawns herdr with no
+  deadline, on the take path, before recognition. A herdr that accepts and
+  does not answer blocks the daemon — `cancel` included — until the client's
+  120 second timeout. Not reproduced. This belongs to issue #28, which exists
+  for time limits, rather than growing this diff a timeout mechanism of its
+  own.
+- **The order of assembly inside the cap.** File names come first and the cut
+  falls at the tail, so the conversation is what is lost, and among the turns
+  the newest goes first. Reproduced: a repository of forty long directory
+  names produces 1529 characters of file names, and the conversation
+  contributes nothing while the log still reads `transcript:hit`. Whether the
+  conversation should be cut instead, or the newest turn kept, is a design
+  question and not a defect in the port.
+
+### Not defects
+
+The three modified journal tests all still prove what they proved: moving the
+delivering line after the delivery call turns its test red, so filtering the
+bias line out does not mask a reordering. The four new `Runtime` fields are
+resolved once at start and no path through them can panic or abort the daemon.
+`delivery::herdr_binary` being public adds no third read of `HERDR_BIN_PATH`
+and changes no delivery behaviour. The character cap is genuinely
+character-based: Russian text truncated mid-string does not panic. No absolute
+path, home directory or private name appears anywhere in the diff.
