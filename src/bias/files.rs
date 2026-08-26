@@ -39,6 +39,12 @@ pub fn collect(cwd: &str, max: usize) -> Vec<String> {
 }
 
 fn toplevel(cwd: &str) -> Option<String> {
+    // `git -C ""` is documented as a no-op, which would silently look at the
+    // daemon's own working directory instead of the agent's — file names from
+    // the wrong repository. No directory means no file names.
+    if cwd.is_empty() {
+        return None;
+    }
     let output = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -143,6 +149,14 @@ mod tests {
         let dir = scratch("outside");
         let names = collect(dir.to_str().unwrap(), 40);
         assert!(names.is_empty(), "got {names:?}");
+    }
+
+    #[test]
+    fn an_empty_working_directory_yields_no_names() {
+        // `git -C ""` leaves the working directory unchanged, so without this
+        // guard an absent `focused_pane_cwd` would collect the daemon's own
+        // repository instead of the agent's.
+        assert!(collect("", 40).is_empty());
     }
 
     #[test]

@@ -90,11 +90,8 @@ fn read_pane(input: &CollectInput) -> Conversation {
 /// as `tasks/21/DESIGN_21.md` section 2 states. Never fails: a miss on every
 /// source still yields a files-only bias (design section 8).
 ///
-/// Not called from `main` yet — Task 10 wires it into `dictate` once #22
-/// merges (`tasks/21/PLAN_21.md`). CI runs clippy with `-D warnings`, so an
-/// unreached `pub` item in a binary crate must be allowed explicitly rather
-/// than left to warn.
-#[allow(dead_code)]
+/// Called from exactly one place: `daemon::take_bias`, when a take has just
+/// finished (design section 9, "what #21 itself does").
 pub fn collect(input: CollectInput) -> Collected {
     let file_names = files::collect(input.cwd, input.file_names);
     let file_count = file_names.len();
