@@ -34,13 +34,24 @@ const SERVICE_MARKERS: &[&str] = &[
 /// known one — no directory is derived, no search runs — or when no
 /// directory under `root` is found by walking up from `cwd`.
 ///
-/// The walk stops at the repository root: above it, the first directory that
-/// happens to exist under `root` belongs to somebody else's session.
-pub fn find(cwd: &str, agent: Option<&str>, root: &Path) -> Option<PathBuf> {
+/// When `repository_root` names the repository `cwd` belongs to, the walk stops
+/// there: above it, the first directory that happens to exist under `root`
+/// belongs to somebody else's session. Outside a repository there is no such
+/// ceiling and the walk climbs as far as `/`, which is the recorded decision
+/// (`docs/decisions.md`). The root is a parameter rather than something this
+/// function asks `git` for, because the caller has already asked.
+pub fn find(
+    cwd: &str,
+    agent: Option<&str>,
+    root: &Path,
+    repository_root: Option<&str>,
+) -> Option<PathBuf> {
     if agent != Some(KNOWN_TRANSCRIPT_AGENT) {
         return None;
     }
-    let ceiling = repository_ceiling(cwd);
+    // Resolved through symbolic links so that it can be compared with a
+    // directory the walk is holding.
+    let ceiling = repository_root.and_then(|root| std::fs::canonicalize(root).ok());
     let mut dir = cwd.to_string();
     loop {
         // A working directory that names no directory of its own slugifies to
@@ -66,13 +77,6 @@ pub fn find(cwd: &str, agent: Option<&str>, root: &Path) -> Option<PathBuf> {
             _ => return None,
         }
     }
-}
-
-/// The repository root the walk may not climb above, resolved through symbolic
-/// links so that it can be compared with a directory the walk is holding.
-fn repository_ceiling(cwd: &str) -> Option<PathBuf> {
-    let root = crate::bias::files::toplevel(cwd)?;
-    std::fs::canonicalize(root).ok()
 }
 
 /// Whether the walk has reached that ceiling. A directory that cannot be
@@ -202,7 +206,7 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         let fixture = write_jsonl(&project, "session.jsonl", FIXTURE_TURNS);
 
-        let found = find("/work/example/project", Some("claude"), &root);
+        let found = find("/work/example/project", Some("claude"), &root, None);
         assert_eq!(found, Some(fixture));
     }
 
@@ -213,14 +217,20 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         write_jsonl(&project, "session.jsonl", FIXTURE_TURNS);
 
-        assert_eq!(find("/work/example/project", Some("codex"), &root), None);
-        assert_eq!(find("/work/example/project", None, &root), None);
+        assert_eq!(
+            find("/work/example/project", Some("codex"), &root, None),
+            None
+        );
+        assert_eq!(find("/work/example/project", None, &root, None), None);
     }
 
     #[test]
     fn no_project_directory_under_root_finds_nothing() {
         let root = scratch("no-project");
-        assert_eq!(find("/work/example/project", Some("claude"), &root), None);
+        assert_eq!(
+            find("/work/example/project", Some("claude"), &root, None),
+            None
+        );
     }
 
     #[test]
@@ -232,7 +242,12 @@ mod tests {
 
         // Only the parent directory exists under root — the pane's cwd is a
         // subdirectory of the project, and discovery must walk up to find it.
-        let found = find("/work/example/project/sub/deeper", Some("claude"), &root);
+        let found = find(
+            "/work/example/project/sub/deeper",
+            Some("claude"),
+            &root,
+            None,
+        );
         assert_eq!(found, Some(fixture));
     }
 
@@ -243,8 +258,8 @@ mod tests {
         // relative working directory would otherwise slugify straight onto.
         write_jsonl(&root, "session.jsonl", FIXTURE_TURNS);
 
-        assert_eq!(find("", Some("claude"), &root), None);
-        assert_eq!(find(".", Some("claude"), &root), None);
+        assert_eq!(find("", Some("claude"), &root, None), None);
+        assert_eq!(find(".", Some("claude"), &root, None), None);
     }
 
     #[test]
@@ -278,7 +293,15 @@ mod tests {
         std::fs::create_dir_all(&elsewhere).unwrap();
         write_jsonl(&elsewhere, "session.jsonl", FIXTURE_TURNS);
 
-        assert_eq!(find(&inner.to_string_lossy(), Some("claude"), &root), None);
+        assert_eq!(
+            find(
+                &inner.to_string_lossy(),
+                Some("claude"),
+                &root,
+                Some(&repo.to_string_lossy())
+            ),
+            None
+        );
     }
 
     #[test]

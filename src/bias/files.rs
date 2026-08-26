@@ -15,10 +15,16 @@ pub fn collect(cwd: &str, max: usize) -> Vec<String> {
     let Some(root) = toplevel(cwd) else {
         return Vec::new();
     };
+    collect_in(&root, max)
+}
 
+/// The same, for a caller that has already asked for the repository root and
+/// would otherwise run `git rev-parse` a second time with the same argument —
+/// on the take path, before recognition.
+pub fn collect_in(root: &str, max: usize) -> Vec<String> {
     let mut paths = Vec::new();
-    paths.extend(status_paths(&root));
-    paths.extend(log_paths(&root));
+    paths.extend(status_paths(root));
+    paths.extend(log_paths(root));
 
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();

@@ -73,10 +73,15 @@ struct Conversation {
     why: Option<String>,
 }
 
-fn read_transcript(input: &CollectInput) -> Conversation {
-    let turns = transcript::find(input.cwd, input.agent, input.transcript_root)
-        .map(|path| transcript::read_turns(&path, input.conversation_turns))
-        .unwrap_or_default();
+fn read_transcript(input: &CollectInput, repository_root: Option<&str>) -> Conversation {
+    let turns = transcript::find(
+        input.cwd,
+        input.agent,
+        input.transcript_root,
+        repository_root,
+    )
+    .map(|path| transcript::read_turns(&path, input.conversation_turns))
+    .unwrap_or_default();
     Conversation {
         found: !turns.is_empty(),
         text: turns.join("\n"),
@@ -114,7 +119,14 @@ fn read_pane(input: &CollectInput) -> Conversation {
 /// Called from exactly one place: `daemon::take_bias`, when a take has just
 /// finished (design section 9, "what #21 itself does").
 pub fn collect(input: CollectInput) -> Collected {
-    let file_names = files::collect(input.cwd, input.file_names);
+    // Asked for once and used twice: it bounds the transcript walk as well as
+    // naming the repository the file names come from, and each `git` call here
+    // runs on the take path, before recognition.
+    let repository_root = files::toplevel(input.cwd);
+    let file_names = match &repository_root {
+        Some(root) => files::collect_in(root, input.file_names),
+        None => Vec::new(),
+    };
     let file_count = file_names.len();
     let file_line = file_names.join(" ");
     let file_chars = file_line.chars().count();
@@ -122,7 +134,7 @@ pub fn collect(input: CollectInput) -> Collected {
     let mut attempted = Vec::new();
     let conversation = match input.source {
         Source::Transcript => {
-            let result = read_transcript(&input);
+            let result = read_transcript(&input, repository_root.as_deref());
             attempted.push((Source::Transcript, result.found));
             result
         }
@@ -132,7 +144,7 @@ pub fn collect(input: CollectInput) -> Collected {
             result
         }
         Source::Auto => {
-            let transcript_result = read_transcript(&input);
+            let transcript_result = read_transcript(&input, repository_root.as_deref());
             attempted.push((Source::Transcript, transcript_result.found));
             if transcript_result.found {
                 transcript_result
