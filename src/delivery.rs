@@ -348,10 +348,9 @@ mod tests {
     /// each, to a file next to it — so a test can pin the whole chain: the
     /// trait method, the argument builder it calls, and the process
     /// construction that runs it, without mutating HERDR_BIN_PATH under a
-    /// suite that runs in parallel. Unix has no PATHEXT-style lookup and
-    /// needs the executable bit; Windows runs a `.cmd` directly through
-    /// CreateProcess without needing cmd.exe named explicitly, the same way
-    /// a shebang is honored on Unix without naming the interpreter.
+    /// suite that runs in parallel. Unix needs the executable bit; Windows
+    /// needs a `.cmd` (see the comment on its `recorder()` below for what
+    /// actually makes that runnable).
     struct Recorder {
         dir: std::path::PathBuf,
         script: std::path::PathBuf,
@@ -368,59 +367,85 @@ mod tests {
         }
     }
 
-    fn scratch_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-voice-delivery-recorder-{tag}-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        dir
+    impl Recorder {
+        /// Creates the scratch directory and hands ownership of it to the
+        /// `Recorder` returned, in the same step — nothing fallible runs in
+        /// between. An earlier version created the directory in one
+        /// function and built the owning `Recorder` only after the script
+        /// was written and (on Unix) made executable; a panic in either of
+        /// those — a full or read-only temp directory, say — left the
+        /// directory on disk with no live `Drop` to remove it. Building
+        /// only the paths here, and leaving `script`'s content and mode to
+        /// the platform-specific `recorder()` below, keeps this
+        /// constructor itself free of anything that can fail after the
+        /// directory already exists.
+        fn new(tag: &str, script_name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "herdr-voice-delivery-recorder-{tag}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            let script = dir.join(script_name);
+            let out = dir.join("record.out");
+            Recorder { dir, script, out }
+        }
     }
 
     #[cfg(unix)]
     fn recorder(tag: &str) -> Recorder {
-        let dir = scratch_dir(tag);
-        let script = dir.join("record.sh");
-        let out = dir.join("record.out");
+        let recorder = Recorder::new(tag, "record.sh");
         std::fs::write(
-            &script,
-            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {out:?}\n"),
+            &recorder.script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\n", recorder.out),
         )
         .expect("write recorder script");
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+        let mut perms = std::fs::metadata(&recorder.script)
+            .expect("stat")
+            .permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).expect("chmod");
-        Recorder { dir, script, out }
+        std::fs::set_permissions(&recorder.script, perms).expect("chmod");
+        recorder
     }
 
     // Not run on this machine — verified by reasoning about cmd.exe's
     // argument handling, not by executing it: `for %%A in (%*) do echo
     // %%~A` iterates the arguments Command::args passed, one per token,
     // with %%~A stripping the quotes cmd added around any that contain a
-    // space (both "Delivery failed" and the notify body do). Windows
-    // launches a `.cmd` directly via CreateProcess without cmd.exe named on
-    // the command line, the same way Unix launches a script through its
-    // shebang without naming `/bin/sh`.
+    // space (both "Delivery failed" and the notify body do).
+    //
+    // `CreateProcess` itself cannot run a `.cmd` at all — it only starts PE
+    // binaries. It is Rust's standard library that special-cases `.bat` and
+    // `.cmd`, routing the command through `cmd.exe` and quoting the
+    // arguments for it, a behavior that gained its current escaping after a
+    // security advisory in an earlier release. Relying on `Command::new(a
+    // .cmd path).args(...)` delivering arguments correctly is safe here
+    // because this crate's rust-version (Cargo.toml) is at least that fixed
+    // release, not because of anything CreateProcess does on its own.
+    //
+    // The loop's %%~A quoting is good enough for what these three tests
+    // pass and no further: an argument carrying a percent sign, an embedded
+    // quote, a comma or a semicolon would very likely come out split or
+    // mangled. A future test adding such an argument should know that
+    // before spending an hour on it.
     #[cfg(windows)]
     fn recorder(tag: &str) -> Recorder {
-        let dir = scratch_dir(tag);
-        let script = dir.join("record.cmd");
-        let out = dir.join("record.out");
-        // out.display() rather than the {:?} Debug form used on Unix below:
-        // Debug escapes '\' to '\\', and while Windows path resolution
-        // tolerates doubled separators in practice, display() sidesteps the
-        // question entirely by writing the path's native text unescaped,
-        // quoted by hand instead of relying on Debug's quoting.
+        let recorder = Recorder::new(tag, "record.cmd");
+        // recorder.out.display() rather than the {:?} Debug form used on
+        // Unix above: Debug escapes '\' to '\\', and while Windows path
+        // resolution tolerates doubled separators in practice, display()
+        // sidesteps the question entirely by writing the path's native
+        // text unescaped, quoted by hand instead of relying on Debug's
+        // quoting.
         std::fs::write(
-            &script,
+            &recorder.script,
             format!(
                 "@echo off\r\n(for %%A in (%*) do echo %%~A) > \"{}\"\r\n",
-                out.display()
+                recorder.out.display()
             ),
         )
         .expect("write recorder script");
-        Recorder { dir, script, out }
+        recorder
     }
 
     fn recorded_args(out: &std::path::Path) -> Vec<String> {
