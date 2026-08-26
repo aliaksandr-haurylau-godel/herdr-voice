@@ -162,8 +162,17 @@ pub struct HerdrDeliverer {
 
 impl HerdrDeliverer {
     pub fn new() -> Self {
+        Self::with_binary(herdr_binary())
+    }
+
+    /// Points at an arbitrary program rather than reading `HERDR_BIN_PATH`
+    /// from the environment. Production uses `new()`; a test uses this to
+    /// pin the trait method, the argument builder it calls, and the process
+    /// construction itself, against a small recorder script — without
+    /// mutating an environment variable a parallel test suite shares.
+    pub fn with_binary(binary: impl Into<String>) -> Self {
         HerdrDeliverer {
-            binary: herdr_binary(),
+            binary: binary.into(),
         }
     }
 
@@ -332,6 +341,87 @@ mod tests {
         assert_eq!(
             result,
             Err(DeliveryError::Rejected("pane_not_found".into()))
+        );
+    }
+
+    /// Points at a small recorder script instead of the environment-read
+    /// `herdr` binary, so a test can pin the whole chain — trait method,
+    /// argument builder, and the process construction that runs it — without
+    /// mutating HERDR_BIN_PATH under a suite that runs in parallel. Returns
+    /// the script's path and the file it writes its argv into, one line each.
+    fn recorder(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-voice-delivery-recorder-{tag}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let script = dir.join("record.sh");
+        let out = dir.join("record.out");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {out:?}\n"),
+        )
+        .expect("write recorder script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).expect("chmod");
+        }
+        (script, out)
+    }
+
+    fn recorded_args(out: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(out)
+            .expect("the recorder must have run and written its argv")
+            .lines()
+            .map(|l| l.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn insert_runs_pane_send_text_not_agent_prompt() {
+        let (script, out) = recorder("insert");
+        let deliverer = HerdrDeliverer::with_binary(script.to_string_lossy().into_owned());
+        deliverer
+            .insert("w1:p2", "hello")
+            .expect("the recorder always succeeds");
+        assert_eq!(
+            recorded_args(&out),
+            vec!["pane", "send-text", "w1:p2", "hello"]
+        );
+    }
+
+    #[test]
+    fn submit_runs_agent_prompt_not_pane_send_text() {
+        let (script, out) = recorder("submit");
+        let deliverer = HerdrDeliverer::with_binary(script.to_string_lossy().into_owned());
+        deliverer
+            .submit("w1:p2", "hello")
+            .expect("the recorder always succeeds");
+        assert_eq!(
+            recorded_args(&out),
+            vec!["agent", "prompt", "w1:p2", "hello"]
+        );
+    }
+
+    #[test]
+    fn notify_runs_notification_show_with_a_body_flag() {
+        let (script, out) = recorder("notify");
+        let deliverer = HerdrDeliverer::with_binary(script.to_string_lossy().into_owned());
+        deliverer
+            .notify("Delivery failed", "w1:p2: the text is in the plugin log")
+            .expect("the recorder always succeeds");
+        assert_eq!(
+            recorded_args(&out),
+            vec![
+                "notification",
+                "show",
+                "Delivery failed",
+                "--body",
+                "w1:p2: the text is in the plugin log"
+            ]
         );
     }
 }
