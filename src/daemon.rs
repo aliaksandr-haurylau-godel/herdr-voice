@@ -110,6 +110,7 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
                         recorder,
                         runtime,
                         pane,
+                        invocation.focused_pane_cwd.as_deref(),
                         invocation.focused_pane_agent.as_deref(),
                     ),
                     Control::Continue,
@@ -132,7 +133,20 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
 /// The pane is pinned here, when the take begins, and kept with it until delivery.
 /// Choosing it at the end would follow the focus: somebody speaks looking at one
 /// agent, switches while thinking, and the text lands in another.
-fn dictate(recorder: &Recorder, runtime: &Runtime, pane: &str, agent: Option<&str>) -> Reply {
+///
+/// `cwd` and `agent` are the target pane's working directory and the agent
+/// running in it, read from the `Invocation` `answer` has already parsed — this
+/// function never parses the invocation context itself.
+fn dictate(
+    recorder: &Recorder,
+    runtime: &Runtime,
+    pane: &str,
+    cwd: Option<&str>,
+    agent: Option<&str>,
+) -> Reply {
+    // The working directory reaches the take path in the next commit, which
+    // assembles the bias string from it (`tasks/21/PLAN_21.md`, Task 10).
+    let _ = cwd;
     match recorder.start(pane, agent) {
         Started::Began => Reply::Ok(format!("recording for {pane}")),
         Started::CouldNotStart(why) => Reply::Error(why),
