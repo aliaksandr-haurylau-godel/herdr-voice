@@ -155,9 +155,18 @@ mod tests {
     fn a_nonzero_exit_names_the_code() {
         let script = scratch_script("fail", "#!/bin/sh\nexit 3\n");
         let error = read("w1:p2", 80, script.to_str().unwrap()).expect_err("err");
-        match error {
+        match &error {
             PaneError::Failed { code, .. } => assert_eq!(code, "3"),
             other => panic!("expected Failed, got {other:?}"),
         }
+        // The rendering, which is what reaches the journal and a person: the
+        // variant carrying the code proves nothing about the message printing
+        // it.
+        let text = error.to_string();
+        assert!(text.contains("failed (3)"), "got {text:?}");
+        assert!(
+            text.contains(script.to_str().unwrap()),
+            "the message must name the program, got {text:?}"
+        );
     }
 }

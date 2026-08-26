@@ -306,11 +306,14 @@ mod tests {
     fn a_failed_pane_read_carries_its_reason_and_none_of_the_screen() {
         let cwd = scratch("pane-fail-cwd");
         let transcript_root = scratch("pane-fail-root");
-        // The screen content is printed and then the program fails: the
-        // reason may name the program and the exit code, and nothing else.
+        // The screen content is printed on both channels and then the
+        // program fails: the reason may name the program and the exit code,
+        // and nothing else. A pane's contents arrive on standard output, but
+        // a program that fails is as likely to put them on standard error.
         let herdr = scratch_script(
             "pane-fail",
-            "#!/bin/sh\nprintf 'the kettle argues with the lighthouse\\n'\nexit 3\n",
+            "#!/bin/sh\nprintf 'the kettle argues with the lighthouse\\n'\n\
+             printf 'the kettle argues with the lighthouse\\n' >&2\nexit 3\n",
         );
         let input = CollectInput {
             source: Source::Pane,
@@ -326,11 +329,16 @@ mod tests {
         let collected = collect(input);
         assert_eq!(collected.attempted, vec![(Source::Pane, false)]);
         let why = collected.pane_error.expect("a reason");
-        assert!(why.contains('3'), "got {why:?}");
+        // The leak guard first, so that a reason which starts carrying the
+        // screen fails here rather than on the rendering assertion below.
         assert!(
             !why.contains("the kettle argues with the lighthouse"),
             "the reason must not carry the pane's contents, got {why:?}"
         );
+        // The rendering itself, not a bare digit: the program's own path
+        // carries digits, so `contains('3')` would hold with the exit code
+        // dropped from the message entirely.
+        assert!(why.contains("failed (3)"), "got {why:?}");
     }
 
     #[test]

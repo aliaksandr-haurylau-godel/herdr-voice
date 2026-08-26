@@ -298,7 +298,10 @@ mod tests {
     #[test]
     fn a_long_turn_is_cut_and_its_newlines_collapsed() {
         let root = scratch("long-turn");
-        let long = format!("{}\nand a second line", "word ".repeat(200));
+        // The newline falls at character 100, inside the 300 the cut keeps —
+        // put past the cut it would be removed before the collapse ran, and
+        // the assertion below would pass on the cut alone.
+        let long = format!("{}\n{}", "word ".repeat(20), "word ".repeat(200));
         let path = write_jsonl(
             &root,
             "session.jsonl",
@@ -309,8 +312,11 @@ mod tests {
 
         let turns = read_turns(&path, 6);
         assert_eq!(turns.len(), 1, "got {turns:?}");
-        // "user: " plus the prototype's 300 characters, and nothing that
-        // would split the joined string into a second line.
+        // "user: " plus the prototype's 300 characters — the cut — and
+        // nothing that would split the joined string into a second line —
+        // the collapse. The two are proved separately: the length holds
+        // whether or not newlines are collapsed, and the newline is inside
+        // what the cut keeps.
         assert_eq!(turns[0].chars().count(), "user: ".len() + TURN_CHARS);
         assert!(!turns[0].contains('\n'), "got {:?}", turns[0]);
     }
