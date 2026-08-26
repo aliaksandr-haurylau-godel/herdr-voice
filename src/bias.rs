@@ -43,6 +43,11 @@ pub struct Collected {
     pub conversation_chars: usize,
     /// True iff the pre-cut length exceeded `prompt_chars`.
     pub truncated: bool,
+    /// Why the pane could not be read, when it was tried and the call itself
+    /// failed. `PaneError`'s text: the program and the exit code, never
+    /// anything the pane displayed — a miss with no reason to give (an empty
+    /// screen, or a source that never called herdr) leaves this `None`.
+    pub pane_error: Option<String>,
 }
 
 /// What `collect` needs to assemble a bias string for one take.
@@ -64,6 +69,8 @@ pub struct CollectInput<'a> {
 struct Conversation {
     text: String,
     found: bool,
+    /// Set only by the pane branch, and only when the call failed.
+    why: Option<String>,
 }
 
 fn read_transcript(input: &CollectInput) -> Conversation {
@@ -73,15 +80,29 @@ fn read_transcript(input: &CollectInput) -> Conversation {
     Conversation {
         found: !turns.is_empty(),
         text: turns.join("\n"),
+        why: None,
     }
 }
 
 fn read_pane(input: &CollectInput) -> Conversation {
     match pane::read(input.pane, pane::PANE_LINES, input.herdr_binary) {
-        Ok(text) if !text.is_empty() => Conversation { found: true, text },
-        _ => Conversation {
+        Ok(text) if !text.is_empty() => Conversation {
+            found: true,
+            text,
+            why: None,
+        },
+        // A read that succeeded and showed nothing has no reason to give; one
+        // that failed has the only text that says what to fix, and dropping it
+        // is what left a failed pane read indistinguishable from an empty one.
+        Ok(_) => Conversation {
             found: false,
             text: String::new(),
+            why: None,
+        },
+        Err(why) => Conversation {
+            found: false,
+            text: String::new(),
+            why: Some(why.to_string()),
         },
     }
 }
@@ -136,6 +157,7 @@ pub fn collect(input: CollectInput) -> Collected {
         file_chars,
         conversation_chars,
         truncated,
+        pane_error: conversation.why,
     }
 }
 
@@ -277,6 +299,37 @@ mod tests {
                 .contains("the kettle argues with the lighthouse"),
             "got {:?}",
             collected.bias
+        );
+    }
+
+    #[test]
+    fn a_failed_pane_read_carries_its_reason_and_none_of_the_screen() {
+        let cwd = scratch("pane-fail-cwd");
+        let transcript_root = scratch("pane-fail-root");
+        // The screen content is printed and then the program fails: the
+        // reason may name the program and the exit code, and nothing else.
+        let herdr = scratch_script(
+            "pane-fail",
+            "#!/bin/sh\nprintf 'the kettle argues with the lighthouse\\n'\nexit 3\n",
+        );
+        let input = CollectInput {
+            source: Source::Pane,
+            cwd: cwd.to_str().unwrap(),
+            agent: Some(transcript::KNOWN_TRANSCRIPT_AGENT),
+            pane: "w1:p1",
+            transcript_root: &transcript_root,
+            herdr_binary: herdr.to_str().unwrap(),
+            conversation_turns: 6,
+            file_names: 40,
+            prompt_chars: 600,
+        };
+        let collected = collect(input);
+        assert_eq!(collected.attempted, vec![(Source::Pane, false)]);
+        let why = collected.pane_error.expect("a reason");
+        assert!(why.contains('3'), "got {why:?}");
+        assert!(
+            !why.contains("the kettle argues with the lighthouse"),
+            "the reason must not carry the pane's contents, got {why:?}"
         );
     }
 

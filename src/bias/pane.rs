@@ -39,7 +39,10 @@ pub enum PaneError {
 impl fmt::Display for PaneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PaneError::NotFound { program } => write!(f, "cannot run {program:?}"),
+            PaneError::NotFound { program } => write!(
+                f,
+                "cannot run {program:?}; install herdr, or set HERDR_BIN_PATH to it"
+            ),
             PaneError::Failed { program, code } => {
                 write!(f, "{program:?} failed ({code})")
             }
@@ -139,6 +142,13 @@ mod tests {
     fn a_nonexistent_program_is_not_found() {
         let error = read("w1:p2", 80, "/definitely/not/a/real/herdr-binary").expect_err("err");
         assert!(matches!(error, PaneError::NotFound { .. }), "got {error:?}");
+    }
+
+    #[test]
+    fn a_program_that_is_not_there_says_what_to_set() {
+        let error = read("w1:p2", 80, "/definitely/not/a/real/herdr-binary").expect_err("err");
+        let text = error.to_string();
+        assert!(text.contains("HERDR_BIN_PATH"), "got {text:?}");
     }
 
     #[test]

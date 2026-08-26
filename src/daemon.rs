@@ -237,6 +237,8 @@ fn files_only(cwd: &str, context: &config::Context) -> bias::Collected {
         file_chars: file_line.chars().count(),
         conversation_chars: 0,
         truncated: raw_len > context.prompt_chars,
+        // No source was tried, so there is no failure to report.
+        pane_error: None,
     }
 }
 
@@ -262,9 +264,16 @@ fn bias_counts(collected: &bias::Collected, prompt_chars: usize) -> String {
             .collect::<Vec<_>>()
             .join(",")
     };
+    // The reason a pane read failed is not the bias string: it names the
+    // program and the exit code, which is the only thing that says what to
+    // fix. Newlines are collapsed because a journal line is one line.
+    let why = match &collected.pane_error {
+        Some(why) => format!(" pane_error={:?}", why.replace('\n', " ")),
+        None => String::new(),
+    };
     format!(
         "attempted={attempted} file_count={} file_chars={} conversation_chars={} \
-         prompt_chars={prompt_chars} truncated={}",
+         prompt_chars={prompt_chars} truncated={}{why}",
         collected.file_count,
         collected.file_chars,
         collected.conversation_chars,
@@ -1236,6 +1245,29 @@ mod tests {
         assert!(
             !line.contains("file_count=0"),
             "the pinned working directory is a repository, got {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_pane_read_that_fails_names_what_to_do_next_in_the_journal() {
+        let recorder = tone_recorder("bias-pane-why");
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.bias_source = Ok(bias::Source::Pane);
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        let lines = journal.0.lock().unwrap();
+        let line = lines
+            .iter()
+            .find(|line| line.starts_with("bias "))
+            .unwrap_or_else(|| panic!("no bias line, got {lines:?}"));
+        assert!(line.contains("attempted=pane:miss"), "got {line:?}");
+        assert!(
+            line.contains("HERDR_BIN_PATH"),
+            "a failed pane read must name what to do next, got {line:?}"
         );
     }
 
