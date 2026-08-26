@@ -17,6 +17,11 @@ pub const KNOWN_TRANSCRIPT_AGENT: &str = "claude";
 /// Turns whose text begins with one of these are machine turns — task
 /// notifications, system reminders, cross-session messages, a command
 /// wrapper — and carry nothing about speech (AC-2).
+/// How much of one turn is kept, in characters. The prototype's number
+/// (`spike/context.sh:107`), carried over unchanged: a single measured turn ran
+/// to 7000 characters, more than the whole `prompt_chars` budget on its own.
+const TURN_CHARS: usize = 300;
+
 const SERVICE_MARKERS: &[&str] = &[
     "<task-notification>",
     "<system-reminder>",
@@ -131,7 +136,11 @@ pub fn read_turns(path: &Path, max: usize) -> Vec<String> {
         if text.is_empty() || is_service_turn(&text) {
             continue;
         }
-        turns.push(format!("{role}: {text}"));
+        // Cut, then collapse — the prototype's order (`spike/context.sh:107`).
+        // Both matter: one turn can otherwise fill the whole budget, and a
+        // newline inside a turn would split a line the reader treats as one.
+        let text: String = text.chars().take(TURN_CHARS).collect();
+        turns.push(format!("{role}: {}", text.replace('\n', " ")));
     }
     let start = turns.len().saturating_sub(max);
     turns[start..].to_vec()
@@ -284,6 +293,26 @@ mod tests {
 
         let turns = read_turns(&path, 10);
         assert_eq!(turns, vec!["assistant: a real reply about the project"]);
+    }
+
+    #[test]
+    fn a_long_turn_is_cut_and_its_newlines_collapsed() {
+        let root = scratch("long-turn");
+        let long = format!("{}\nand a second line", "word ".repeat(200));
+        let path = write_jsonl(
+            &root,
+            "session.jsonl",
+            &[&format!(
+                r#"{{"type":"user","message":{{"content":{long:?}}}}}"#
+            )],
+        );
+
+        let turns = read_turns(&path, 6);
+        assert_eq!(turns.len(), 1, "got {turns:?}");
+        // "user: " plus the prototype's 300 characters, and nothing that
+        // would split the joined string into a second line.
+        assert_eq!(turns[0].chars().count(), "user: ".len() + TURN_CHARS);
+        assert!(!turns[0].contains('\n'), "got {:?}", turns[0]);
     }
 
     #[test]
