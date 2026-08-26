@@ -404,3 +404,13 @@ Two findings, neither blocking.
 
 The Windows branch remains reasoned rather than observed: this machine has no Windows
 target, so it has never been compiled, let alone run. CI settles it.
+
+Both findings of the third pass are closed. The comment now states the real
+mechanism — the command interpreter is reached through the standard library rather
+than by anything the operating system does with a script on its own, and the crate's
+minimum Rust version is what makes relying on it safe — and it warns which argument
+shapes the batch loop would mishandle. The scratch directory is now created by the
+value that owns its cleanup, so nothing fallible runs between the two.
+
+S4 is closed. 159 tests pass, clippy is clean under `-D warnings`, the format check
+is clean, and the manifest reports 11 entries with all commands known.
