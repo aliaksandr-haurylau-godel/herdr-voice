@@ -344,17 +344,42 @@ mod tests {
         );
     }
 
-    /// Points at a small recorder script instead of the environment-read
-    /// `herdr` binary, so a test can pin the whole chain — trait method,
-    /// argument builder, and the process construction that runs it — without
-    /// mutating HERDR_BIN_PATH under a suite that runs in parallel. Returns
-    /// the script's path and the file it writes its argv into, one line each.
-    fn recorder(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    /// A small program that writes the argv it was invoked with, one line
+    /// each, to a file next to it — so a test can pin the whole chain: the
+    /// trait method, the argument builder it calls, and the process
+    /// construction that runs it, without mutating HERDR_BIN_PATH under a
+    /// suite that runs in parallel. Unix has no PATHEXT-style lookup and
+    /// needs the executable bit; Windows runs a `.cmd` directly through
+    /// CreateProcess without needing cmd.exe named explicitly, the same way
+    /// a shebang is honored on Unix without naming the interpreter.
+    struct Recorder {
+        dir: std::path::PathBuf,
+        script: std::path::PathBuf,
+        out: std::path::PathBuf,
+    }
+
+    /// Nothing removes the scratch directory otherwise: it is unique per
+    /// process (the pid is in its name), so runs never collide, but a suite
+    /// that leaves a directory behind on every invocation is one somebody
+    /// eventually finds confusing.
+    impl Drop for Recorder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "herdr-voice-delivery-recorder-{tag}-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[cfg(unix)]
+    fn recorder(tag: &str) -> Recorder {
+        let dir = scratch_dir(tag);
         let script = dir.join("record.sh");
         let out = dir.join("record.out");
         std::fs::write(
@@ -362,14 +387,40 @@ mod tests {
             format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {out:?}\n"),
         )
         .expect("write recorder script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).expect("stat").permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).expect("chmod");
-        }
-        (script, out)
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+        Recorder { dir, script, out }
+    }
+
+    // Not run on this machine — verified by reasoning about cmd.exe's
+    // argument handling, not by executing it: `for %%A in (%*) do echo
+    // %%~A` iterates the arguments Command::args passed, one per token,
+    // with %%~A stripping the quotes cmd added around any that contain a
+    // space (both "Delivery failed" and the notify body do). Windows
+    // launches a `.cmd` directly via CreateProcess without cmd.exe named on
+    // the command line, the same way Unix launches a script through its
+    // shebang without naming `/bin/sh`.
+    #[cfg(windows)]
+    fn recorder(tag: &str) -> Recorder {
+        let dir = scratch_dir(tag);
+        let script = dir.join("record.cmd");
+        let out = dir.join("record.out");
+        // out.display() rather than the {:?} Debug form used on Unix below:
+        // Debug escapes '\' to '\\', and while Windows path resolution
+        // tolerates doubled separators in practice, display() sidesteps the
+        // question entirely by writing the path's native text unescaped,
+        // quoted by hand instead of relying on Debug's quoting.
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\n(for %%A in (%*) do echo %%~A) > \"{}\"\r\n",
+                out.display()
+            ),
+        )
+        .expect("write recorder script");
+        Recorder { dir, script, out }
     }
 
     fn recorded_args(out: &std::path::Path) -> Vec<String> {
@@ -381,40 +432,55 @@ mod tests {
     }
 
     #[test]
+    fn the_recorder_cleans_up_its_scratch_directory_when_dropped() {
+        let recorder = recorder("cleanup");
+        let dir = recorder.dir.clone();
+        assert!(
+            dir.exists(),
+            "the recorder must have created its scratch directory"
+        );
+        drop(recorder);
+        assert!(
+            !dir.exists(),
+            "the scratch directory must be gone once the recorder is dropped, got it still at {dir:?}"
+        );
+    }
+
+    #[test]
     fn insert_runs_pane_send_text_not_agent_prompt() {
-        let (script, out) = recorder("insert");
-        let deliverer = HerdrDeliverer::with_binary(script.to_string_lossy().into_owned());
+        let recorder = recorder("insert");
+        let deliverer = HerdrDeliverer::with_binary(recorder.script.to_string_lossy().into_owned());
         deliverer
             .insert("w1:p2", "hello")
             .expect("the recorder always succeeds");
         assert_eq!(
-            recorded_args(&out),
+            recorded_args(&recorder.out),
             vec!["pane", "send-text", "w1:p2", "hello"]
         );
     }
 
     #[test]
     fn submit_runs_agent_prompt_not_pane_send_text() {
-        let (script, out) = recorder("submit");
-        let deliverer = HerdrDeliverer::with_binary(script.to_string_lossy().into_owned());
+        let recorder = recorder("submit");
+        let deliverer = HerdrDeliverer::with_binary(recorder.script.to_string_lossy().into_owned());
         deliverer
             .submit("w1:p2", "hello")
             .expect("the recorder always succeeds");
         assert_eq!(
-            recorded_args(&out),
+            recorded_args(&recorder.out),
             vec!["agent", "prompt", "w1:p2", "hello"]
         );
     }
 
     #[test]
     fn notify_runs_notification_show_with_a_body_flag() {
-        let (script, out) = recorder("notify");
-        let deliverer = HerdrDeliverer::with_binary(script.to_string_lossy().into_owned());
+        let recorder = recorder("notify");
+        let deliverer = HerdrDeliverer::with_binary(recorder.script.to_string_lossy().into_owned());
         deliverer
             .notify("Delivery failed", "w1:p2: the text is in the plugin log")
             .expect("the recorder always succeeds");
         assert_eq!(
-            recorded_args(&out),
+            recorded_args(&recorder.out),
             vec![
                 "notification",
                 "show",
