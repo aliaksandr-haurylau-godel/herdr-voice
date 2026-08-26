@@ -200,6 +200,109 @@ mod tests {
 
     const MISSING_HERDR: &str = "/definitely/not/a/real/herdr-binary";
 
+    /// A program that stands in for herdr, the way `bias::pane`'s own tests do
+    /// it — the pane source is only reachable through a program that runs, so
+    /// without one it goes untested.
+    fn scratch_script(tag: &str, contents: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "herdr-voice-bias-collect-{tag}-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).expect("write script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod script");
+        path
+    }
+
+    #[test]
+    fn the_pane_source_reaches_the_bias_string() {
+        let cwd = scratch("pane-hit-cwd");
+        let transcript_root = scratch("pane-hit-root");
+        let herdr = scratch_script(
+            "pane-hit",
+            "#!/bin/sh\nprintf 'the kettle argues with the lighthouse\\n'\n",
+        );
+        let input = CollectInput {
+            source: Source::Pane,
+            cwd: cwd.to_str().unwrap(),
+            agent: Some(transcript::KNOWN_TRANSCRIPT_AGENT),
+            pane: "w1:p1",
+            transcript_root: &transcript_root,
+            herdr_binary: herdr.to_str().unwrap(),
+            conversation_turns: 6,
+            file_names: 40,
+            prompt_chars: 600,
+        };
+        let collected = collect(input);
+        assert_eq!(collected.attempted, vec![(Source::Pane, true)]);
+        assert!(
+            collected
+                .bias
+                .contains("the kettle argues with the lighthouse"),
+            "got {:?}",
+            collected.bias
+        );
+        assert!(collected.conversation_chars > 0, "got {collected:?}");
+    }
+
+    #[test]
+    fn auto_falls_back_to_the_pane_when_the_transcript_misses() {
+        let cwd = scratch("auto-pane-cwd");
+        let transcript_root = scratch("auto-pane-root");
+        let herdr = scratch_script(
+            "auto-pane",
+            "#!/bin/sh\nprintf 'the kettle argues with the lighthouse\\n'\n",
+        );
+        let input = CollectInput {
+            source: Source::Auto,
+            cwd: cwd.to_str().unwrap(),
+            agent: Some(transcript::KNOWN_TRANSCRIPT_AGENT),
+            pane: "w1:p1",
+            transcript_root: &transcript_root,
+            herdr_binary: herdr.to_str().unwrap(),
+            conversation_turns: 6,
+            file_names: 40,
+            prompt_chars: 600,
+        };
+        let collected = collect(input);
+        assert_eq!(
+            collected.attempted,
+            vec![(Source::Transcript, false), (Source::Pane, true)]
+        );
+        assert!(
+            collected
+                .bias
+                .contains("the kettle argues with the lighthouse"),
+            "got {:?}",
+            collected.bias
+        );
+    }
+
+    #[test]
+    fn a_pane_that_reads_back_nothing_is_a_miss_not_a_hit() {
+        let cwd = scratch("pane-empty-cwd");
+        let transcript_root = scratch("pane-empty-root");
+        // Blank lines only: the read succeeds and the filter leaves nothing,
+        // which is a miss — the same as no pane at all.
+        let herdr = scratch_script("pane-empty", "#!/bin/sh\nprintf '   \\n\\n'\n");
+        let input = CollectInput {
+            source: Source::Pane,
+            cwd: cwd.to_str().unwrap(),
+            agent: Some(transcript::KNOWN_TRANSCRIPT_AGENT),
+            pane: "w1:p1",
+            transcript_root: &transcript_root,
+            herdr_binary: herdr.to_str().unwrap(),
+            conversation_turns: 6,
+            file_names: 40,
+            prompt_chars: 600,
+        };
+        let collected = collect(input);
+        assert_eq!(collected.attempted, vec![(Source::Pane, false)]);
+        assert_eq!(collected.conversation_chars, 0);
+    }
+
     #[test]
     fn transcript_source_on_a_miss_attempts_only_transcript() {
         let cwd = scratch("t-miss-cwd");
@@ -338,6 +441,9 @@ mod tests {
         };
         let collected = collect(input);
         assert!(collected.truncated);
+        // AC-5 itself: the flag says something was cut, this says the result
+        // actually fits.
+        assert_eq!(collected.bias.chars().count(), 20, "got {collected:?}");
         assert!(
             collected.conversation_chars > 20,
             "got {}",

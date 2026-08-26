@@ -1039,6 +1039,10 @@ mod tests {
         path
     }
 
+    /// The one file in the scratch repository below. Distinctive enough that a
+    /// log line carrying the bias string can be caught doing it.
+    const REPOSITORY_FILE: &str = "kettlehouse.txt";
+
     /// A scratch git repository, so the file-names component finds something
     /// real without depending on the checkout the tests run in.
     fn git_repo(dir: &std::path::Path) {
@@ -1054,7 +1058,7 @@ mod tests {
                 .expect("run git");
             assert!(status.success(), "git {args:?} failed");
         }
-        std::fs::write(dir.join("notes.txt"), "content").unwrap();
+        std::fs::write(dir.join(REPOSITORY_FILE), "content").unwrap();
         for args in [vec!["add", "."], vec!["commit", "-q", "-m", "add a file"]] {
             let status = std::process::Command::new("git")
                 .current_dir(dir)
@@ -1159,12 +1163,41 @@ mod tests {
         assert!(collected.attempted.is_empty(), "got {collected:?}");
         assert_eq!(collected.conversation_chars, 0);
         assert!(collected.file_count > 0, "got {collected:?}");
-        assert!(collected.bias.contains("notes.txt"), "got {collected:?}");
+        assert!(
+            collected.bias.contains(REPOSITORY_FILE),
+            "got {collected:?}"
+        );
 
         let lines = journal.0.lock().unwrap();
         assert_eq!(lines.len(), 1, "got {lines:?}");
         assert!(lines[0].contains("vosk"), "got {lines:?}");
         assert!(lines[0].contains("file_count="), "got {lines:?}");
+        // AC-9 on this path too: the refusal's line carries a `Collected`
+        // whose `bias` holds the file names, and must still print none of it.
+        assert!(
+            !lines[0].contains(REPOSITORY_FILE),
+            "the bias string must never reach the log, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_files_only_bias_is_capped_at_prompt_chars_too() {
+        let cwd = bias_scratch("bias-refused-cap-cwd");
+        git_repo(&cwd);
+
+        let mut runtime = fake_runtime("x");
+        runtime.bias_source = crate::bias::source::resolve("vosk");
+        runtime.context.prompt_chars = 8;
+
+        let collected = take_bias(
+            &runtime,
+            "w1:p2",
+            Some(&cwd.to_string_lossy()),
+            Some("claude"),
+        );
+        assert!(collected.file_count > 0, "got {collected:?}");
+        assert_eq!(collected.bias.chars().count(), 8, "got {collected:?}");
+        assert!(collected.truncated, "got {collected:?}");
     }
 
     #[test]
