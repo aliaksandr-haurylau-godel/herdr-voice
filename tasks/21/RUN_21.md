@@ -385,3 +385,73 @@ resolved once at start and no path through them can panic or abort the daemon.
 and changes no delivery behaviour. The character cap is genuinely
 character-based: Russian text truncated mid-string does not panic. No absolute
 path, home directory or private name appears anywhere in the diff.
+
+## Gate S4, second pass
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff on feat/21-context since d4a2d1b, at 643e30a
+  reviewer: one review, re-running each first-pass mutation and examining the
+    surfaces the fixes introduced
+  verdict: QUESTIONS
+  date: 2026-08-26
+  blocker: null
+```
+
+All twelve findings of the first pass are fixed. Eleven are proved: the
+mutation that caught each one now turns a test red. The twelfth, the stale
+suppression, is settled by inspection because no mutation applies to it.
+
+The pane-read reason, added this round to satisfy the rule that a failure names
+what to do next, does not leak the screen into the journal: `PaneError` has two
+variants, neither touches the called program's output, and folding stdout into
+one of them turns the guard test red. The bound on the walk did not break
+ordinary discovery — a pane at a repository root whose session directory exists
+still finds it, and a pane deeper inside still walks up to it. Pinning the
+working directory into the take changed no capture or delivery behaviour, and a
+take started with no working directory still records, recognises and delivers.
+
+### Sent back, six small things
+
+1. **The per-turn newline collapsing has no test.** Removing `.replace('\n',
+   " ")` at `src/bias/transcript.rs:143` leaves all 209 tests green. The test
+   written for it puts its newline at character 1000, and the 300-character cut
+   removes it before the collapse is reached, so the assertion passes on the
+   cut alone. This is the accidental-pass shape the fixture rename in the same
+   round was meant to end.
+
+2. **`docs/design.md:135` states behaviour the code does not have.** It says
+   the conversation is read from the pane's screen when no transcript is found
+   or when the source is `pane`. Under `source = "transcript"` the pane is
+   never consulted on a miss, and a test pins that. Only `auto` falls back. The
+   line entered on this branch, so it is inside the diff under review, and it
+   is the same section that was just corrected for the same kind of error.
+
+3. **A second `git rev-parse --show-toplevel` runs per take**, with the same
+   argument as the first and microseconds after it —
+   `src/bias/transcript.rs:43` asks for the ceiling that `files::collect`
+   already computed. Measured with a shim on the path: four git subprocesses
+   where there were three. On the take path, before recognition.
+
+4. **The leak guard covers stdout but not stderr.** `src/bias.rs:317`. Folding
+   the called program's stdout into `PaneError::Failed` turns the test red;
+   folding its stderr in leaves everything green. Pane contents arrive on
+   stdout, so the likely leak is covered, but the guard should close both.
+
+5. **`why.contains('3')` at `src/bias.rs:329` proves nothing about the exit
+   code.** Removing the code from `PaneError::Failed`'s rendering leaves every
+   test green: the reason string still holds a `3` from the scratch script's
+   path. Nothing covers the rendering a person actually reads.
+
+6. **The module comment overstates the bound.** `src/bias/transcript.rs:39`
+   says the walk stops at the repository root. Outside a repository there is no
+   root, and the walk climbs to `/` as before — which is the recorded decision,
+   but the comment states the bound unconditionally.
+
+### Noted, not sent back
+
+`bias_counts` collapses newlines in the pane reason although neither variant of
+`PaneError` can produce one, and the `Auto` arm of the attempted-source
+rendering is unreachable by construction. Both are harmless and both are
+commented as such.
