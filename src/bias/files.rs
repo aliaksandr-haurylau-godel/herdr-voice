@@ -27,11 +27,13 @@ pub fn collect(cwd: &str, max: usize) -> Vec<String> {
             if component.is_empty() {
                 continue;
             }
+            // Tested before the push, not after it: a cap of zero is a
+            // configured state and must yield nothing.
+            if out.len() >= max {
+                return out;
+            }
             if seen.insert(component.to_string()) {
                 out.push(component.to_string());
-                if out.len() >= max {
-                    return out;
-                }
             }
         }
     }
@@ -161,6 +163,19 @@ mod tests {
         // guard an absent `focused_pane_cwd` would collect the daemon's own
         // repository instead of the agent's.
         assert!(collect("", 40).is_empty());
+    }
+
+    #[test]
+    fn a_cap_of_zero_yields_no_names() {
+        // `file_names = 0` is a configured state, not an accident: somebody
+        // who wants the conversation alone sets it.
+        let dir = scratch("zero");
+        init_repo(&dir);
+        std::fs::write(dir.join("note.txt"), "content").unwrap();
+        run(&dir, &["add", "."]);
+        run(&dir, &["commit", "-q", "-m", "add a file"]);
+
+        assert!(collect(dir.to_str().unwrap(), 0).is_empty());
     }
 
     #[test]

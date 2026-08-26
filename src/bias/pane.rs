@@ -79,7 +79,7 @@ pub fn read(pane: &str, lines: usize, binary: &str) -> Result<String, PaneError>
         .map(|line| line.trim_end())
         .filter(|line| line.chars().any(|c| c.is_alphanumeric()))
         .collect();
-    let start = filtered.len().saturating_sub(PANE_LINES);
+    let start = filtered.len().saturating_sub(lines);
     Ok(filtered[start..].join("\n"))
 }
 
@@ -123,6 +123,16 @@ mod tests {
         );
         let result = read("w1:p2", 80, script.to_str().unwrap()).expect("ok");
         assert_eq!(result, "line one\nline two");
+    }
+
+    #[test]
+    fn the_line_cap_is_the_one_the_caller_asked_for() {
+        let script = scratch_script(
+            "line-cap",
+            "#!/bin/sh\nprintf 'one\\ntwo\\nthree\\nfour\\nfive\\n'\n",
+        );
+        let result = read("w1:p2", 2, script.to_str().unwrap()).expect("ok");
+        assert_eq!(result, "four\nfive");
     }
 
     #[test]
