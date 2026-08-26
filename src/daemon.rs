@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use crate::bias;
 use crate::capture::{Recorder, Started};
 use crate::config;
 use crate::context;
@@ -45,13 +46,45 @@ pub fn needs_target_pane(command: &str) -> bool {
 /// run for `cancel` and for `doctor`, which is where somebody finds out what to fix.
 pub type Recognition = Result<Box<dyn Engine + Send + Sync>, String>;
 
-/// The four things resolved once, at daemon start, and needed everywhere a
-/// take can finish.
+/// Everything resolved once, at daemon start, and needed everywhere a take can
+/// finish.
 pub struct Runtime {
     pub recognition: Recognition,
+    /// `[context] source`, checked once — the same shape `recognition` has, for
+    /// the same reason: a configuration value that can be wrong is validated at
+    /// start and the `Result` consulted per take, never re-parsed
+    /// (`tasks/21/DESIGN_21.md`, section 2a, "why resolved once, not per take").
+    ///
+    /// Read by the take path from the next commit on (`tasks/21/PLAN_21.md`,
+    /// Task 10); CI runs clippy with `-D warnings`, so a field nothing outside
+    /// the tests reads yet must be allowed explicitly rather than left to warn.
+    #[allow(dead_code)]
+    pub bias_source: Result<bias::Source, String>,
+    /// Where the known agent keeps its transcripts. Absent when the
+    /// environment names no home directory, which leaves the transcript source
+    /// nowhere to look — an ordinary miss, not a failure (design section 3).
+    /// Read by the take path from Task 10 on, as `bias_source` is.
+    #[allow(dead_code)]
+    pub transcript_root: Option<std::path::PathBuf>,
     pub deliverer: Box<dyn crate::delivery::Deliverer>,
     pub delivery_settings: crate::delivery::Settings,
     pub journal: Box<dyn Journal>,
+}
+
+/// The two context fields `Runtime` holds, resolved from the loaded
+/// configuration and the environment. Separate from `start()` so that the
+/// resolution can be tested without binding a socket.
+pub fn bias_settings(
+    context: &config::Context,
+    vars: &config::Vars,
+) -> (Result<bias::Source, String>, Option<std::path::PathBuf>) {
+    let source = bias::source::resolve(&context.source);
+    let root = vars.home.as_ref().map(|home| {
+        std::path::PathBuf::from(home)
+            .join(".claude")
+            .join("projects")
+    });
+    (source, root)
 }
 
 pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Reply, Control) {
@@ -252,7 +285,8 @@ pub fn start() -> Result<Outcome, TransportError> {
     // The configuration is read once, here, and handed to the recorder's thread:
     // re-reading it per take would put file system access on the path that runs
     // while somebody is speaking.
-    let loaded = config::load(config::directory(&config::Vars::from_env()).as_deref());
+    let vars = config::Vars::from_env();
+    let loaded = config::load(config::directory(&vars).as_deref());
     let takes = transport::state_directory(&transport::Vars::from_env())
         .map(|state| state.join("takes"))
         .unwrap_or_else(|| std::path::PathBuf::from("takes"));
@@ -272,8 +306,18 @@ pub fn start() -> Result<Outcome, TransportError> {
         takes,
     );
 
+    // Not fatal either: an unrecognised `[context] source` costs the take its
+    // conversation component, never the recording (design section 2a, "the
+    // refusal's effect on the take").
+    let (bias_source, transcript_root) = bias_settings(&loaded.config.context, &vars);
+    if let Err(why) = &bias_source {
+        eprintln!("{why}");
+    }
+
     let runtime = Runtime {
         recognition,
+        bias_source,
+        transcript_root,
         deliverer: Box::new(crate::delivery::HerdrDeliverer::new()),
         delivery_settings: crate::delivery::Settings {
             submit: loaded.config.delivery.submit,
@@ -366,6 +410,8 @@ mod tests {
             recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
                 text.to_string()
             )))),
+            bias_source: Ok(bias::Source::Auto),
+            transcript_root: None,
             deliverer: Box::new(crate::delivery::tests_support::FakeDeliverer::ok()),
             delivery_settings: crate::delivery::Settings {
                 submit: false,
@@ -373,6 +419,48 @@ mod tests {
             },
             journal: Box::new(StderrJournal),
         }
+    }
+
+    #[test]
+    fn the_bias_source_and_the_transcript_root_are_resolved_once_at_start() {
+        let home = std::env::temp_dir();
+        let vars = crate::config::Vars {
+            config_dir: None,
+            xdg_config_home: None,
+            home: Some(home.to_string_lossy().into_owned()),
+        };
+
+        let named = crate::config::Context {
+            source: "pane".to_string(),
+            ..Default::default()
+        };
+        let (source, root) = bias_settings(&named, &vars);
+        let mut runtime = fake_runtime("x");
+        runtime.bias_source = source;
+        runtime.transcript_root = root;
+        assert_eq!(runtime.bias_source, Ok(bias::Source::Pane));
+        assert_eq!(
+            runtime.transcript_root,
+            Some(home.join(".claude").join("projects"))
+        );
+
+        let refused = crate::config::Context {
+            source: "vosk".to_string(),
+            ..Default::default()
+        };
+        let (why, _) = bias_settings(&refused, &vars);
+        let why = why.expect_err("an unrecognised source must be refused");
+        assert!(why.contains("vosk"), "got {why:?}");
+
+        // No home, no root: the transcript source has nowhere to look, which
+        // section 3 of the design treats as an ordinary miss.
+        let homeless = crate::config::Vars {
+            config_dir: None,
+            xdg_config_home: None,
+            home: None,
+        };
+        let (_, absent) = bias_settings(&crate::config::Context::default(), &homeless);
+        assert_eq!(absent, None);
     }
 
     fn request(command: &str, context: &[u8]) -> Request {
@@ -408,6 +496,8 @@ mod tests {
             recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
                 "fix the worklog entry".to_string(),
             )))),
+            bias_source: Ok(bias::Source::Auto),
+            transcript_root: None,
             deliverer: Box::new(deliverer),
             delivery_settings: crate::delivery::Settings {
                 submit,
@@ -526,6 +616,8 @@ mod tests {
             recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
                 "line one\nline two".to_string(),
             )))),
+            bias_source: Ok(bias::Source::Auto),
+            transcript_root: None,
             deliverer: Box::new(fake),
             delivery_settings: crate::delivery::Settings {
                 submit: false,
