@@ -595,3 +595,36 @@ and no response to an interrupt, while the process kept burning CPU. Both times
 the tracked worktree was checked and found untouched; nothing needed undoing
 either time. After the second failure this pass was run directly instead of
 delegating a third time.
+
+## Gate S5
+
+```yaml
+gate:
+  stage: S5
+  artifact: docs/evidence.md, "The bias string: assembled and capped, not yet
+    passed to recognition"
+  verdict: pass
+  date: 2026-08-27
+  platform: macOS 26.6.2, Rust 1.97.1
+```
+
+Fresh run on `feat/21-context` at `7ff3daf`: `cargo test` — 209 passed, 0
+failed; `cargo clippy --all-targets -- -D warnings` — clean; `cargo fmt --check`
+— clean; `python3 scripts/check_manifest.py` — 11 entries, all commands known.
+
+The entry states what the test suite establishes — per-source dispatch, both
+caps, the counts-only log line on both paths that can produce one, no panic on
+a miss, an unresolved `source`, or a failed pane read — and states plainly what
+it does not: `Engine::transcribe` is untouched, `daemon::take_bias` discards
+`bias::collect`'s return value, and no test or claim here says anything about a
+real transcript's output. That is issue #26.
+
+Four things need a live herdr pane and a person, and are recorded as undone
+rather than assumed: a real `bias` line in `herdr plugin log list`; a real
+transcript hit under a real `$HOME/.claude/projects` tree; a real
+`herdr pane read` call proving the argument contract against herdr itself, not
+the prototype; and what discovery reports for a pane in a git worktree with no
+session directory of its own. None of the four can be done from this session —
+they wait on the owner, at a keyboard, with a live herdr.
+
+S5 is closed. Next: the pull request for #21.

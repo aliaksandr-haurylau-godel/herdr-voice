@@ -465,3 +465,54 @@ command needs a preceding existence check, and neither can deliver into nothing
 while reporting success — which is what the criterion was written to prevent. The
 error carries a machine-readable code, so a failure can name the pane and the
 reason without parsing prose.
+
+## The bias string: assembled and capped, not yet passed to recognition
+
+macOS 26.6.2, Rust 1.97.1. Verified by test suite alone, on `feat/21-context` at
+`7ff3daf`: 209 tests passed, `cargo clippy --all-targets -- -D warnings` clean,
+`cargo fmt --check` clean, `scripts/check_manifest.py` clean.
+
+**What this establishes.** Per `[context] source`, a bias string is assembled
+and capped at `prompt_chars`. `transcript` reads the target agent's session
+transcript alone; `pane` reads the pane's screen through `herdr pane read`
+alone; `auto` reads the transcript and falls back to the pane on a miss — each
+dispatch pinned by a test that fails if the wrong source is consulted, or if
+none is. File and directory names are collected from `git status` and the last
+30 commits, split into path components rather than basenames alone, independent
+of `source`. The finished string is capped at `prompt_chars` characters on
+every path, including the files-only fallback taken when `source` cannot be
+resolved, proven by tests that fail when either cap is removed. The per-request
+log line carries only counts — which sources were attempted and whether each
+found something, file and conversation character counts, whether the string
+was truncated, and the reason when a pane read failed — never the string
+itself: a negative assertion against a distinctive fixture sentence fails if
+that guard is removed, checked on both places a `Collected` value reaches a log
+line. A miss on every source, an unresolved `[context] source` value, and a
+pane read that fails all still let the take complete; none of the three
+produces a panic or a silent failure.
+
+**What this does not establish.** Whether any of this changes what a real
+transcript sounds like. `Engine::transcribe`'s signature is unchanged by this
+issue, and the one caller of `bias::collect` — `daemon::take_bias` — discards
+its return value; nothing in this branch passes the assembled string to any
+recognition engine. So no test here, and no claim in this entry, says anything
+about a spoken take's output. That is issue #26's contribution, not this one's,
+and until it lands, "pull request" spoken in Russian still comes back as an
+unrelated Russian word — the measurement above, "Context and its effect on the
+transcript", is what this issue is building toward, not what it has reached.
+
+**What still needs a person, not a test.** Four things need a live herdr pane
+and a human, and remain undone until the owner runs them: that
+`herdr plugin log list --plugin haurylau.voice` shows one real `bias` line per
+take, carrying counts and no fragment of the conversation, on a real
+installation rather than a `StderrJournal` fixture; that
+`attempted=transcript:hit` reaches a real conversation under a real
+`$HOME/.claude/projects` tree, since every automated test here supplies its own
+fixture directory; that `attempted=pane:hit` under `source = "pane"` proves
+`herdr pane read`'s argument list against a live herdr —
+`argv_matches_the_contract_exactly` (`src/bias/pane.rs`) checks it against the
+prototype's contract, not against herdr itself, so a herdr release that renamed
+a flag would pass every test here and miss at runtime; and what discovery
+actually reports for a pane sitting in a git worktree with no session directory
+of its own, since the walk's ceiling is exercised here only against scratch
+repositories.
