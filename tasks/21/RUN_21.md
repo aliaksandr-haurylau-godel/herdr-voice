@@ -532,3 +532,66 @@ limit, on the take path, and until #26 lands it can block a take on a result
 nothing consumes. Issue #31 was opened for the order of assembly inside the
 cap — measured, with the numbers, and framed as a decision with evidence on
 both sides rather than a defect.
+
+## Gate S4, third pass
+
+```yaml
+gate:
+  stage: S4
+  artifact: the delta 643e30a..987388d alone (the round that fixed the second
+    pass's six findings)
+  reviewer: one pass, run directly rather than through a subagent, after the
+    tool assigned to it failed twice
+  verdict: READY
+  date: 2026-08-27
+  blocker: null
+```
+
+The two production-code changes in this delta hold up under mutation.
+`bias::collect` mutated to pass `None` as the repository root, even when a real
+one exists, turns two tests red. `transcript::find` mutated to ignore the
+`repository_root` parameter it is given turns `the_walk_stops_at_the_repository_root`
+red. Ordinary discovery still works with a real ceiling in place: a pane
+sitting at the root of a repository whose session directory exists finds it,
+and a pane inside a subdirectory of that repository walks up and finds it too
+— checked with a temporary test written for this pass and removed afterward.
+`daemon::files_only` calls `bias::files::collect`, the entry point that
+resolves its own root, not `collect_in` with an empty value. `git` runs exactly
+three times per call to `collect` — `rev-parse --show-toplevel` once,
+`status --porcelain` once, `log -30 --name-only` once — measured with a shim on
+`PATH` that logged every invocation, not reasoned about.
+
+The AC-9 leak guard added this round covers both output channels: folding the
+called program's stdout into `PaneError::Failed`'s rendered message turns the
+guard test red, and folding its stderr in does too. The two assertions in that
+test are both reachable — the leak guard runs first and the rendering
+assertion after, neither short-circuits the other.
+
+The four smaller claims all hold. The per-turn cut and the newline collapse are
+now proved separately by one fixture: removing the collapse alone leaves a
+newline inside the kept 300 characters, and removing the cut alone leaves the
+length wrong — each mutation reds only the assertion built for it.
+`why.contains("failed (3)")` cannot pass on an incidental digit: dropping the
+exit code from the rendering and substituting an unrelated string turns the
+test red. `docs/design.md`'s per-source dispatch section matches `src/bias.rs`
+exactly, source by source, including the miss behaviour for `transcript` and
+`pane`. `transcript::find`'s doc comment states both the bounded and the
+unbounded case, and `docs/decisions.md` records the same decision in the
+four-part form.
+
+No absolute path, home directory or private name appears anywhere in the
+delta's added lines.
+
+S4 is closed. Eighteen findings went through two full passes and one delta
+pass; all are fixed and none remain open. Next is S5: verify by hand and write
+`docs/evidence.md`, then the pull request.
+
+### A note on how this pass was run
+
+The subagent assigned to it (`oc-worker`, an OpenCode agent in a herdr pane)
+failed twice: once with an unrelated LSP-configuration crash mid-task, and once
+with what looked like a genuine model hang — twenty minutes with no new token
+and no response to an interrupt, while the process kept burning CPU. Both times
+the tracked worktree was checked and found untouched; nothing needed undoing
+either time. After the second failure this pass was run directly instead of
+delegating a third time.
