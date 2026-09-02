@@ -57,3 +57,24 @@ from a `Collected`, and `CommandError` carries the program name and stderr,
 never argv — so the design can uphold #21's rule without a new requirement.
 
 S1 is closed. Next is S2 Design.
+
+### S2 Design
+- artifact: `DESIGN_26.md`
+- produced: 2026-09-02
+
+`superpowers:brainstorming` names three paths, each ending in a live
+chat-approval gate; this run is async and overnight, so the design was written
+directly and closed the way S1 was — by the project's own gate (planner,
+`octoflow-reviewer-planner`) rather than a chat approval. The decision itself
+(the trait widens rather than the string arriving some other way) is exactly
+the kind `CLAUDE.md` delegates: "Всё остальное решай сам и записывай в
+`docs/decisions.md` с основанием."
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_26.md
+  reviewer: planner
+  verdict: null
+  date: null
+```
