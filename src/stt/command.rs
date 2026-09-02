@@ -12,7 +12,13 @@ use super::{Engine, EngineError};
 
 /// Replace the placeholders, and append the audio path when the list never asks
 /// for it — so a program that simply takes a file still works.
-pub fn render(argv: &[String], audio: &Path, model: Option<&Path>, language: &str) -> Vec<String> {
+pub fn render(
+    argv: &[String],
+    audio: &Path,
+    model: Option<&Path>,
+    language: &str,
+    bias: &str,
+) -> Vec<String> {
     let audio = audio.to_string_lossy();
     let model = model.map(|m| m.to_string_lossy().into_owned());
     let mut rendered: Vec<String> = argv
@@ -24,7 +30,11 @@ pub fn render(argv: &[String], audio: &Path, model: Option<&Path>, language: &st
             }
             // `auto` is substituted like any other value: it is what these programs
             // already take to mean "detect it".
-            out.replace("{language}", language)
+            out = out.replace("{language}", language);
+            // Unlike {audio}, a missing {prompt} placeholder is not force-appended:
+            // the bias string is an opt-in enhancement, not something the program
+            // cannot run without (AC-3).
+            out.replace("{prompt}", bias)
         })
         .collect();
     if !argv.iter().any(|argument| argument.contains("{audio}")) {
@@ -105,8 +115,14 @@ impl std::error::Error for CommandError {}
 const STDERR_LIMIT: usize = 400;
 
 impl Engine for CommandEngine {
-    fn transcribe(&self, audio: &Path) -> Result<String, EngineError> {
-        let rendered = render(&self.argv, audio, self.model.as_deref(), &self.language);
+    fn transcribe(&self, audio: &Path, bias: &str) -> Result<String, EngineError> {
+        let rendered = render(
+            &self.argv,
+            audio,
+            self.model.as_deref(),
+            &self.language,
+            bias,
+        );
         let (program, arguments) = rendered.split_first().ok_or(EngineError::NotConfigured)?;
 
         let output = Command::new(program).args(arguments).output();
@@ -176,6 +192,7 @@ mod tests {
             Path::new("/takes/one.wav"),
             Some(Path::new("/models/ggml-tiny.bin")),
             "en",
+            "",
         );
         assert_eq!(
             rendered,
@@ -198,13 +215,20 @@ mod tests {
             Path::new("/takes/one.wav"),
             None,
             "auto",
+            "",
         );
         assert_eq!(rendered, argv(&["prog", "-l", "auto", "/takes/one.wav"]));
     }
 
     #[test]
     fn a_list_that_never_asks_for_the_audio_gets_it_appended() {
-        let rendered = render(&argv(&["prog"]), Path::new("/takes/one.wav"), None, "auto");
+        let rendered = render(
+            &argv(&["prog"]),
+            Path::new("/takes/one.wav"),
+            None,
+            "auto",
+            "",
+        );
         assert_eq!(rendered, argv(&["prog", "/takes/one.wav"]));
     }
 
@@ -215,7 +239,7 @@ mod tests {
         // placeholder and never saw the audio.
         let engine = CommandEngine::new(argv(&["echo", "{audio}"]), None, "auto".to_string());
         let transcript = engine
-            .transcribe(Path::new("/takes/1787-0.wav"))
+            .transcribe(Path::new("/takes/1787-0.wav"), "")
             .expect("text");
         assert_eq!(transcript, "/takes/1787-0.wav");
     }
@@ -224,7 +248,9 @@ mod tests {
     fn a_list_with_no_placeholder_still_receives_the_take() {
         let engine = CommandEngine::new(argv(&["echo"]), None, "auto".to_string());
         assert_eq!(
-            engine.transcribe(Path::new("/takes/2.wav")).expect("text"),
+            engine
+                .transcribe(Path::new("/takes/2.wav"), "")
+                .expect("text"),
             "/takes/2.wav"
         );
     }
@@ -240,7 +266,7 @@ mod tests {
         );
         assert_eq!(
             engine
-                .transcribe(Path::new("/takes/one.wav"))
+                .transcribe(Path::new("/takes/one.wav"), "")
                 .expect("text"),
             "hello there",
             "surrounding whitespace is trimmed"
@@ -255,7 +281,7 @@ mod tests {
             "auto".to_string(),
         );
         let error = engine
-            .transcribe(Path::new("/takes/one.wav"))
+            .transcribe(Path::new("/takes/one.wav"), "")
             .expect_err("must fail");
         let message = error.to_string();
         assert!(
@@ -273,7 +299,7 @@ mod tests {
             "auto".to_string(),
         );
         let error = engine
-            .transcribe(Path::new("/takes/one.wav"))
+            .transcribe(Path::new("/takes/one.wav"), "")
             .expect_err("must fail");
         let message = error.to_string();
         assert!(message.contains("exit 3"), "got {message}");
@@ -284,8 +310,58 @@ mod tests {
     fn a_program_that_prints_nothing_is_not_an_empty_success() {
         let engine = CommandEngine::new(argv(&["true"]), None, "auto".to_string());
         let error = engine
-            .transcribe(Path::new("/takes/one.wav"))
+            .transcribe(Path::new("/takes/one.wav"), "")
             .expect_err("must fail");
         assert!(error.to_string().contains("no transcript"), "got {error}");
+    }
+
+    #[test]
+    fn the_prompt_placeholder_is_substituted() {
+        let rendered = render(
+            &argv(&["whisper-cli", "--prompt", "{prompt}", "{audio}"]),
+            Path::new("/takes/one.wav"),
+            None,
+            "auto",
+            "recent terms: pull request, worklog",
+        );
+        assert_eq!(
+            rendered,
+            argv(&[
+                "whisper-cli",
+                "--prompt",
+                "recent terms: pull request, worklog",
+                "/takes/one.wav"
+            ])
+        );
+    }
+
+    #[test]
+    fn a_list_with_no_prompt_placeholder_does_not_gain_one() {
+        // Unlike {audio}, an absent {prompt} is not force-appended: the bias
+        // string is an opt-in enhancement, not something the program cannot
+        // run without (AC-3).
+        let rendered = render(
+            &argv(&["whisper-cli", "{audio}"]),
+            Path::new("/takes/one.wav"),
+            None,
+            "auto",
+            "recent terms: pull request",
+        );
+        assert_eq!(rendered, argv(&["whisper-cli", "/takes/one.wav"]));
+    }
+
+    #[test]
+    fn an_empty_bias_substitutes_to_an_empty_string() {
+        let rendered = render(
+            &argv(&["whisper-cli", "--prompt", "{prompt}", "{audio}"]),
+            Path::new("/takes/one.wav"),
+            None,
+            "auto",
+            "",
+        );
+        assert_eq!(
+            rendered,
+            argv(&["whisper-cli", "--prompt", "", "/takes/one.wav"])
+        );
     }
 }
