@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use crate::bias;
 use crate::capture::{Recorder, Started};
 use crate::config;
 use crate::context;
@@ -45,13 +46,44 @@ pub fn needs_target_pane(command: &str) -> bool {
 /// run for `cancel` and for `doctor`, which is where somebody finds out what to fix.
 pub type Recognition = Result<Box<dyn Engine + Send + Sync>, String>;
 
-/// The four things resolved once, at daemon start, and needed everywhere a
-/// take can finish.
+/// Everything resolved once, at daemon start, and needed everywhere a take can
+/// finish.
 pub struct Runtime {
     pub recognition: Recognition,
+    /// `[context] source`, checked once — the same shape `recognition` has, for
+    /// the same reason: a configuration value that can be wrong is validated at
+    /// start and the `Result` consulted per take, never re-parsed
+    /// (`tasks/21/DESIGN_21.md`, section 2a, "why resolved once, not per take").
+    pub bias_source: Result<bias::Source, String>,
+    /// Where the known agent keeps its transcripts. Absent when the
+    /// environment names no home directory, which leaves the transcript source
+    /// nowhere to look — an ordinary miss, not a failure (design section 3).
+    pub transcript_root: Option<std::path::PathBuf>,
+    /// `[context]`'s three numeric keys, for the per-take bias string. Read
+    /// once with the rest of the configuration, never per take.
+    pub context: config::Context,
+    /// The herdr binary the pane source runs, resolved once from
+    /// `HERDR_BIN_PATH` the same way delivery resolves it.
+    pub herdr_binary: String,
     pub deliverer: Box<dyn crate::delivery::Deliverer>,
     pub delivery_settings: crate::delivery::Settings,
     pub journal: Box<dyn Journal>,
+}
+
+/// The two context fields `Runtime` holds, resolved from the loaded
+/// configuration and the environment. Separate from `start()` so that the
+/// resolution can be tested without binding a socket.
+pub fn bias_settings(
+    context: &config::Context,
+    vars: &config::Vars,
+) -> (Result<bias::Source, String>, Option<std::path::PathBuf>) {
+    let source = bias::source::resolve(&context.source);
+    let root = vars.home.as_ref().map(|home| {
+        std::path::PathBuf::from(home)
+            .join(".claude")
+            .join("projects")
+    });
+    (source, root)
 }
 
 pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Reply, Control) {
@@ -77,6 +109,7 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
                         recorder,
                         runtime,
                         pane,
+                        invocation.focused_pane_cwd.as_deref(),
                         invocation.focused_pane_agent.as_deref(),
                     ),
                     Control::Continue,
@@ -99,16 +132,169 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
 /// The pane is pinned here, when the take begins, and kept with it until delivery.
 /// Choosing it at the end would follow the focus: somebody speaks looking at one
 /// agent, switches while thinking, and the text lands in another.
-fn dictate(recorder: &Recorder, runtime: &Runtime, pane: &str, agent: Option<&str>) -> Reply {
-    match recorder.start(pane, agent) {
+///
+/// `cwd` and `agent` are the target pane's working directory and the agent
+/// running in it, read from the `Invocation` `answer` has already parsed — this
+/// function never parses the invocation context itself.
+fn dictate(
+    recorder: &Recorder,
+    runtime: &Runtime,
+    pane: &str,
+    cwd: Option<&str>,
+    agent: Option<&str>,
+) -> Reply {
+    match recorder.start(pane, cwd, agent) {
         Started::Began => Reply::Ok(format!("recording for {pane}")),
         Started::CouldNotStart(why) => Reply::Error(why),
         Started::PreviousFailure(why) => Reply::Error(why),
         Started::AlreadyRunning => match recorder.stop() {
             Err(why) => Reply::Error(why.to_string()),
-            Ok(take) => transcribe(runtime, &take),
+            Ok(take) => {
+                // Assembled here, where the take has just finished and
+                // recognition is about to run on it. The string itself goes
+                // nowhere yet: issue #26 hands it to the engine, and this
+                // issue's own contribution is that it exists, is capped, and
+                // is reported on without being written down
+                // (`tasks/21/DESIGN_21.md`, section 9).
+                take_bias(
+                    runtime,
+                    &take.target,
+                    take.cwd.as_deref(),
+                    take.agent.as_deref(),
+                );
+                transcribe(runtime, &take)
+            }
         },
     }
+}
+
+/// Assembles this take's bias string and writes one line about it — counts and
+/// flags only, never the string (AC-9, design section 8).
+///
+/// Returns the `Collected` so a test can assert on what was assembled while the
+/// log line is checked for what it must not contain. Never fails: an
+/// unresolved `[context] source` and a miss on every source both leave the take
+/// running on whatever was found (design section 2a).
+fn take_bias(
+    runtime: &Runtime,
+    pane: &str,
+    cwd: Option<&str>,
+    agent: Option<&str>,
+) -> bias::Collected {
+    let context = &runtime.context;
+    // An absent working directory is not a directory to look in: the
+    // conversation sources still run, the file-names component comes back
+    // empty.
+    let cwd = cwd.unwrap_or_default();
+    match &runtime.bias_source {
+        Ok(source) => {
+            let collected = bias::collect(bias::CollectInput {
+                source: *source,
+                cwd,
+                agent,
+                pane,
+                // No home directory means no transcript root, and an empty
+                // root matches no project directory — so the transcript
+                // source misses, which is an outcome this path already
+                // handles (design section 3).
+                transcript_root: runtime
+                    .transcript_root
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new("")),
+                herdr_binary: &runtime.herdr_binary,
+                conversation_turns: context.conversation_turns,
+                file_names: context.file_names,
+                prompt_chars: context.prompt_chars,
+            });
+            runtime
+                .journal
+                .write(&bias_line(&collected, context.prompt_chars));
+            collected
+        }
+        Err(why) => {
+            let collected = files_only(cwd, context);
+            runtime
+                .journal
+                .write(&bias_refused_line(why, &collected, context.prompt_chars));
+            collected
+        }
+    }
+}
+
+/// The bias string an unresolved `[context] source` still gets: file names
+/// alone, capped the same way, with no conversation component and nothing
+/// attempted — collecting file names does not depend on `source` (design
+/// section 2a, "the refusal's effect on the take").
+fn files_only(cwd: &str, context: &config::Context) -> bias::Collected {
+    let names = bias::files::collect(cwd, context.file_names);
+    let file_line = names.join(" ");
+    let raw = format!("{file_line}\n");
+    let raw_len = raw.chars().count();
+    bias::Collected {
+        bias: raw.chars().take(context.prompt_chars).collect(),
+        attempted: Vec::new(),
+        file_count: names.len(),
+        file_chars: file_line.chars().count(),
+        conversation_chars: 0,
+        truncated: raw_len > context.prompt_chars,
+        // No source was tried, so there is no failure to report.
+        pane_error: None,
+    }
+}
+
+/// The counts and flags a log line may carry about a bias string. Deliberately
+/// everything `Collected` holds except `bias` itself.
+fn bias_counts(collected: &bias::Collected, prompt_chars: usize) -> String {
+    let attempted = if collected.attempted.is_empty() {
+        "-".to_string()
+    } else {
+        collected
+            .attempted
+            .iter()
+            .map(|(source, found)| {
+                let name = match source {
+                    bias::Source::Transcript => "transcript",
+                    bias::Source::Pane => "pane",
+                    // `attempted` never carries Auto — it names the mode
+                    // `collect` ran under, not a call it made (design 2a).
+                    bias::Source::Auto => "auto",
+                };
+                format!("{name}:{}", if *found { "hit" } else { "miss" })
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    // The reason a pane read failed is not the bias string: it names the
+    // program and the exit code, which is the only thing that says what to
+    // fix. Newlines are collapsed because a journal line is one line.
+    let why = match &collected.pane_error {
+        Some(why) => format!(" pane_error={:?}", why.replace('\n', " ")),
+        None => String::new(),
+    };
+    format!(
+        "attempted={attempted} file_count={} file_chars={} conversation_chars={} \
+         prompt_chars={prompt_chars} truncated={}{why}",
+        collected.file_count,
+        collected.file_chars,
+        collected.conversation_chars,
+        collected.truncated
+    )
+}
+
+/// Written once per take, on the channel `request_line` and `context_note`
+/// already write to. It never contains `Collected.bias` — on a hit or a miss.
+pub fn bias_line(collected: &bias::Collected, prompt_chars: usize) -> String {
+    format!("bias {}", bias_counts(collected, prompt_chars))
+}
+
+/// Written once per take instead of `bias_line` when `[context] source` never
+/// resolved. It names the value that was refused and the three that are
+/// accepted, since that is what somebody has to fix.
+pub fn bias_refused_line(why: &str, collected: &bias::Collected, prompt_chars: usize) -> String {
+    format!(
+        "bias unavailable: {why}; the take runs on file names alone — {}",
+        bias_counts(collected, prompt_chars)
+    )
 }
 
 /// A finished take becomes text, and the text is delivered — or, if either
@@ -252,7 +438,8 @@ pub fn start() -> Result<Outcome, TransportError> {
     // The configuration is read once, here, and handed to the recorder's thread:
     // re-reading it per take would put file system access on the path that runs
     // while somebody is speaking.
-    let loaded = config::load(config::directory(&config::Vars::from_env()).as_deref());
+    let vars = config::Vars::from_env();
+    let loaded = config::load(config::directory(&vars).as_deref());
     let takes = transport::state_directory(&transport::Vars::from_env())
         .map(|state| state.join("takes"))
         .unwrap_or_else(|| std::path::PathBuf::from("takes"));
@@ -272,8 +459,20 @@ pub fn start() -> Result<Outcome, TransportError> {
         takes,
     );
 
+    // Not fatal either: an unrecognised `[context] source` costs the take its
+    // conversation component, never the recording (design section 2a, "the
+    // refusal's effect on the take").
+    let (bias_source, transcript_root) = bias_settings(&loaded.config.context, &vars);
+    if let Err(why) = &bias_source {
+        eprintln!("{why}");
+    }
+
     let runtime = Runtime {
         recognition,
+        bias_source,
+        transcript_root,
+        context: loaded.config.context,
+        herdr_binary: crate::delivery::herdr_binary(),
         deliverer: Box::new(crate::delivery::HerdrDeliverer::new()),
         delivery_settings: crate::delivery::Settings {
             submit: loaded.config.delivery.submit,
@@ -366,6 +565,10 @@ mod tests {
             recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
                 text.to_string()
             )))),
+            bias_source: Ok(bias::Source::Auto),
+            transcript_root: None,
+            context: crate::config::Context::default(),
+            herdr_binary: MISSING_HERDR.to_string(),
             deliverer: Box::new(crate::delivery::tests_support::FakeDeliverer::ok()),
             delivery_settings: crate::delivery::Settings {
                 submit: false,
@@ -373,6 +576,48 @@ mod tests {
             },
             journal: Box::new(StderrJournal),
         }
+    }
+
+    #[test]
+    fn the_bias_source_and_the_transcript_root_are_resolved_once_at_start() {
+        let home = std::env::temp_dir();
+        let vars = crate::config::Vars {
+            config_dir: None,
+            xdg_config_home: None,
+            home: Some(home.to_string_lossy().into_owned()),
+        };
+
+        let named = crate::config::Context {
+            source: "pane".to_string(),
+            ..Default::default()
+        };
+        let (source, root) = bias_settings(&named, &vars);
+        let mut runtime = fake_runtime("x");
+        runtime.bias_source = source;
+        runtime.transcript_root = root;
+        assert_eq!(runtime.bias_source, Ok(bias::Source::Pane));
+        assert_eq!(
+            runtime.transcript_root,
+            Some(home.join(".claude").join("projects"))
+        );
+
+        let refused = crate::config::Context {
+            source: "vosk".to_string(),
+            ..Default::default()
+        };
+        let (why, _) = bias_settings(&refused, &vars);
+        let why = why.expect_err("an unrecognised source must be refused");
+        assert!(why.contains("vosk"), "got {why:?}");
+
+        // No home, no root: the transcript source has nowhere to look, which
+        // section 3 of the design treats as an ordinary miss.
+        let homeless = crate::config::Vars {
+            config_dir: None,
+            xdg_config_home: None,
+            home: None,
+        };
+        let (_, absent) = bias_settings(&crate::config::Context::default(), &homeless);
+        assert_eq!(absent, None);
     }
 
     fn request(command: &str, context: &[u8]) -> Request {
@@ -408,6 +653,10 @@ mod tests {
             recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
                 "fix the worklog entry".to_string(),
             )))),
+            bias_source: Ok(bias::Source::Auto),
+            transcript_root: None,
+            context: crate::config::Context::default(),
+            herdr_binary: MISSING_HERDR.to_string(),
             deliverer: Box::new(deliverer),
             delivery_settings: crate::delivery::Settings {
                 submit,
@@ -526,6 +775,10 @@ mod tests {
             recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
                 "line one\nline two".to_string(),
             )))),
+            bias_source: Ok(bias::Source::Auto),
+            transcript_root: None,
+            context: crate::config::Context::default(),
+            herdr_binary: MISSING_HERDR.to_string(),
             deliverer: Box::new(fake),
             delivery_settings: crate::delivery::Settings {
                 submit: false,
@@ -580,6 +833,7 @@ mod tests {
             level_dbfs: -10.0,
             target: "w1\n:p2".to_string(),
             agent: None,
+            cwd: None,
         };
         let fake = crate::delivery::tests_support::FakeDeliverer::failing(
             crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
@@ -625,11 +879,15 @@ mod tests {
         answer(&request, &recorder, &runtime);
         answer(&request, &recorder, &runtime);
 
+        // Three lines now: the take's bias line comes first, before anything
+        // is transcribed or delivered. Its own content is asserted by
+        // `the_bias_line_carries_counts_and_never_the_conversation_it_was_built_from`.
         let lines = journal.0.lock().unwrap();
-        assert_eq!(lines.len(), 2, "got {lines:?}");
-        assert!(lines[0].contains("fix the worklog entry"), "got {lines:?}");
+        assert_eq!(lines.len(), 3, "got {lines:?}");
+        assert!(lines[0].starts_with("bias "), "got {lines:?}");
+        assert!(lines[1].contains("fix the worklog entry"), "got {lines:?}");
         assert!(
-            lines[1].contains("w1:p2") && lines[1].contains("pane_not_found"),
+            lines[2].contains("w1:p2") && lines[2].contains("pane_not_found"),
             "got {lines:?}"
         );
     }
@@ -696,9 +954,19 @@ mod tests {
         answer(&request, &recorder, &runtime);
         answer(&request, &recorder, &runtime);
 
-        let trace = trace.lock().unwrap();
+        // The take's bias line is written on this journal too, ahead of
+        // everything here; this test is about the delivering line's position
+        // relative to the delivery attempt, so the bias line is filtered out
+        // rather than pinned into the expected sequence.
+        let trace: Vec<String> = trace
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| !line.starts_with("journal:bias"))
+            .cloned()
+            .collect();
         assert_eq!(
-            *trace,
+            trace,
             vec![
                 "journal:delivering: fix the worklog entry".to_string(),
                 "deliver:insert:w1:p2".to_string(),
@@ -756,15 +1024,264 @@ mod tests {
         let lines = journal.0.lock().unwrap();
         assert_eq!(
             lines.len(),
-            3,
+            4,
             "the toast's own failure must be journaled too, got {lines:?}"
         );
-        assert!(lines[0].contains("fix the worklog entry"), "got {lines:?}");
+        assert!(lines[0].starts_with("bias "), "got {lines:?}");
+        assert!(lines[1].contains("fix the worklog entry"), "got {lines:?}");
         assert!(
-            lines[1].contains("w1:p2") && lines[1].contains("pane_not_found"),
+            lines[2].contains("w1:p2") && lines[2].contains("pane_not_found"),
             "got {lines:?}"
         );
-        assert!(lines[2].contains("toast"), "got {lines:?}");
+        assert!(lines[3].contains("toast"), "got {lines:?}");
+    }
+
+    /// A program that is certainly not there, so `bias::pane::read` misses
+    /// without a live herdr — the same fixture `bias`'s own tests use.
+    const MISSING_HERDR: &str = "/definitely/not/a/real/herdr-binary";
+
+    fn bias_scratch(tag: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("herdr-voice-daemon-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create scratch");
+        path
+    }
+
+    /// The one file in the scratch repository below. Distinctive enough that a
+    /// log line carrying the bias string can be caught doing it.
+    const REPOSITORY_FILE: &str = "kettlehouse.txt";
+
+    /// A scratch git repository, so the file-names component finds something
+    /// real without depending on the checkout the tests run in.
+    fn git_repo(dir: &std::path::Path) {
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.invalid"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            let status = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(&args)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        }
+        std::fs::write(dir.join(REPOSITORY_FILE), "content").unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-q", "-m", "add a file"]] {
+            let status = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(&args)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        }
+    }
+
+    /// A transcript root holding one turn, under the project directory `cwd`
+    /// slugifies to — the derivation `bias::transcript::find` performs.
+    fn transcript_fixture(root: &std::path::Path, cwd: &str, text: &str) {
+        let slug: String = cwd
+            .chars()
+            .map(|c| {
+                if c == '/' || c == '.' || c == '@' {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let project = root.join(slug);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("session.jsonl"),
+            format!(r#"{{"type":"user","message":{{"content":{text:?}}}}}"#),
+        )
+        .unwrap();
+    }
+
+    fn cwd_request(cwd: &std::path::Path) -> Request {
+        pane_request("w1:p2", cwd)
+    }
+
+    fn pane_request(pane: &str, cwd: &std::path::Path) -> Request {
+        request(
+            "dictate",
+            format!(
+                r#"{{"focused_pane_id":{pane:?},"focused_pane_cwd":{:?},"focused_pane_agent":"claude"}}"#,
+                cwd.to_string_lossy()
+            )
+            .as_bytes(),
+        )
+    }
+
+    #[test]
+    fn the_bias_line_carries_counts_and_never_the_conversation_it_was_built_from() {
+        // AC-9's proof, as `tasks/21/DESIGN_21.md` section 11 asks for it: a
+        // positive assertion that logging happened is not evidence the string
+        // was left out of it.
+        const SENTENCE: &str = "the kettle argues with the lighthouse about tuesday";
+        let cwd = bias_scratch("bias-log-cwd");
+        git_repo(&cwd);
+        let root = bias_scratch("bias-log-root");
+        transcript_fixture(&root, &cwd.to_string_lossy(), SENTENCE);
+
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.bias_source = Ok(bias::Source::Auto);
+        runtime.transcript_root = Some(root);
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+
+        let recorder = tone_recorder("bias-log");
+        let request = cwd_request(&cwd);
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        let lines = journal.0.lock().unwrap();
+        let line = lines
+            .iter()
+            .find(|line| line.starts_with("bias "))
+            .unwrap_or_else(|| panic!("no bias line, got {lines:?}"));
+        assert!(line.contains("attempted=transcript:hit"), "got {line:?}");
+        assert!(line.contains("file_chars="), "got {line:?}");
+        assert!(line.contains("conversation_chars="), "got {line:?}");
+        assert!(line.contains("prompt_chars=600"), "got {line:?}");
+        assert!(line.contains("truncated="), "got {line:?}");
+        assert!(
+            !lines.iter().any(|line| line.contains(SENTENCE)),
+            "the bias string must never reach the log, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_source_logs_the_configuration_error_and_still_biases_on_file_names() {
+        let cwd = bias_scratch("bias-refused-cwd");
+        git_repo(&cwd);
+
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = fake_runtime("x");
+        runtime.bias_source = crate::bias::source::resolve("vosk");
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+
+        let collected = take_bias(
+            &runtime,
+            "w1:p2",
+            Some(&cwd.to_string_lossy()),
+            Some("claude"),
+        );
+        assert!(collected.attempted.is_empty(), "got {collected:?}");
+        assert_eq!(collected.conversation_chars, 0);
+        assert!(collected.file_count > 0, "got {collected:?}");
+        assert!(
+            collected.bias.contains(REPOSITORY_FILE),
+            "got {collected:?}"
+        );
+
+        let lines = journal.0.lock().unwrap();
+        assert_eq!(lines.len(), 1, "got {lines:?}");
+        assert!(lines[0].contains("vosk"), "got {lines:?}");
+        assert!(lines[0].contains("file_count="), "got {lines:?}");
+        // AC-9 on this path too: the refusal's line carries a `Collected`
+        // whose `bias` holds the file names, and must still print none of it.
+        assert!(
+            !lines[0].contains(REPOSITORY_FILE),
+            "the bias string must never reach the log, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_files_only_bias_is_capped_at_prompt_chars_too() {
+        let cwd = bias_scratch("bias-refused-cap-cwd");
+        git_repo(&cwd);
+
+        let mut runtime = fake_runtime("x");
+        runtime.bias_source = crate::bias::source::resolve("vosk");
+        runtime.context.prompt_chars = 8;
+
+        let collected = take_bias(
+            &runtime,
+            "w1:p2",
+            Some(&cwd.to_string_lossy()),
+            Some("claude"),
+        );
+        assert!(collected.file_count > 0, "got {collected:?}");
+        assert_eq!(collected.bias.chars().count(), 8, "got {collected:?}");
+        assert!(collected.truncated, "got {collected:?}");
+    }
+
+    #[test]
+    fn the_bias_is_built_from_the_pane_the_take_was_pinned_to() {
+        // The same rule `Take::target` exists for: somebody speaks looking at
+        // one agent and switches while thinking. The text goes to the pane the
+        // take began in, and so must the context it is recognised with.
+        const SENTENCE: &str = "the kettle argues with the lighthouse about tuesday";
+        let pinned = bias_scratch("bias-pinned-cwd");
+        git_repo(&pinned);
+        let switched = bias_scratch("bias-switched-cwd");
+        let root = bias_scratch("bias-pinned-root");
+        transcript_fixture(&root, &pinned.to_string_lossy(), SENTENCE);
+
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.bias_source = Ok(bias::Source::Auto);
+        runtime.transcript_root = Some(root);
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+
+        let recorder = tone_recorder("bias-pinned");
+        // The take begins in one pane, and the focus has moved by the time the
+        // second keypress arrives.
+        answer(&pane_request("w1:p2", &pinned), &recorder, &runtime);
+        answer(&pane_request("w9:p9", &switched), &recorder, &runtime);
+
+        let lines = journal.0.lock().unwrap();
+        let line = lines
+            .iter()
+            .find(|line| line.starts_with("bias "))
+            .unwrap_or_else(|| panic!("no bias line, got {lines:?}"));
+        assert!(
+            line.contains("attempted=transcript:hit"),
+            "the bias must come from the pinned working directory, got {line:?}"
+        );
+        assert!(
+            !line.contains("file_count=0"),
+            "the pinned working directory is a repository, got {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_pane_read_that_fails_names_what_to_do_next_in_the_journal() {
+        let recorder = tone_recorder("bias-pane-why");
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.bias_source = Ok(bias::Source::Pane);
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        let lines = journal.0.lock().unwrap();
+        let line = lines
+            .iter()
+            .find(|line| line.starts_with("bias "))
+            .unwrap_or_else(|| panic!("no bias line, got {lines:?}"));
+        assert!(line.contains("attempted=pane:miss"), "got {line:?}");
+        assert!(
+            line.contains("HERDR_BIN_PATH"),
+            "a failed pane read must name what to do next, got {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_miss_on_every_source_still_lets_the_take_succeed() {
+        let recorder = tone_recorder("bias-miss");
+        let mut runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.bias_source = Ok(bias::Source::Auto);
+        // An empty root and a program that is not there: both sources miss.
+        runtime.transcript_root = Some(bias_scratch("bias-miss-root"));
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        let (reply, _) = answer(&request, &recorder, &runtime);
+        assert!(matches!(reply, Reply::Ok(_)), "got {reply:?}");
     }
 
     #[test]

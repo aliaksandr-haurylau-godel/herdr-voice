@@ -135,7 +135,10 @@ pub mod tests_support {
     }
 }
 
-fn herdr_binary() -> String {
+/// The herdr binary to run: whatever `HERDR_BIN_PATH` names, or `herdr` on the
+/// path. Every outward call to herdr resolves it here, so that a checkout
+/// pointed at a specific build reaches delivery and the pane read alike.
+pub fn herdr_binary() -> String {
     std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string())
 }
 

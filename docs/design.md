@@ -122,12 +122,21 @@ The model name and the spoken language are configuration, not code.
 
 Assembled from herdr and from the repository the target agent works in:
 
-- The last turns of that agent's conversation, read from its session transcript.
-  Machine turns — task notifications, system reminders, cross-session messages —
-  are filtered out; they carry nothing about speech.
+- The last turns of that agent's conversation, read from its session transcript,
+  each turn cut to its first 300 characters. Machine turns — task notifications,
+  system reminders, cross-session messages — are filtered out; they carry nothing
+  about speech.
 - Recently touched file and directory names, taken from `git status` and the last
   commits, from the repository root rather than the agent's subdirectory.
-- The git branch, the pane title and the agent kind.
+
+Those two are the whole of it. The git branch, the pane title and the agent kind
+are not collected.
+
+Where the conversation comes from is `[context] source`. `transcript` reads the
+session transcript and nothing else: when none is found, the take is biased on
+file names alone. `pane` reads the pane's screen through `herdr pane read` and
+never looks for a transcript. `auto`, the default, reads the transcript and
+falls back to the pane's screen when it finds none.
 
 The visible screen of a pane running a full-screen agent is deliberately **not**
 the main source: it is mostly frame. The conversation transcript carries the
@@ -227,6 +236,7 @@ skip_if_plain = true
 prompt_file = ""
 
 [context]
+source = "auto"            # auto | transcript | pane
 conversation_turns = 6
 file_names = 40
 prompt_chars = 600

@@ -9,6 +9,7 @@
 //! before the first feature lands.
 
 mod audio;
+mod bias;
 mod capture;
 mod client;
 mod config;
