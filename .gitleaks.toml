@@ -24,3 +24,13 @@ id = "corporate-mail"
 description = "Work email addresses"
 regex = '''[a-z0-9._%+-]+@[a-z0-9.-]+\.(com|net|org)\b(?i)(?:.*(employee|internal))?'''
 tags = ["policy", "mail"]
+
+  # example.com, example.net and example.org are reserved by RFC 2606 for
+  # documentation and testing; code is expected to write them without meaning a
+  # real address, so a fixture like `test@example.com` is not a corporate leak.
+  # Matched against the source line, not the extracted secret: the rule's own
+  # regex sometimes captures only a trailing fragment (e.g. "com") under RE2's
+  # leftmost-match semantics, which an allowlist keyed on the secret would miss.
+  [rules.allowlist]
+  regexTarget = "line"
+  regexes = ['''@example\.(com|net|org)\b''']
