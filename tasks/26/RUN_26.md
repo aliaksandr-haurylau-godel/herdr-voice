@@ -120,3 +120,28 @@ named `docs/design.md` as where `{prompt}` gets documented; corrected to name
 other three actually live. The decision itself (trait widens, no forced
 append) is unchanged, so this does not reopen the S2 gate — the same class of
 harmless correction as the `Recognition` type name fixed above.
+
+### S3 Plan
+- artifact: `PLAN_26.md`
+- produced: 2026-09-02
+
+Written directly at `tasks/26/PLAN_26.md`, per this repository's convention
+(not `docs/superpowers/plans/`, the skill's own default). Five tasks: widen
+the trait and `render` (Task 1), thread the string through the daemon (Task
+2), record the decision (Task 3), S4 review (Task 4), S5 verify plus the
+manual take (Task 5).
+
+Self-review caught one real gap before this went to gate: the first draft
+undercounted `src/stt/command.rs`'s existing test call sites needing an added
+argument — three `render(...)` calls and six `engine.transcribe(...)` calls,
+not four and two. Corrected and every call site named explicitly, by test
+function name, before committing.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_26.md
+  reviewer: implementer
+  verdict: null
+  date: null
+```
