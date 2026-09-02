@@ -121,3 +121,23 @@ one on top, since it introduced the file in the first place.
 Re-verified after the amendment: the tree has no leaks by content scan, the full
 range from `main` has no leaks by history scan, and the exact commit range that
 failed PR #32's check still passes.
+
+S4 is closed. Both gate passes' findings are resolved and reverified by running
+the tool, not by re-reading the reasoning. A third subagent pass was not spun up
+for the stray-file removal: it is mechanical, already checked three independent
+ways above, and the substantive fix had already cleared two full review rounds.
+
+## S5
+
+What this run can verify without a live GitHub Actions run: `gitleaks` 8.30.1
+against the exact commit range that failed PR #32 finds nothing; the same tool
+against a deliberately constructed line-sharing fixture confirms the false
+negative the first fix had and that the current one does not; `personal-home-path`
+and `internal-hosts` are unaffected, confirmed against a fixture exercising all
+three rules together. This is a CI-configuration fix with no plugin behaviour to
+run, so `docs/evidence.md` is not touched — the evidence for this run is the
+gitleaks output recorded above, and the final confirmation is GitHub's own
+`secrets and employer identifiers` check on the pull request, which this run
+cannot produce locally.
+
+S5 is closed on that basis. Next: open the pull request.
