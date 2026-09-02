@@ -236,28 +236,66 @@ mod tests {
 
     /// A program that stands in for herdr, the way `bias::pane`'s own tests do
     /// it — the pane source is only reachable through a program that runs, so
-    /// without one it goes untested.
-    fn scratch_script(tag: &str, contents: &str) -> PathBuf {
+    /// without one it goes untested. `stdout` and `stderr` are written
+    /// verbatim, byte for byte, so a caller controls line breaks and trailing
+    /// whitespace exactly; the script itself only replays them and exits with
+    /// `exit_code` — `src/delivery.rs`'s `recorder` is the same shape, for the
+    /// same reason: a script every platform CI checks can actually run.
+    fn scratch_dir(tag: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "herdr-voice-bias-collect-{tag}-{}.sh",
+            "herdr-voice-bias-collect-script-{tag}-{}",
             std::process::id()
         ));
-        std::fs::write(&path, contents).expect("write script");
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod script");
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create scratch");
         path
+    }
+
+    #[cfg(unix)]
+    fn scratch_script(tag: &str, stdout: &str, stderr: &str, exit_code: i32) -> PathBuf {
+        let dir = scratch_dir(tag);
+        let stdout_path = dir.join("stdout.txt");
+        let stderr_path = dir.join("stderr.txt");
+        std::fs::write(&stdout_path, stdout).expect("write stdout fixture");
+        std::fs::write(&stderr_path, stderr).expect("write stderr fixture");
+        let script = dir.join("script.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ncat {stdout_path:?}\ncat {stderr_path:?} >&2\nexit {exit_code}\n"),
+        )
+        .expect("write script");
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod script");
+        script
+    }
+
+    #[cfg(windows)]
+    fn scratch_script(tag: &str, stdout: &str, stderr: &str, exit_code: i32) -> PathBuf {
+        let dir = scratch_dir(tag);
+        let stdout_path = dir.join("stdout.txt");
+        let stderr_path = dir.join("stderr.txt");
+        std::fs::write(&stdout_path, stdout).expect("write stdout fixture");
+        std::fs::write(&stderr_path, stderr).expect("write stderr fixture");
+        let script = dir.join("script.cmd");
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\ntype \"{}\"\r\ntype \"{}\" 1>&2\r\nexit /b {exit_code}\r\n",
+                stdout_path.display(),
+                stderr_path.display()
+            ),
+        )
+        .expect("write script");
+        script
     }
 
     #[test]
     fn the_pane_source_reaches_the_bias_string() {
         let cwd = scratch("pane-hit-cwd");
         let transcript_root = scratch("pane-hit-root");
-        let herdr = scratch_script(
-            "pane-hit",
-            "#!/bin/sh\nprintf 'the kettle argues with the lighthouse\\n'\n",
-        );
+        let herdr = scratch_script("pane-hit", "the kettle argues with the lighthouse\n", "", 0);
         let input = CollectInput {
             source: Source::Pane,
             cwd: cwd.to_str().unwrap(),
@@ -287,7 +325,9 @@ mod tests {
         let transcript_root = scratch("auto-pane-root");
         let herdr = scratch_script(
             "auto-pane",
-            "#!/bin/sh\nprintf 'the kettle argues with the lighthouse\\n'\n",
+            "the kettle argues with the lighthouse\n",
+            "",
+            0,
         );
         let input = CollectInput {
             source: Source::Auto,
@@ -324,8 +364,9 @@ mod tests {
         // a program that fails is as likely to put them on standard error.
         let herdr = scratch_script(
             "pane-fail",
-            "#!/bin/sh\nprintf 'the kettle argues with the lighthouse\\n'\n\
-             printf 'the kettle argues with the lighthouse\\n' >&2\nexit 3\n",
+            "the kettle argues with the lighthouse\n",
+            "the kettle argues with the lighthouse\n",
+            3,
         );
         let input = CollectInput {
             source: Source::Pane,
@@ -359,7 +400,7 @@ mod tests {
         let transcript_root = scratch("pane-empty-root");
         // Blank lines only: the read succeeds and the filter leaves nothing,
         // which is a miss — the same as no pane at all.
-        let herdr = scratch_script("pane-empty", "#!/bin/sh\nprintf '   \\n\\n'\n");
+        let herdr = scratch_script("pane-empty", "   \n\n", "", 0);
         let input = CollectInput {
             source: Source::Pane,
             cwd: cwd.to_str().unwrap(),

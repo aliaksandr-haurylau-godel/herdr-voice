@@ -89,22 +89,60 @@ pub fn read(pane: &str, lines: usize, binary: &str) -> Result<String, PaneError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use std::path::PathBuf;
 
-    fn scratch_script(tag: &str, contents: &str) -> PathBuf {
+    /// `stdout` and `stderr` are written verbatim to a fixture file each, and
+    /// the script only replays them and exits with `exit_code` — the same
+    /// shape as `src/delivery.rs`'s `recorder`, so a script every platform CI
+    /// checks can actually run, not just this one.
+    fn scratch_dir(tag: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "herdr-voice-bias-pane-{tag}-{}.sh",
+            "herdr-voice-bias-pane-script-{tag}-{}",
             std::process::id()
         ));
-        let mut file = std::fs::File::create(&path).expect("create script");
-        file.write_all(contents.as_bytes()).expect("write script");
-        drop(file);
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod script");
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create scratch");
         path
+    }
+
+    #[cfg(unix)]
+    fn scratch_script(tag: &str, stdout: &str, stderr: &str, exit_code: i32) -> PathBuf {
+        let dir = scratch_dir(tag);
+        let stdout_path = dir.join("stdout.txt");
+        let stderr_path = dir.join("stderr.txt");
+        std::fs::write(&stdout_path, stdout).expect("write stdout fixture");
+        std::fs::write(&stderr_path, stderr).expect("write stderr fixture");
+        let script = dir.join("script.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ncat {stdout_path:?}\ncat {stderr_path:?} >&2\nexit {exit_code}\n"),
+        )
+        .expect("write script");
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod script");
+        script
+    }
+
+    #[cfg(windows)]
+    fn scratch_script(tag: &str, stdout: &str, stderr: &str, exit_code: i32) -> PathBuf {
+        let dir = scratch_dir(tag);
+        let stdout_path = dir.join("stdout.txt");
+        let stderr_path = dir.join("stderr.txt");
+        std::fs::write(&stdout_path, stdout).expect("write stdout fixture");
+        std::fs::write(&stderr_path, stderr).expect("write stderr fixture");
+        let script = dir.join("script.cmd");
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\ntype \"{}\"\r\ntype \"{}\" 1>&2\r\nexit /b {exit_code}\r\n",
+                stdout_path.display(),
+                stderr_path.display()
+            ),
+        )
+        .expect("write script");
+        script
     }
 
     #[test]
@@ -120,20 +158,14 @@ mod tests {
 
     #[test]
     fn output_is_filtered_and_line_capped() {
-        let script = scratch_script(
-            "filter",
-            "#!/bin/sh\nprintf 'line one   \\n\\n   \\nline two\\n'\n",
-        );
+        let script = scratch_script("filter", "line one   \n\n   \nline two\n", "", 0);
         let result = read("w1:p2", 80, script.to_str().unwrap()).expect("ok");
         assert_eq!(result, "line one\nline two");
     }
 
     #[test]
     fn the_line_cap_is_the_one_the_caller_asked_for() {
-        let script = scratch_script(
-            "line-cap",
-            "#!/bin/sh\nprintf 'one\\ntwo\\nthree\\nfour\\nfive\\n'\n",
-        );
+        let script = scratch_script("line-cap", "one\ntwo\nthree\nfour\nfive\n", "", 0);
         let result = read("w1:p2", 2, script.to_str().unwrap()).expect("ok");
         assert_eq!(result, "four\nfive");
     }
@@ -153,7 +185,7 @@ mod tests {
 
     #[test]
     fn a_nonzero_exit_names_the_code() {
-        let script = scratch_script("fail", "#!/bin/sh\nexit 3\n");
+        let script = scratch_script("fail", "", "", 3);
         let error = read("w1:p2", 80, script.to_str().unwrap()).expect_err("err");
         match &error {
             PaneError::Failed { code, .. } => assert_eq!(code, "3"),
