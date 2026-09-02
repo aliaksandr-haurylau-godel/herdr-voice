@@ -151,18 +151,17 @@ fn dictate(
             Err(why) => Reply::Error(why.to_string()),
             Ok(take) => {
                 // Assembled here, where the take has just finished and
-                // recognition is about to run on it. The string itself goes
-                // nowhere yet: issue #26 hands it to the engine, and this
-                // issue's own contribution is that it exists, is capped, and
-                // is reported on without being written down
-                // (`tasks/21/DESIGN_21.md`, section 9).
-                take_bias(
+                // recognition is about to run on it. The collected string is
+                // reported on without being written down
+                // (`tasks/21/DESIGN_21.md`, section 9), then handed to the
+                // engine below (issue #26).
+                let collected = take_bias(
                     runtime,
                     &take.target,
                     take.cwd.as_deref(),
                     take.agent.as_deref(),
                 );
-                transcribe(runtime, &take)
+                transcribe(runtime, &take, &collected.bias)
             }
         },
     }
@@ -300,7 +299,7 @@ pub fn bias_refused_line(why: &str, collected: &bias::Collected, prompt_chars: u
 /// A finished take becomes text, and the text is delivered — or, if either
 /// step fails, the reply is a Reply::Error naming why and what to do next
 /// (client::outcome maps Reply::Ok to exit 0, Reply::Error to exit 1).
-fn transcribe(runtime: &Runtime, take: &crate::capture::Take) -> Reply {
+fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> Reply {
     let engine = match &runtime.recognition {
         Ok(engine) => engine,
         // The take is on disk and named, so nothing is lost by the engine being
@@ -312,7 +311,7 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take) -> Reply {
             ))
         }
     };
-    let text = match engine.transcribe(&take.path) {
+    let text = match engine.transcribe(&take.path, bias) {
         Ok(text) => text,
         Err(why) => {
             return Reply::Error(format!(
@@ -839,7 +838,7 @@ mod tests {
             crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
         );
         let runtime = runtime_with(fake, false);
-        let reply = transcribe(&runtime, &take);
+        let reply = transcribe(&runtime, &take, "");
         let text = match reply {
             Reply::Error(text) => text,
             other => panic!("expected Reply::Error, got {other:?}"),
@@ -1246,6 +1245,29 @@ mod tests {
             !line.contains("file_count=0"),
             "the pinned working directory is a repository, got {line:?}"
         );
+    }
+
+    #[test]
+    fn the_collected_bias_string_reaches_the_engine() {
+        let cwd = bias_scratch("bias-to-engine-cwd");
+        git_repo(&cwd);
+
+        let (fake, received) =
+            crate::stt::tests_support::CapturingFake::new(Ok("a transcript".to_string()));
+        let mut runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.recognition = Ok(Box::new(fake));
+
+        let recorder = tone_recorder("bias-to-engine");
+        let request = pane_request("w1:p2", &cwd);
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        let bias = received
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the engine was called");
+        assert!(bias.contains(REPOSITORY_FILE), "got {bias:?}");
     }
 
     #[test]
