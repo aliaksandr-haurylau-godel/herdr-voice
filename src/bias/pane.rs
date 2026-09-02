@@ -38,13 +38,17 @@ pub enum PaneError {
 
 impl fmt::Display for PaneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Quoted by hand, not with `{program:?}`: Debug escapes a backslash to
+        // a doubled one, which turns a Windows path into text nobody typed —
+        // `program` is quoted for readability, not re-parsed, so plain
+        // interpolation keeps it exactly as given.
         match self {
             PaneError::NotFound { program } => write!(
                 f,
-                "cannot run {program:?}; install herdr, or set HERDR_BIN_PATH to it"
+                "cannot run \"{program}\"; install herdr, or set HERDR_BIN_PATH to it"
             ),
             PaneError::Failed { program, code } => {
-                write!(f, "{program:?} failed ({code})")
+                write!(f, "\"{program}\" failed ({code})")
             }
         }
     }
