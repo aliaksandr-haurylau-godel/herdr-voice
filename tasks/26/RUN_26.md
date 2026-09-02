@@ -36,3 +36,24 @@ gate:
   verdict: null
   date: null
 ```
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_26.md
+  reviewer: designer
+  verdict: READY
+  date: 2026-09-02
+```
+
+Every as-is citation checked and held, with two line-range corrections applied
+below: `CommandEngine` is `src/stt/command.rs:36-40`, not `34-38`; `render` is
+`src/stt/command.rs:15-34`, not `14-31`. Content behind both is as described.
+
+Noted by the reviewer, not a gate question: the AC does not require the
+rendered argument list to stay off the journal, but nothing in the daemon
+journals argv today — `bias_line`/`bias_refused_line` are the only lines built
+from a `Collected`, and `CommandError` carries the program name and stderr,
+never argv — so the design can uphold #21's rule without a new requirement.
+
+S1 is closed. Next is S2 Design.
