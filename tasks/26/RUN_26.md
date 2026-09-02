@@ -200,3 +200,29 @@ Mutations run on a disposable worktree, reviewed worktree confirmed untouched
 before and after, full suite green throughout.
 
 S4 is closed. Next is S5: verify by test suite, then by a spoken take.
+
+## Gate S5
+
+```yaml
+gate:
+  stage: S5
+  artifact: docs/evidence.md, "The bias string reaches the engine, in argument
+    lists a test can inspect"
+  verdict: pass, with one criterion pending
+  date: 2026-09-03
+  platform: macOS 26.6.2, Rust 1.97.1
+```
+
+Fresh run on `feat/26-bias-to-engine` at `8275dcd`: `cargo test` — 213 passed,
+0 failed; `cargo clippy --all-targets -- -D warnings` — clean; `cargo fmt
+--check` — clean; `python3 scripts/check_manifest.py` — 11 entries, all
+commands known.
+
+AC-1 through AC-6 and AC-8 are established by the test suite, stated in the
+evidence entry with what each test proves and what mutation catches its
+absence. AC-7 — the spoken take — is recorded as **pending, owned by the
+owner**: this session has no microphone. The entry names exactly what to run
+and what result to compare against.
+
+S5 is closed for what a test suite can establish. Next: the pull request for
+#26, with AC-7 left open in the PR description for the owner to close.
