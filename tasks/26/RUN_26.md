@@ -108,3 +108,15 @@ first, `command::render` and the daemon threading follow in parallel, the docs
 entries after, the manual take last.
 
 S2 is closed. Next is S3 Plan.
+
+### Correction to DESIGN_26.md, found while preparing S3
+
+`docs/design.md` does not document the `{audio}`/`{model}`/`{language}`
+placeholder set at all — its §7 configuration table has no `[stt] command` key
+in it, and the placeholders are recorded only in `docs/decisions.md`'s entry
+for `[stt] command`'s introduction (2026-08-25, #13). `DESIGN_26.md`'s §2 table
+named `docs/design.md` as where `{prompt}` gets documented; corrected to name
+`docs/decisions.md`'s own entry for this issue instead, which is where the
+other three actually live. The decision itself (trait widens, no forced
+append) is unchanged, so this does not reopen the S2 gate — the same class of
+harmless correction as the `Recognition` type name fixed above.

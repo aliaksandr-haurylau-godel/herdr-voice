@@ -59,8 +59,7 @@ is called, for no case the codebase has today.
 | `src/stt.rs` | `Engine::transcribe` gains `bias: &str`. Doc comment at the top corrected (bias is now a second thing that varies per take). `tests_support::Fake` gains the parameter; see §4. |
 | `src/stt/command.rs` | `CommandEngine::transcribe` passes `bias` through. `render` gains `bias: &str` and substitutes `{prompt}` by name, the same way `{model}` and `{language}` are substituted — no forced append (AC-3). |
 | `src/daemon.rs` | `dictate` keeps `take_bias`'s return (currently discarded, `src/daemon.rs:159-164`) and passes `&collected.bias` to `transcribe`. `transcribe` gains a `bias: &str` parameter and passes it to `engine.transcribe(&take.path, bias)`. |
-| `docs/design.md` | The `{audio}`/`{model}`/`{language}` placeholder list gains `{prompt}`, stated the same way the other three are. |
-| `docs/decisions.md` | This section's decision (trait widens, no forced append) recorded in the four-part form, since it is mine to make and record per the project's standing delegation. |
+| `docs/decisions.md` | The placeholder set is not documented in `docs/design.md` at all — `docs/design.md`'s §7 config table has no `[stt] command` key, and `{audio}`/`{model}`/`{language}` are recorded only in `docs/decisions.md`'s entry for `[stt] command`'s introduction (2026-08-25, #13). This issue's own decision entry (trait widens, no forced append) states that `{prompt}` joins those three, rather than adding a fourth place placeholders are documented. |
 
 Nothing else implements `Engine` today — `resolve_with` (`src/stt.rs:105-135`)
 returns `EngineError::NotBuilt` for `candle` and `http` directly, without
