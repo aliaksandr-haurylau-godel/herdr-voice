@@ -628,3 +628,31 @@ session directory of its own. None of the four can be done from this session —
 they wait on the owner, at a keyboard, with a live herdr.
 
 S5 is closed. Next: the pull request for #21.
+
+## Two defects found only by CI, after S5
+
+Neither is a design or acceptance-criteria question — both are cross-platform
+bugs in test code and one `Display` impl, invisible on this machine and caught
+only because `windows-latest` actually ran the suite.
+
+**The fake-herdr test double was a `#!/bin/sh` script with a unix chmod call.**
+`cargo clippy --all-targets` compiles every test target, and
+`std::os::unix::fs::PermissionsExt` does not exist on Windows —
+`error[E0433]: cannot find "unix" in "os"` on every `windows-latest` job,
+blocking compilation entirely. Fixed by porting `scratch_script` to the shape
+`src/delivery.rs`'s `recorder` already uses: a `stdout`/`stderr` pair written to
+fixture files byte for byte, replayed by a `.sh` script on Unix and a `.cmd`
+script on Windows, so one call site works on both. Commit `13508d1`.
+
+**`PaneError`'s `Display` quoted the failed program with `{program:?}`.** Debug
+formatting escapes a backslash to a doubled one, so on Windows the rendered
+message named a path nobody typed, and the one test asserting the raw path is a
+substring of that message failed there alone — the only place this diff
+actually exercised that rendering on Windows, since compilation never reached
+it before. Fixed by quoting the program by hand instead of with Debug. Commit
+`c7ce795`.
+
+Both fixed, all four gates re-run and green on macOS, and CI is green on
+`ubuntu-latest`, `macos-latest` and `windows-latest`, plus `plugin manifest` and
+`secrets and employer identifiers`. PR #32 is `MERGEABLE`, `mergeStateStatus:
+CLEAN`.
