@@ -145,3 +145,21 @@ gate:
   verdict: null
   date: null
 ```
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_26.md
+  reviewer: implementer
+  verdict: READY
+  date: 2026-09-02
+  questions: []
+  blocker: null
+```
+
+Every citation checked and held, including the corrected call-site count from
+self-review (three `render(...)` calls, six `engine.transcribe(...)` calls,
+each verified by line number). `CapturingFake`'s spec is fully self-contained;
+nothing to invent.
+
+S3 is closed. Next is S4 Implement.
