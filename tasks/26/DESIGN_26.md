@@ -37,9 +37,10 @@ system enforces it. It also has no answer for `Send + Sync` without a lock
 around a plain `String` field, for no benefit over a parameter.
 
 **Daemon builds the final command line itself, bypassing the trait for the
-`command` engine specifically.** Rejected. `Runtime.recognition` is
-`Result<Box<dyn Engine + Send + Sync>, EngineError>` (`src/daemon.rs:52` and
-`451`) precisely so the daemon does not know which engine it holds. A path that
+`command` engine specifically.** Rejected. `Runtime.recognition` is a
+`Recognition`, `type Recognition = Result<Box<dyn Engine + Send + Sync>, String>`
+(`src/daemon.rs:47`, field at `52`, built at `451`), precisely so the daemon
+does not know which engine it holds. A path that
 only works for `command` and leaves `candle`/`http` (#15, #16) to invent their
 own would be exactly the retrofit AC_26's requirement 4 exists to avoid.
 
@@ -93,7 +94,12 @@ substitution — no special case needed.
 
 `tests_support::Fake` (`src/stt.rs:143-152`) gains the `bias: &str` parameter
 and ignores it, matching its existing treatment of `_audio` — it already
-returns a canned `Result` regardless of what it is asked to transcribe.
+returns a canned `Result` regardless of what it is asked to transcribe. It is
+constructed at three call sites in `src/daemon.rs`'s test module (`565`,
+`653`, `775`), each of which the widened signature reaches mechanically. A
+fourth site, `src/daemon.rs:842`, calls the private `transcribe` function
+directly and needs its own call site updated the same way — noted by the S2
+gate so the plan does not miss it.
 
 AC-1 asks for something end-to-end observable: that the *real* collected bias
 string reaches the engine for a real take, not only that `command::render`
