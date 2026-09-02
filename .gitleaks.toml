@@ -24,3 +24,15 @@ id = "corporate-mail"
 description = "Work email addresses"
 regex = '''[a-z0-9._%+-]+@[a-z0-9.-]+\.(com|net|org)\b(?i)(?:.*(employee|internal))?'''
 tags = ["policy", "mail"]
+
+  # example.com, example.net and example.org are reserved by RFC 2606 for
+  # documentation and testing; code is expected to write them without meaning a
+  # real address, so a fixture like `test@example.com` is not a corporate leak.
+  # Matched against each match's own span, not the whole source line: gitleaks
+  # reports the rule's first capture group as the leaked secret when none is
+  # named, and this rule's group 1 is only "(com|net|org)" — an allowlist keyed
+  # on the source line would silently clear a real address sharing a line with
+  # an example.com one, which "match" does not.
+  [rules.allowlist]
+  regexTarget = "match"
+  regexes = ['''@example\.(com|net|org)\b''']
