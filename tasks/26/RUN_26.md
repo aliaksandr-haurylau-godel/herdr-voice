@@ -163,3 +163,40 @@ each verified by line number). `CapturingFake`'s spec is fully self-contained;
 nothing to invent.
 
 S3 is closed. Next is S4 Implement.
+
+## Gate S4
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff on feat/26-bias-to-engine since 7dab991
+  reviewer: one review, mutation-testing both load-bearing behaviors
+  verdict: READY
+  date: 2026-09-03
+  blocker: null
+```
+
+185 lines across `src/daemon.rs`, `src/stt.rs`, `src/stt/command.rs` and one row
+in `docs/decisions.md`. Both behaviors the design depends on were mutated and
+caught: force-appending the bias string when `{prompt}` is absent turns
+`a_list_with_no_prompt_placeholder_does_not_gain_one` red, and having `dictate`
+pass an empty string instead of `collected.bias` turns
+`the_collected_bias_string_reaches_the_engine` red.
+
+Ten checks, all clean: no forced append anywhere else in the diff; the string
+reaches the engine from the same take `take_bias` and `transcribe` share
+inside one `Ok(take) => { ... }` arm, with no staleness path; no new place logs
+a rendered argument list or the bias string, and the pre-existing
+called-program's-own-`stderr` risk stays exactly as scoped out in
+`DESIGN_26.md` §5; an empty bias substitutes as an ordinary no-op; every
+existing test call site updated for the widened signatures kept its original
+assertion rather than being weakened to compile; the reworded comment above
+`take_bias`'s call site states what the code now does and drops nothing that
+made it inaccurate; no new panic path outside test code; no absolute path or
+private name anywhere in the diff; `docs/decisions.md`'s new row matches the
+mutation-tested behavior; every behavioral change has a direct test.
+
+Mutations run on a disposable worktree, reviewed worktree confirmed untouched
+before and after, full suite green throughout.
+
+S4 is closed. Next is S5: verify by test suite, then by a spoken take.
