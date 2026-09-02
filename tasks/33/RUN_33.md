@@ -93,3 +93,31 @@ Also confirmed by the gate, independently, and requiring no change: the
 allowlist regex itself does not sweep in `notexample.com`-style domains; a real
 employer registered under an RFC 2606 reserved domain is not a real risk;
 `personal-home-path` and `internal-hosts` are untouched.
+
+## Gate S4, second pass
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff of fix/33-leak-gate-example-domain against main
+  reviewer: superpowers:requesting-code-review
+  verdict: QUESTIONS
+  date: 2026-09-02
+  blocker: null
+```
+
+The first finding is fixed and reproduced independently: the gate built its own
+line-sharing fixture, confirmed the old target cleared it entirely and the new
+one catches the real address while excluding the fixture. Its own read of the
+JSON report's `Secret` field also confirmed the corrected mechanism directly.
+
+One new finding, mine rather than the gate's own review target: a scratch file
+`.gitleaks-match-test.toml`, made while testing the fix by hand, was swept into
+the commit by `git add -A` and left in the tree — referenced nowhere, and still
+carrying the retracted explanation the main file's comment had already been
+rewritten to correct. Removed by amending the commit rather than adding a third
+one on top, since it introduced the file in the first place.
+
+Re-verified after the amendment: the tree has no leaks by content scan, the full
+range from `main` has no leaks by history scan, and the exact commit range that
+failed PR #32's check still passes.
