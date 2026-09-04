@@ -298,3 +298,72 @@ merged (`transcribe` still takes no `bias` parameter), so Task 7's "not
 merged" branch is the one that applies.
 
 S3 is closed after three rounds. Next is S4 Implement.
+
+## Gate S4
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff on feat/36-rewrite-http-command since 7dab991
+  reviewer: two independent reviews, one hunting defects by mutation, one
+    checking conformance and real behaviour against a live local server
+  verdict: QUESTIONS
+  date: 2026-09-04
+  blocker: null
+```
+
+1142 insertions across `src/rewrite.rs`, `src/rewrite/command.rs`,
+`src/rewrite/http.rs`, `src/rewrite/skip.rs`, `src/daemon.rs`, `src/doctor.rs`,
+`src/config.rs`, `src/main.rs`, `Cargo.toml`, `docs/decisions.md`. All four
+gates green, 242 tests, 12 full-suite reruns plus 20 targeted `rewrite::`
+reruns at 16 threads with zero flakes — the implementer's fix for the test
+double's original intermittent failure (draining the request fully before
+responding) holds.
+
+No correctness defect confirmed. Both reviews mutation-tested the load-bearing
+behaviors and everything held: the tell-once `AtomicBool` (both
+always-notify and never-notify mutations caught, and `swap`'s own atomicity
+rules out the two-threads-both-notify race the daemon's one-thread-per-
+connection model would otherwise risk); `{transcript}` forced /`{bias}` never
+forced in `rewrite::command`; the skip heuristic's three checks, each caught
+by a distinct test with no accidental short-circuit — including confirmation
+that the Latin-loanword masking bug the S3 gate found in the *plan* was
+genuinely fixed in the *code*, not just the document; `doctor::rewrite_finding`
+reporting `agent` as `Missing` unconditionally, by construction; no leak of
+the transcript, the bias string or a rewritten transcript into any new log or
+error path; no panic path in the diff's new production code; the public-
+repository rule; and every pre-existing test the plan required to change was
+updated meaningfully, not weakened to compile.
+
+A live check found something worth recording separately from the gate: Ollama
+is installed and running on this machine right now, with `gemma4:latest`
+loaded, and a reviewer's ad hoc, uncommitted check drove the real compiled
+`HttpEngine` and `CommandEngine` against it — both restored "мерж реквест" /
+"пул реквест" to "merge request" / "pull request" in a real round trip. Not
+recorded as evidence (ad hoc, not committed, not the owner's own run per
+AC-10's wording) — but it means AC-10's live check can happen on this machine
+directly, without needing separate audio/microphone access the way #21's and
+#26's manual steps did.
+
+### Sent back for fixing
+
+1. **AC-5 (skip means the engine is never called) has no test at the
+   `daemon::transcribe` level.** `rewrite::skip::plain` is well tested in
+   isolation, but every daemon-level test either uses a long string
+   ("so the skip heuristic never applies here", by its own comment) or the
+   canned recognition text `"fix the worklog entry"`, which is all-Latin and
+   so never actually skips regardless of whether the wiring is even present.
+   Add a daemon-level test with a short, plain, no-context-name transcript and
+   a spy `Engine` that panics or records a call if `.rewrite()` is ever
+   invoked, proving the skip really does bypass the engine, not just that
+   `plain()` returns `true` in isolation.
+2. **Two `rewrite::http` branches have zero test coverage.** A non-2xx
+   response (`ureq::Error::Status`) and a 200 response whose JSON is
+   well-formed but lacks `choices`/`message`/`content` are both handled
+   correctly in the code (neither panics) but neither is exercised by any
+   test. Add one test per branch using the same scratch-`TcpListener` double
+   the existing tests already use.
+
+Neither finding blocks on a design or scope question — both are additional
+tests against already-correct code, assignable back to the implementer
+directly.
