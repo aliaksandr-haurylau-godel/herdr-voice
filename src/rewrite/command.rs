@@ -19,7 +19,10 @@ pub fn render(argv: &[String], transcript: &str, bias: &str) -> Vec<String> {
             out.replace("{bias}", bias)
         })
         .collect();
-    if !argv.iter().any(|argument| argument.contains("{transcript}")) {
+    if !argv
+        .iter()
+        .any(|argument| argument.contains("{transcript}"))
+    {
         rendered.push(transcript.to_string());
     }
     rendered
@@ -151,7 +154,13 @@ mod tests {
         );
         assert_eq!(
             rendered,
-            argv(&["prog", "--fix", "hello there", "--context", "recent terms: pull request"])
+            argv(&[
+                "prog",
+                "--fix",
+                "hello there",
+                "--context",
+                "recent terms: pull request"
+            ])
         );
     }
 
@@ -163,7 +172,11 @@ mod tests {
 
     #[test]
     fn a_list_with_no_bias_placeholder_does_not_gain_one() {
-        let rendered = render(&argv(&["prog", "{transcript}"]), "hello there", "recent terms");
+        let rendered = render(
+            &argv(&["prog", "{transcript}"]),
+            "hello there",
+            "recent terms",
+        );
         assert_eq!(rendered, argv(&["prog", "hello there"]));
     }
 
@@ -179,7 +192,10 @@ mod tests {
         let engine = CommandEngine::new(argv(&["definitely-not-a-program-here"]));
         let error = engine.rewrite("hello there", "").expect_err("must fail");
         let message = error.to_string();
-        assert!(message.contains("definitely-not-a-program-here"), "got {message}");
+        assert!(
+            message.contains("definitely-not-a-program-here"),
+            "got {message}"
+        );
         assert!(message.contains("PATH"), "got {message}");
     }
 
@@ -187,6 +203,9 @@ mod tests {
     fn a_program_that_prints_nothing_is_not_an_empty_success() {
         let engine = CommandEngine::new(argv(&["true"]));
         let error = engine.rewrite("hello there", "").expect_err("must fail");
-        assert!(error.to_string().contains("no rewritten text"), "got {error}");
+        assert!(
+            error.to_string().contains("no rewritten text"),
+            "got {error}"
+        );
     }
 }
