@@ -112,3 +112,37 @@ covers only the `"http"`/`"command"` branch. The design should decide how
 built engines.
 
 S1 is closed. Next is S2 Design.
+
+### S2 Design
+- artifact: `DESIGN_36.md`
+- produced: 2026-09-04
+
+Written directly, per this run's own precedent from #26's S2 (async/overnight
+workflow substitutes the project's own gate — planner via
+`octoflow-reviewer-planner` — for `superpowers:brainstorming`'s live chat
+approval). This session's user is directly present, but the same substitution
+is used here too for consistency with how every other stage in this run has
+proceeded, and because the decisions below are engineering choices
+`CLAUDE.md` already delegates ("Всё остальное решай сам"), not scope, naming,
+or spend decisions reserved for the owner — except the new `[rewrite]`
+configuration keys, which are marked provisional, the same footing `[stt]
+command` was introduced on.
+
+Five real decisions made, each with a stated reason: the rewrite engine
+receives the bias string from the start, unlike recognition which had to be
+widened after the fact (§1); `ureq` as the HTTP client, blocking, matching the
+no-async-runtime rule (§6); a concrete three-part skip heuristic, safe
+because of its length gate even though its foreign-term/name checks are
+unmeasured (§4); an `AtomicBool` for the tell-once mechanism reusing the
+existing toast path, not a new one (§3); and `doctor::rewrite_finding`'s
+`"agent"` branch changes state, not just wording, closing the divergence the
+S1 gate found (§8).
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_36.md
+  reviewer: planner
+  verdict: null
+  date: null
+```
