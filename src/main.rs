@@ -18,6 +18,7 @@ mod daemon;
 mod delivery;
 mod doctor;
 mod proto;
+mod rewrite;
 mod stt;
 mod transport;
 
