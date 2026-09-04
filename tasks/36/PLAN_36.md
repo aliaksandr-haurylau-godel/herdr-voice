@@ -86,7 +86,7 @@ git commit -m "Add ureq, a blocking HTTP client, for the rewrite http engine"
 ### Task 2: `[rewrite]`'s new configuration keys
 
 **Files:**
-- Modify: `src/config.rs:67-70` (`Rewrite` struct), `:79-84` (`impl Default for Rewrite`)
+- Modify: `src/config.rs:67-70` (`Rewrite` struct), `:83-90` (`impl Default for Rewrite`)
 
 **Before starting:** read `src/config.rs:56-66` (`Stt`'s `command` field and
 its doc comment) for the exact style new fields should follow, and the
@@ -599,6 +599,22 @@ pub enum Resolution {
     Off,
     Engine(Box<dyn Engine + Send + Sync>),
     Unavailable(String),
+}
+
+// A manual Debug impl, not a derive: `Engine` carries no `Debug` bound (it
+// mirrors `stt::Engine`, which has none either), so `Box<dyn Engine + Send +
+// Sync>` cannot derive it, and `#[derive(Debug)]` on `Resolution` would fail
+// to compile for exactly that reason. This module's own tests print a
+// `Resolution` in a panic message (`{other:?}`), so something has to exist —
+// the `Engine` variant renders as a placeholder, never its contents.
+impl std::fmt::Debug for Resolution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Resolution::Off => write!(f, "Off"),
+            Resolution::Engine(_) => write!(f, "Engine(..)"),
+            Resolution::Unavailable(why) => write!(f, "Unavailable({why:?})"),
+        }
+    }
 }
 
 pub fn resolve(rewrite: &crate::config::Rewrite) -> Resolution {

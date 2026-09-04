@@ -245,3 +245,34 @@ the new one-argument signature, with its stale comment on the third assertion
 replaced.
 
 S3 continues; re-running the gate against the revised artifact.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_36.md
+  reviewer: implementer
+  verdict: QUESTIONS
+  date: 2026-09-04
+  questions:
+    - "Task 5's Resolution enum has no Debug, but its own tests print
+       {other:?} in a panic message — Box<dyn Engine + Send + Sync> cannot
+       derive Debug, and nothing in the plan showed a manual impl."
+  blocker: null
+```
+
+The two prior fixes were checked by hand and confirmed to hold: walking
+`plain(\"открой журнал\", \"журнал notes.txt\", true)` through all three
+checks in order confirmed `shares_a_word` alone decides the result; the
+`Off`/`Unavailable` tests were confirmed to differ only in journal-notice
+count, catching a swapped-branch or over-eager-`tell_once` build.
+
+### Answered
+
+Added a manual `Debug` impl for `Resolution` to Task 5's Step 3 — the
+`Engine` variant renders as a placeholder (`"Engine(..)"`), never its
+contents, since `Engine` carries no `Debug` bound (matching `stt::Engine`,
+which has none either). Also corrected a small citation the same pass
+noticed: Task 2's `impl Default for Rewrite` is at `src/config.rs:83-90`,
+not `:79-84`.
+
+S3 continues; re-running the gate against the revised artifact.
