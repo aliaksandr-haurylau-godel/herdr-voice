@@ -86,3 +86,29 @@ already answers, not a scope or naming decision reserved for the owner, so it
 was resolved here rather than escalated.
 
 S1 continues; re-running the gate against the revised artifact.
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_36.md
+  reviewer: designer
+  verdict: READY
+  date: 2026-09-04
+  questions: []
+  blocker: null
+```
+
+Confirmed: the answer applies the ticket's own stated rule directly, leaves
+the shipped default's delivered output unchanged, and needed no code path
+beyond what AC-6/AC-7 already required — not a decision reserved for the
+owner.
+
+Noted for S2, not a gate question: treating `"agent"` as "no engine available"
+on the take path leaves `doctor::rewrite_finding`'s `"agent"` branch reporting
+`Ok` whenever an agent binary is on `PATH` (`src/doctor.rs:266-287`), while a
+take with that same configuration is told the engine is unavailable. AC-11
+covers only the `"http"`/`"command"` branch. The design should decide how
+`doctor` names this divergence for the shipped default, not just for the two
+built engines.
+
+S1 is closed. Next is S2 Design.
