@@ -1244,6 +1244,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_short_plain_transcript_with_a_configured_engine_still_skips_it() {
+        // Every other Resolution::Engine test above uses either a long
+        // string ("...so the skip heuristic never applies here") or the
+        // canned "fix the worklog entry", which is all-Latin and so fails
+        // has_latin_run before the wiring is even reached — neither could
+        // catch a reversed or missing skip check. "открой файл" has no Latin
+        // letters, is two words (well under the 8-word limit), and shares no
+        // word with an empty bias string — it genuinely satisfies all three
+        // of rewrite::skip::plain's checks (src/rewrite/skip.rs).
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let mut runtime = runtime_with(fake.clone(), false);
+        runtime.recognition = Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+            "открой файл".to_string(),
+        ))));
+        // Bypasses the pane/transcript sources entirely so the bias string
+        // handed to the skip check is deterministically empty, not whatever
+        // a live-herdr-less Auto attempt happens to collect.
+        runtime.bias_source = Err("no pane source in this test".to_string());
+        // A Fake that WOULD change the delivered text if it were ever
+        // called — proving the skip really did bypass the engine, not just
+        // that plain() returns true in isolation.
+        runtime.rewrite = crate::rewrite::Resolution::Engine(Box::new(
+            crate::rewrite::tests_support::Fake(Ok("this must never be delivered".to_string())),
+        ));
+        let recorder = tone_recorder("skip-with-engine");
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        assert_eq!(
+            fake.calls(),
+            vec![crate::delivery::tests_support::Call::Insert(
+                "w1:p2".into(),
+                "открой файл".into()
+            )]
+        );
+    }
+
     /// A program that is certainly not there, so `bias::pane::read` misses
     /// without a live herdr — the same fixture `bias`'s own tests use.
     const MISSING_HERDR: &str = "/definitely/not/a/real/herdr-binary";
