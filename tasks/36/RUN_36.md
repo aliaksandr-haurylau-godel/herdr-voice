@@ -177,3 +177,35 @@ corrected reason. `rewrite_finding`'s signature is stated to change from two
 which the old shape cannot carry.
 
 S2 is closed. Next is S3 Plan.
+
+### S3 Plan
+- artifact: `PLAN_36.md`
+- produced: 2026-09-04
+
+Ten tasks: `ureq` dependency + decision (1), `config::Rewrite`'s new keys (2),
+`rewrite::command` (3), `rewrite::http` (4), the trait/`Resolution`/`resolve`
+tying them together (5), the skip heuristic (6), daemon wiring (7),
+`doctor::rewrite_finding` (8), S4 review (9), S5 verify plus the manual runs
+(10).
+
+Self-review found and fixed two things before this went to gate: a vague
+"check how `stt::tests_support` is declared" instruction, replaced with the
+actual declaration read from the file and full code for the new module's own
+`tests_support::Fake`; and four daemon-level tests in Task 7 that asserted
+only `Reply::Ok`, which every one of the four `Resolution` branches produces
+identically and so proved nothing about which branch actually ran. Rewrote
+all four to inspect `FakeDeliverer::calls()` — cloned before the fake is
+passed into `runtime_with`, the same idiom
+`a_toast_is_raised_on_a_failed_delivery_only_when_ui_toasts_is_on`
+(`src/daemon.rs:979-1002`) already uses — so each test checks the actual
+delivered text: rewritten for a working engine, unrewritten and reasoned
+about a specific text for `Unavailable`/a failed engine/`Off`.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_36.md
+  reviewer: implementer
+  verdict: null
+  date: null
+```
