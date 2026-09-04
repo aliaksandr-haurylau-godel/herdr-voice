@@ -392,3 +392,36 @@ gate:
 S4 is closed. Next is S5: verify by test suite, then by a real local server —
 which, unusually for this project, this session can actually run itself,
 since Ollama is already live on this machine.
+
+## Gate S5
+
+```yaml
+gate:
+  stage: S5
+  artifact: docs/evidence.md, "The rewrite stage, against a real local server
+    and a real program"
+  verdict: pass
+  date: 2026-09-05
+  platform: macOS 26.6.2, Rust 1.97.1, ureq 2.12.1
+```
+
+Fresh run on `feat/36-rewrite-http-command` at `fb883c1`: 245 passed, 0
+failed; clippy/fmt/manifest clean.
+
+AC-10 is now genuinely satisfied, not by a reviewer's ad hoc check but by a
+run done for this record: Ollama was already running on this machine with
+`gemma4:latest` loaded — nothing was started for the occasion. A temporary,
+uncommitted test drove the real, compiled `rewrite::http::HttpEngine`
+against it and the real, compiled `rewrite::command::CommandEngine` against
+a real external program; both restored "мерж реквест"/"пул реквест" to
+"merge request"/"pull request" in the same sentence. Both temporary tests
+were reverted (`git checkout -- src/rewrite/http.rs src/rewrite/command.rs`)
+before this commit — nothing live-server-dependent is part of the permanent
+suite, and `git status --short` was empty before writing the entry.
+
+What remains open, stated in the entry itself: the daemon's own take path,
+end to end through a live herdr pane on a spoken take, is not this
+measurement — the engines were driven directly. That gap is the same class
+already open for #21 and #26, and is unaffected by this issue landing.
+
+S5 is closed. Next: the pull request for #36.
