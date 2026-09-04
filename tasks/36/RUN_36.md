@@ -276,3 +276,25 @@ noticed: Task 2's `impl Default for Rewrite` is at `src/config.rs:83-90`,
 not `:79-84`.
 
 S3 continues; re-running the gate against the revised artifact.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_36.md
+  reviewer: implementer
+  verdict: READY
+  date: 2026-09-04
+  questions: []
+  blocker: null
+```
+
+Fourth read, hunting specifically for cross-task inconsistency left by three
+rounds of piecemeal fixes: the `Debug` impl compiles against `Resolution`'s
+actual variants, Task 7's `Resolution` constructions match Task 5's three
+variant names, and every type crossing a task boundary (`CommandEngine`,
+`HttpEngine`, `EngineError`, `CommandError`, `HttpError`) is constructed and
+matched consistently wherever it appears. Also confirmed: issue #26 has not
+merged (`transcribe` still takes no `bias` parameter), so Task 7's "not
+merged" branch is the one that applies.
+
+S3 is closed after three rounds. Next is S4 Implement.
