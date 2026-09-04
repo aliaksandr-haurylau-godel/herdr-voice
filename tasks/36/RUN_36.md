@@ -367,3 +367,28 @@ directly, without needing separate audio/microphone access the way #21's and
 Neither finding blocks on a design or scope question — both are additional
 tests against already-correct code, assignable back to the implementer
 directly.
+
+Both fixed and verified. `a_short_plain_transcript_with_a_configured_engine_still_skips_it`
+(`src/daemon.rs`) uses `"открой файл"` (verified against `rewrite::skip::plain`'s
+three checks) with a `Fake` engine that would return an observably different
+string if wrongly invoked; the implementer confirmed it directly by breaking
+the skip check and watching the new test fail before reverting. The two
+`rewrite::http` tests (`a_non_2xx_response_is_a_failure`,
+`a_response_with_no_readable_content_is_a_failure`) extend the existing
+scratch-listener double with a status-line parameter, no existing call site
+changed. 245 tests, 3 more full-suite reruns done here plus the implementer's
+own 5+15, all green, no flake.
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff on feat/36-rewrite-http-command since 7dab991, at fb883c1
+  reviewer: two independent reviews plus one round of fixes, verified fresh
+  verdict: READY
+  date: 2026-09-05
+  blocker: null
+```
+
+S4 is closed. Next is S5: verify by test suite, then by a real local server —
+which, unusually for this project, this session can actually run itself,
+since Ollama is already live on this machine.
