@@ -67,6 +67,22 @@ pub struct Stt {
 pub struct Rewrite {
     pub engine: String,
     pub agent: String,
+    /// The address for `engine = "http"`. Empty means unconfigured.
+    /// Provisional name (`docs/decisions.md`, 2026-09-04, #36).
+    pub url: String,
+    /// An optional bearer token for `engine = "http"`. Empty means no
+    /// `Authorization` header is sent.
+    pub token: String,
+    /// Sent as the request body's `model` field for `engine = "http"`.
+    /// May be empty; some local servers accept that and pick their own.
+    pub model: String,
+    /// The program and its arguments for `engine = "command"`, with
+    /// `{transcript}` and `{bias}` replaced before it runs. `{transcript}`
+    /// is force-appended when absent; `{bias}` never is.
+    pub command: Vec<String>,
+    /// Whether a short transcript with no foreign term and no name from the
+    /// collected bias string skips the engine entirely.
+    pub skip_if_plain: bool,
 }
 
 impl Default for Stt {
@@ -85,6 +101,11 @@ impl Default for Rewrite {
         Rewrite {
             engine: "agent".to_string(),
             agent: "auto".to_string(),
+            url: String::new(),
+            token: String::new(),
+            model: String::new(),
+            command: Vec::new(),
+            skip_if_plain: true,
         }
     }
 }
@@ -232,6 +253,22 @@ mod tests {
         assert!(defaults.stt.command.is_empty());
         assert_eq!(defaults.rewrite.engine, "agent");
         assert_eq!(defaults.rewrite.agent, "auto");
+    }
+
+    #[test]
+    fn a_rewrite_table_with_only_engine_set_keeps_the_other_defaults() {
+        let toml = r#"
+            [rewrite]
+            engine = "http"
+        "#;
+        let config: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(config.rewrite.engine, "http");
+        assert_eq!(config.rewrite.agent, "auto");
+        assert_eq!(config.rewrite.url, "");
+        assert_eq!(config.rewrite.token, "");
+        assert_eq!(config.rewrite.model, "");
+        assert!(config.rewrite.command.is_empty());
+        assert!(config.rewrite.skip_if_plain);
     }
 
     #[test]
