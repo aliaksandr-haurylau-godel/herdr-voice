@@ -146,3 +146,34 @@ gate:
   verdict: null
   date: null
 ```
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_36.md
+  reviewer: planner
+  verdict: READY
+  date: 2026-09-04
+  questions: []
+  blocker: null
+```
+
+Every citation checked and held, including the `Arc<Runtime>` construction
+(`src/daemon.rs:470-483`) that makes the `AtomicBool` field actually work the
+way the design assumes, and the four `Runtime` test literals that need the
+new fields. The skip heuristic, the `command` placeholder substitution and
+the #26 rebase sequencing were each confirmed writable into a task without
+guessing.
+
+Three corrections applied to `DESIGN_36.md`, none reopening the gate:
+`runtime.rewrite_settings.skip_if_plain` was never declared — replaced with a
+bare `runtime.skip_if_plain: bool`, since one field needs no group of its own
+the way `delivery_settings` groups two. The `Relaxed`-ordering argument
+claimed `serve` handles connections sequentially; `serve` spawns a thread per
+connection (`src/daemon.rs:509-513`), so the two-notices-instead-of-one race
+is real, not hypothetical — the conclusion (still acceptable) stands on the
+corrected reason. `rewrite_finding`'s signature is stated to change from two
+`&str` parameters to `&config::Rewrite`, since §8 needs `url` and `command`
+which the old shape cannot carry.
+
+S2 is closed. Next is S3 Plan.

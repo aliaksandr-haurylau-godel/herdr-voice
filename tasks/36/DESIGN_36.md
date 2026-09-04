@@ -47,6 +47,11 @@ Resolved once, in `start()`, the same place `Recognition` already is
 (`src/daemon.rs:451` in this checkout) — mirroring the precedent
 `tasks/21/PLAN_21.md`'s Task 8 already established for `bias_source`.
 
+`Runtime` also gains a plain `skip_if_plain: bool` field, read once from
+`[rewrite] skip_if_plain` at the same construction site — not a nested
+`rewrite_settings` struct; `delivery_settings` groups two fields because
+delivery already had two, and one bare `bool` needs no group of its own.
+
 ## 2. Pipeline wiring
 
 In `daemon::transcribe` (`src/daemon.rs:303-338`), between `text` coming back
@@ -60,7 +65,7 @@ let text = match &runtime.rewrite {
         text
     }
     Resolution::Engine(engine) => {
-        if skip::plain(&text, &collected.bias, runtime.rewrite_settings.skip_if_plain) {
+        if skip::plain(&text, &collected.bias, runtime.skip_if_plain) {
             text
         } else {
             match engine.rewrite(&text, &collected.bias) {
@@ -109,12 +114,14 @@ fn tell_once(runtime: &Runtime, why: &str) {
 
 Reuses `Deliverer::notify` (`src/delivery.rs:33`) exactly as delivery's own
 failed-delivery toast already does (`src/daemon.rs:349-358`) — no new toast
-mechanism, no new `Deliverer` method. `Relaxed` ordering is enough: a race
-between two takes finishing at nearly the same moment could in the worst case
-produce two notices instead of one, which is a cosmetic risk, not a
-correctness one — the rule is "not on every take," not "exactly once under
-concurrency," and this daemon serves one take at a time in practice (`serve`
-handles requests sequentially per connection).
+mechanism, no new `Deliverer` method. `Relaxed` ordering is enough: `serve`
+spawns a thread per connection (`src/daemon.rs:509-513`), so two takes
+finishing at nearly the same moment on different connections is a real case,
+not a hypothetical one — the worst case is two notices instead of one, which
+is a cosmetic risk, not a correctness one. The rule is "not on every take,"
+not "exactly once under concurrency," and `swap`'s atomicity is what keeps
+the flag itself from tearing; it does not need to also serialize the two
+notifications.
 
 ## 4. The skip heuristic (`skip_if_plain`)
 
@@ -247,6 +254,11 @@ receiving the transcript somehow. `{bias}` substitutes by name and is
 opt-in enhancement, not something the program cannot run without.
 
 ## 8. `doctor::rewrite_finding` (AC-11, and the divergence the S1 gate noted)
+
+`rewrite_finding`'s signature changes from `(engine: &str, agent: &str)` to
+`(rewrite: &config::Rewrite)` — it needs `url` and `command` now, which the
+two-`&str` shape cannot carry. Its one caller (`src/doctor.rs:336-339`)
+updates to pass `&loaded.config.rewrite` instead of the two fields.
 
 `"http"`: `Ok` if `[rewrite] url` is non-empty, else `Missing`, "give
 `[rewrite]` a `url`, for example: ...". `"command"`: `Ok` if `[rewrite]
