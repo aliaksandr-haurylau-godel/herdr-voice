@@ -10,6 +10,7 @@
 
 pub mod command;
 pub mod http;
+pub mod skip;
 
 pub trait Engine: Send + Sync {
     fn rewrite(&self, transcript: &str, bias: &str) -> Result<String, EngineError>;
