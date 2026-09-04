@@ -42,3 +42,47 @@ gate:
   verdict: null
   date: null
 ```
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_36.md
+  reviewer: designer
+  verdict: QUESTIONS
+  date: 2026-09-04
+  questions:
+    - "What does the wired-in take path do when [rewrite] engine = \"agent\"
+       — the shipped default — or any other unrecognised value, since the
+       agent engine is out of this issue's scope? AC-1 requires the step to
+       run for every non-off take; AC-6/AC-7's deliver-unchanged-and-tell-once
+       path was written only for a configured http/command engine failing.
+       Three materially different designs were possible and nothing in the
+       ticket or the AC chose one."
+  blocker: null
+```
+
+Noted by the reviewer, not a gate question: `doctor::rewrite_finding`'s
+`"http" | "command"` branch reports "not built yet" for exactly the two
+engines this issue builds — true today, false once it lands.
+
+The demotion of the short-phrase skip rule was checked and confirmed
+justified: `spike/spike.sh`'s `rewrite()` calls `claude -p` unconditionally,
+with no length, term or name test anywhere in it — the only conditional is
+the empty-output fallback. AC-5 correctly hands the heuristic to design
+rather than claiming a ported behavior that does not exist.
+
+### Answered
+
+`"agent"` and any value that is none of the four named engines are treated
+exactly as a live `http`/`command` failure is — routed through the same "no
+engine available" path AC-6/AC-7 already require, not as a distinct case.
+`docs/design.md`'s own rule already covers it without a new one: an engine
+this issue does not implement invoking is not available. This keeps the
+shipped default unchanged and needs no new code path. `AC_36.md` was revised
+to state this in a new "Resolved during S1's gate" section, and AC-1, AC-6 and
+AC-7 were reworded accordingly. AC-11 was added for the `doctor` correction.
+This is an engineering-coherence question the ticket's own stated rule
+already answers, not a scope or naming decision reserved for the owner, so it
+was resolved here rather than escalated.
+
+S1 continues; re-running the gate against the revised artifact.
