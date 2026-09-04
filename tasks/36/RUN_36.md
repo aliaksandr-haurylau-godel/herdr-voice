@@ -209,3 +209,39 @@ gate:
   verdict: null
   date: null
 ```
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_36.md
+  reviewer: implementer
+  verdict: QUESTIONS
+  date: 2026-09-04
+  questions:
+    - "Task 7's Off and Unavailable tests both asserted only the delivered
+       text, so nothing distinguished them from each other, and the Coverage
+       table named a test Task 7 never wrote."
+    - "Task 6's two context-word tests used 'worklog', a Latin word, so
+       has_latin_run already returns false before shares_a_word is reached —
+       a broken shares_a_word would still pass both."
+    - "Task 8's signature change breaks a pre-existing test
+       (the_rewrite_engine_is_looked_for_by_name) that the plan never shows
+       converted."
+  blocker: null
+```
+
+### Answered
+
+All three fixed directly in `PLAN_36.md`. Task 7: the Unavailable test now
+also asserts exactly one journal notice, and the Off test (renamed
+`resolution_off_never_tells`) asserts zero — the two are now distinguished by
+the one thing that actually differs between them. The Coverage table's
+reference corrected to the real test names. Task 6: both context-word tests
+now use "журнал" (no Latin letters) shared between transcript and bias
+instead of "worklog", so `has_latin_run` cannot short-circuit before
+`shares_a_word` runs, with a comment stating why. Task 8: the pre-existing
+`the_rewrite_engine_is_looked_for_by_name` is now shown fully converted to
+the new one-argument signature, with its stale comment on the third assertion
+replaced.
+
+S3 continues; re-running the gate against the revised artifact.

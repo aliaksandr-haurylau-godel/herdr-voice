@@ -710,12 +710,19 @@ mod tests {
 
     #[test]
     fn a_short_phrase_matching_a_context_word_does_not_skip() {
-        assert!(!plain("открой worklog", "worklog notes.txt", true));
+        // "журнал" (journal/log) has no Latin letters, so this transcript
+        // passes both earlier checks — length and has_latin_run — and must
+        // be caught by shares_a_word alone. A shares_a_word that always
+        // returns false would pass every other test in this module but
+        // fail this one and the next: neither transcript here contains any
+        // ASCII letter, so has_latin_run cannot short-circuit before
+        // shares_a_word runs, unlike a Latin loanword would.
+        assert!(!plain("открой журнал", "журнал notes.txt", true));
     }
 
     #[test]
     fn the_context_match_is_case_insensitive() {
-        assert!(!plain("открой WORKLOG", "worklog notes.txt", true));
+        assert!(!plain("открой ЖУРНАЛ", "журнал notes.txt", true));
     }
 }
 ```
@@ -892,12 +899,16 @@ fn a_failed_rewrite_engine_delivers_the_original_text_and_tells_once() {
 }
 
 #[test]
-fn an_unavailable_rewrite_resolution_delivers_the_original_text() {
+fn an_unavailable_rewrite_resolution_delivers_the_original_text_and_tells_once() {
+    let journal = std::sync::Arc::new(RecordingJournal::default());
     let fake = crate::delivery::tests_support::FakeDeliverer::ok();
     let mut runtime = runtime_with(fake.clone(), false);
     runtime.rewrite = crate::rewrite::Resolution::Unavailable("agent not invoked".to_string());
+    runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
     let recorder = tone_recorder("rewrite-unavailable");
     let request = dictate_request();
+    answer(&request, &recorder, &runtime);
+    answer(&request, &recorder, &runtime);
     answer(&request, &recorder, &runtime);
     answer(&request, &recorder, &runtime);
 
@@ -909,13 +920,23 @@ fn an_unavailable_rewrite_resolution_delivers_the_original_text() {
         "got {:?}",
         fake.calls()
     );
+
+    // Distinguishes Unavailable from Off: Unavailable tells once, Off never
+    // tells at all (see resolution_off_never_tells_and_never_reaches_the_engine
+    // below). Two takes, one notice — the same shape
+    // a_failed_rewrite_engine_delivers_the_original_text_and_tells_once proves.
+    let lines = journal.0.lock().unwrap();
+    let notices = lines.iter().filter(|l| l.contains("rewrite unavailable")).count();
+    assert_eq!(notices, 1, "got {lines:?}");
 }
 
 #[test]
-fn resolution_off_delivers_the_transcript_untouched() {
+fn resolution_off_never_tells() {
+    let journal = std::sync::Arc::new(RecordingJournal::default());
     let fake = crate::delivery::tests_support::FakeDeliverer::ok();
     let mut runtime = runtime_with(fake.clone(), false);
     runtime.rewrite = crate::rewrite::Resolution::Off;
+    runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
     let recorder = tone_recorder("rewrite-off");
     let request = dictate_request();
     answer(&request, &recorder, &runtime);
@@ -928,6 +949,14 @@ fn resolution_off_delivers_the_transcript_untouched() {
         )),
         "got {:?}",
         fake.calls()
+    );
+
+    // The distinguishing assertion versus the Unavailable test above: Off
+    // produces zero notices, not one.
+    let lines = journal.0.lock().unwrap();
+    assert!(
+        !lines.iter().any(|l| l.contains("rewrite unavailable")),
+        "Off must never tell, got {lines:?}"
     );
 }
 ```
@@ -1156,6 +1185,41 @@ was found, but keep the state `Missing`).
 Update the caller (`:336-339`) to pass `&loaded.config.rewrite` instead of
 `&loaded.config.rewrite.engine, &loaded.config.rewrite.agent`.
 
+The pre-existing test `the_rewrite_engine_is_looked_for_by_name`
+(`src/doctor.rs:568-580`) calls `rewrite_finding` three times with the old
+two-`&str` signature; update it to the new one-argument shape. Its first two
+assertions still hold once converted — `"agent"` is `Missing` regardless of
+`PATH` now, which was already the assertion's outcome, just for a different
+reason (unconfigured, not not-found) — but the comment on the third
+assertion ("auto resolves against the candidate list") no longer describes
+anything observable in `state`, since `state` no longer reflects whether the
+candidate was found. Replace it:
+
+```rust
+#[test]
+fn the_rewrite_engine_is_looked_for_by_name() {
+    let unavailable = crate::config::Rewrite {
+        engine: "agent".to_string(),
+        agent: "definitely-not-installed".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(rewrite_finding(&unavailable).state, State::Missing);
+
+    let off = crate::config::Rewrite {
+        engine: "off".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(rewrite_finding(&off).state, State::Ok);
+
+    let auto = crate::config::Rewrite {
+        engine: "agent".to_string(),
+        agent: "auto".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(rewrite_finding(&auto).name, "rewrite");
+}
+```
+
 - [ ] **Step 4: Run to verify the tests pass**
 
 Run: `cargo test --bin herdr-voice doctor::`
@@ -1222,8 +1286,12 @@ string, or a rewritten transcript.
 ## Coverage
 
 AC-1 → Task 7. AC-2 → Task 4. AC-3 → Task 3. AC-4 → Task 7
-(`resolution_off_never_calls_the_rewrite_engine`). AC-5 → Task 6. AC-6 →
-Tasks 5, 7. AC-7 → Task 7. AC-8 → Tasks 3, 4 (error `Display` impls). AC-9 →
+(`resolution_off_never_tells`). AC-5 → Task 6. AC-6 →
+Tasks 5, 7. AC-7 → Task 7
+(`an_unavailable_rewrite_resolution_delivers_the_original_text_and_tells_once`,
+`a_failed_rewrite_engine_delivers_the_original_text_and_tells_once`, and
+`resolution_off_never_tells` for the negative case). AC-8 → Tasks 3, 4 (error
+`Display` impls). AC-9 →
 Tasks 3, 4 (scratch script, scratch `TcpListener`). AC-10 → Task 10's manual
 step. AC-11 → Task 8.
 
