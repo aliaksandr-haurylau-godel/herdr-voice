@@ -1257,7 +1257,7 @@ mod tests {
         let fake = crate::delivery::tests_support::FakeDeliverer::ok();
         let mut runtime = runtime_with(fake.clone(), false);
         runtime.recognition = Ok(Box::new(crate::stt::tests_support::Fake(Ok(
-            "открой файл".to_string(),
+            "открой файл".to_string()
         ))));
         // Bypasses the pane/transcript sources entirely so the bias string
         // handed to the skip check is deterministically empty, not whatever

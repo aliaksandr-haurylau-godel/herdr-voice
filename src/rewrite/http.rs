@@ -141,6 +141,16 @@ mod tests {
     /// intermittent, unrelated-looking read failure on the client side when
     /// this used to read a single fixed-size chunk and stop.
     fn respond_once(response_body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        respond_once_with_status("200 OK", response_body)
+    }
+
+    /// The same double as `respond_once`, with the status line as a
+    /// parameter — so a test can drive `ureq::Error::Status` without a
+    /// second, near-duplicate listener implementation.
+    fn respond_once_with_status(
+        status_line: &'static str,
+        response_body: &'static str,
+    ) -> (String, std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let url = format!("http://{addr}/v1/chat/completions");
@@ -177,7 +187,7 @@ mod tests {
             }
             let request = String::from_utf8_lossy(&buf).to_string();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 response_body.len(),
                 response_body
             );
@@ -232,6 +242,34 @@ mod tests {
     #[test]
     fn an_unreadable_body_is_named_as_such() {
         let (url, handle) = respond_once("not json");
+        let engine = HttpEngine::new(url, String::new(), String::new());
+        let error = engine.rewrite("x", "").expect_err("must fail");
+        assert!(
+            matches!(error, HttpError::Unreadable { .. }),
+            "got {error:?}"
+        );
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_non_2xx_response_is_a_failure() {
+        let (url, handle) = respond_once_with_status(
+            "500 Internal Server Error",
+            r#"{"error":"model not loaded"}"#,
+        );
+        let engine = HttpEngine::new(url.clone(), String::new(), String::new());
+        let error = engine.rewrite("x", "").expect_err("must fail");
+        assert!(matches!(error, HttpError::Failed { .. }), "got {error:?}");
+        assert!(error.to_string().contains(&url), "got {error}");
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_response_with_no_readable_content_is_a_failure() {
+        // Well-formed JSON, but no choices — one of the shapes an
+        // OpenAI-compatible server can send back on top of a 200 without
+        // that being an HTTP failure.
+        let (url, handle) = respond_once(r#"{"choices":[]}"#);
         let engine = HttpEngine::new(url, String::new(), String::new());
         let error = engine.rewrite("x", "").expect_err("must fail");
         assert!(
