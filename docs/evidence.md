@@ -516,3 +516,42 @@ a flag would pass every test here and miss at runtime; and what discovery
 actually reports for a pane sitting in a git worktree with no session directory
 of its own, since the walk's ceiling is exercised here only against scratch
 repositories.
+
+## The bias string reaches the engine, in argument lists a test can inspect
+
+macOS 26.6.2, Rust 1.97.1. Verified by test suite alone, on
+`feat/26-bias-to-engine` at `8275dcd`: 213 tests passed, `cargo clippy
+--all-targets -- -D warnings` clean, `cargo fmt --check` clean,
+`scripts/check_manifest.py` clean.
+
+**What this establishes.** `Engine::transcribe` now takes the bias string as a
+second parameter, `bias: &str`, alongside the audio path — the same kind of
+parameter for the same reason: both vary per take, unlike the model and the
+language, which are fixed when the engine is built. `command::render`
+substitutes `{prompt}` with it, in the same pass that already substitutes
+`{model}` and `{language}`, proven by a test that fails if the substitution is
+removed. Unlike `{audio}`, a missing `{prompt}` placeholder does not force the
+string onto the rendered argument list — a person opts in by writing the
+placeholder — proven by a test that fails if a force-append is added. An empty
+bias string substitutes to an empty string with no special case. And the
+string that reaches the engine is the real one `bias::collect` assembled for
+the take that just finished, not a stale or discarded value:
+`daemon::dictate` used to throw `take_bias`'s return away; a test using a
+capturing test double now fails if that binding is removed, proving the
+collected string — not an empty one — is what `engine.transcribe` receives.
+
+**What this does not establish.** Whether any of this changes what a real
+transcript sounds like. Every test here runs against a fake or a `sh`/`.cmd`
+stand-in for a transcriber; none of them runs `whisper-cli` or any other real
+program with a real bias prompt on real audio. That is the one thing this
+issue exists to prove, and it needs a person.
+
+**What still needs a person, not a test.** A spoken take of Russian speech
+containing an English technical term, with `[stt] command` configured to
+carry the bias string behind a real transcriber's own prompt flag (`--prompt`
+for `whisper-cli`), run on a real installation. The measurement to repeat is
+above, under "Recognition, by hand on macOS": that take returned "пули квест"
+with no bias prompt and "pull request" with the same terms passed by hand
+through `--prompt`. This issue wires the same path automatically; whether it
+reaches the same result on a live take is not yet recorded. **Pending, owned
+by the repository's owner** — this session cannot hold a microphone.

@@ -1,9 +1,10 @@
 //! Turning a take into text.
 //!
-//! One trait, one method: a take's path in, a transcript out. Everything an engine
-//! needs beyond the path — the model, the language, the argument list — is given to
-//! it when it is built, because the path is the only thing that changes between
-//! takes. See `tasks/13/DESIGN_13.md`, section 1.
+//! One trait, one method: a take's path and its bias string in, a transcript out.
+//! Everything an engine needs beyond those two — the model, the language, the
+//! argument list — is given to it when it is built, because the path and the bias
+//! string are the only things that change between takes. See
+//! `tasks/13/DESIGN_13.md`, section 1.
 
 pub mod command;
 pub mod model;
@@ -14,7 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Stt;
 
 pub trait Engine: Send + Sync {
-    fn transcribe(&self, audio: &Path) -> Result<String, EngineError>;
+    fn transcribe(&self, audio: &Path, bias: &str) -> Result<String, EngineError>;
 }
 
 #[derive(Debug)]
@@ -143,8 +144,40 @@ pub mod tests_support {
     pub struct Fake(pub Result<String, String>);
 
     impl Engine for Fake {
-        fn transcribe(&self, _audio: &Path) -> Result<String, EngineError> {
+        fn transcribe(&self, _audio: &Path, _bias: &str) -> Result<String, EngineError> {
             match &self.0 {
+                Ok(text) => Ok(text.clone()),
+                Err(why) => Err(EngineError::Unknown(why.clone())),
+            }
+        }
+    }
+
+    /// An engine that records the bias string it was called with, so a test can
+    /// assert on it, alongside a canned result it returns the way `Fake` does.
+    pub struct CapturingFake {
+        result: Result<String, String>,
+        received_bias: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    impl CapturingFake {
+        pub fn new(
+            result: Result<String, String>,
+        ) -> (Self, std::sync::Arc<std::sync::Mutex<Option<String>>>) {
+            let received = std::sync::Arc::new(std::sync::Mutex::new(None));
+            (
+                CapturingFake {
+                    result,
+                    received_bias: received.clone(),
+                },
+                received,
+            )
+        }
+    }
+
+    impl Engine for CapturingFake {
+        fn transcribe(&self, _audio: &Path, bias: &str) -> Result<String, EngineError> {
+            *self.received_bias.lock().unwrap() = Some(bias.to_string());
+            match &self.result {
                 Ok(text) => Ok(text.clone()),
                 Err(why) => Err(EngineError::Unknown(why.clone())),
             }
