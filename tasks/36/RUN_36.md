@@ -425,3 +425,35 @@ measurement — the engines were driven directly. That gap is the same class
 already open for #21 and #26, and is unaffected by this issue landing.
 
 S5 is closed. Next: the pull request for #36.
+
+## Rebased onto #26's merge
+
+The owner merged issue #26's pull request (#35, commit `8ce1fd8`) while #36's
+pull request (#37) was open. Rebased onto the new `origin/main` — two
+conflicts, both exactly where `DESIGN_36.md`'s sequencing note said they
+would be:
+
+- `docs/decisions.md`: two rows appended near the same place, one per issue.
+  Kept both.
+- `src/daemon.rs`: `dictate`'s comment above `take_bias`'s call conflicted in
+  wording only — #26's merged code already binds `collected` and passes
+  `&collected.bias` into `transcribe(runtime, &take, &collected.bias)`,
+  exactly the shape this branch independently arrived at; the code itself
+  needed no change, only a comment naming both issues instead of one
+  written before the other had landed. `transcribe`'s call to
+  `engine.transcribe(&take.path, bias)` already carries #26's widened
+  signature after the merge — confirmed by reading it after resolving,
+  not assumed.
+
+A third conflict, in `docs/evidence.md`, surfaced something worth recording
+on its own: this run's own S5 entry had a stray `</new_string>` — a tool
+artifact from an earlier edit — committed into the file, unnoticed through
+S4 and S5 because no fresh reviewer pass read the evidence prose itself
+after it was written. Found and removed while resolving the conflict, along
+with keeping both branches' evidence sections. Swept the whole tree for the
+same class of artifact afterward (`</new_string>`, `</old_string>`,
+`<old_string>`, `<new_string>`) — nothing else found.
+
+Fresh run after rebase, `feat/36-rewrite-http-command` at `dc45b4f`: 249
+tests (up from 245 — #26's own additions), 0 failed, three consecutive full
+reruns clean; clippy, fmt, manifest all clean.
