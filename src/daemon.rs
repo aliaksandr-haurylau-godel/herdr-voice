@@ -68,6 +68,18 @@ pub struct Runtime {
     pub deliverer: Box<dyn crate::delivery::Deliverer>,
     pub delivery_settings: crate::delivery::Settings,
     pub journal: Box<dyn Journal>,
+    /// The rewrite engine the configuration resolved to at start, or why none
+    /// is available. Resolved once, the same reason `recognition` is
+    /// (`tasks/36/DESIGN_36.md`, section 1).
+    pub rewrite: crate::rewrite::Resolution,
+    /// `[rewrite] skip_if_plain`, read once with the rest of the
+    /// configuration.
+    pub skip_if_plain: bool,
+    /// Whether the "rewrite unavailable" notice has already been given once
+    /// in this daemon's lifetime — `Relaxed` is enough: the worst case under
+    /// concurrent takes is two notices instead of one, not a correctness
+    /// failure (`tasks/36/DESIGN_36.md`, section 3).
+    pub told: std::sync::atomic::AtomicBool,
 }
 
 /// The two context fields `Runtime` holds, resolved from the loaded
@@ -153,8 +165,9 @@ fn dictate(
                 // Assembled here, where the take has just finished and
                 // recognition is about to run on it. The collected string is
                 // reported on without being written down
-                // (`tasks/21/DESIGN_21.md`, section 9), then handed to the
-                // engine below (issue #26).
+                // (`tasks/21/DESIGN_21.md`, section 9), then handed both to
+                // recognition (issue #26) and to the rewrite step between
+                // recognition and delivery (issue #36).
                 let collected = take_bias(
                     runtime,
                     &take.target,
@@ -321,6 +334,32 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> Rep
         }
     };
 
+    // Between recognition producing `text` and delivery: `off` (never
+    // represented here — see `Resolution::Off`) and a working engine both
+    // leave the take on the reply path below unaffected either way; only a
+    // configured engine that is unavailable, or one that fails, ever calls
+    // `tell_once` (`tasks/36/DESIGN_36.md`, section 2).
+    let text = match &runtime.rewrite {
+        crate::rewrite::Resolution::Off => text,
+        crate::rewrite::Resolution::Unavailable(why) => {
+            tell_once(runtime, why);
+            text
+        }
+        crate::rewrite::Resolution::Engine(engine) => {
+            if crate::rewrite::skip::plain(&text, bias, runtime.skip_if_plain) {
+                text
+            } else {
+                match engine.rewrite(&text, bias) {
+                    Ok(rewritten) => rewritten,
+                    Err(why) => {
+                        tell_once(runtime, &why.to_string());
+                        text
+                    }
+                }
+            }
+        }
+    };
+
     // Written before the delivery attempt: the text must not be held only
     // in memory while the outward call to herdr runs.
     runtime.journal.write(&delivering_line(&text));
@@ -423,6 +462,34 @@ pub fn toast_failed_line(why: &str) -> String {
     format!("toast failed: {why}")
 }
 
+/// Written when no rewrite engine is available to run this take through —
+/// `Resolution::Unavailable`, or a live `Resolution::Engine` call that
+/// failed. Never written for `Resolution::Off`, which is not "unavailable",
+/// it is turned off.
+fn rewrite_unavailable_line(why: &str) -> String {
+    format!("rewrite unavailable: {}", why.replace('\n', " "))
+}
+
+/// Tells the person once per daemon lifetime that no rewrite engine ran this
+/// take, reusing the same journal-line-plus-toast shape the failed-delivery
+/// path above already uses (`Deliverer::notify`, no new mechanism). `Relaxed`
+/// on the swap is enough: the worst case under two takes finishing at nearly
+/// the same moment on different connections is two notices instead of one, a
+/// cosmetic risk, not a correctness one (`tasks/36/DESIGN_36.md`, section 3).
+fn tell_once(runtime: &Runtime, why: &str) {
+    if runtime.told.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    runtime.journal.write(&rewrite_unavailable_line(why));
+    if runtime.delivery_settings.toasts {
+        if let Err(toast_why) = runtime.deliverer.notify("Rewrite unavailable", why) {
+            runtime.journal.write(&toast_failed_line(
+                &toast_why.to_string().replace('\n', " "),
+            ));
+        }
+    }
+}
+
 pub fn start() -> Result<Outcome, TransportError> {
     let address = transport::address(&transport::Vars::from_env())?;
 
@@ -466,6 +533,8 @@ pub fn start() -> Result<Outcome, TransportError> {
         eprintln!("{why}");
     }
 
+    let rewrite = crate::rewrite::resolve(&loaded.config.rewrite);
+
     let runtime = Runtime {
         recognition,
         bias_source,
@@ -478,6 +547,9 @@ pub fn start() -> Result<Outcome, TransportError> {
             toasts: loaded.config.ui.toasts,
         },
         journal: Box::new(StderrJournal),
+        rewrite,
+        skip_if_plain: loaded.config.rewrite.skip_if_plain,
+        told: std::sync::atomic::AtomicBool::new(false),
     };
     serve(listener, address, Arc::new(recorder), Arc::new(runtime));
     Ok(Outcome::Served)
@@ -574,6 +646,9 @@ mod tests {
                 toasts: false,
             },
             journal: Box::new(StderrJournal),
+            rewrite: crate::rewrite::Resolution::Off,
+            skip_if_plain: true,
+            told: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -662,6 +737,9 @@ mod tests {
                 toasts: false,
             },
             journal: Box::new(StderrJournal),
+            rewrite: crate::rewrite::Resolution::Off,
+            skip_if_plain: true,
+            told: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -784,6 +862,9 @@ mod tests {
                 toasts: false,
             },
             journal: Box::new(StderrJournal),
+            rewrite: crate::rewrite::Resolution::Off,
+            skip_if_plain: true,
+            told: std::sync::atomic::AtomicBool::new(false),
         };
         let request = dictate_request();
         answer(&request, &recorder, &runtime);
@@ -1033,6 +1114,173 @@ mod tests {
             "got {lines:?}"
         );
         assert!(lines[3].contains("toast"), "got {lines:?}");
+    }
+
+    #[test]
+    fn a_working_rewrite_engine_changes_the_delivered_text() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let mut runtime = runtime_with(fake.clone(), false);
+        runtime.rewrite =
+            crate::rewrite::Resolution::Engine(Box::new(crate::rewrite::tests_support::Fake(Ok(
+                "rewritten text with plenty of words so the skip heuristic never applies here"
+                    .to_string(),
+            ))));
+        let recorder = tone_recorder("rewrite-hit");
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        assert!(
+            fake.calls().iter().any(|c| matches!(
+                c,
+                crate::delivery::tests_support::Call::Insert(pane, text)
+                    if pane == "w1:p2"
+                        && text == "rewritten text with plenty of words so the skip heuristic never applies here"
+            )),
+            "got {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn a_failed_rewrite_engine_delivers_the_original_text_and_tells_once() {
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let mut runtime = runtime_with(fake.clone(), false);
+        runtime.rewrite = crate::rewrite::Resolution::Engine(Box::new(
+            crate::rewrite::tests_support::Fake(Err("engine refused the connection".to_string())),
+        ));
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let recorder = tone_recorder("rewrite-fail");
+
+        // Two takes; the skip heuristic does not matter here since the canned
+        // recognition text is short and plain — a short circuit still delivers
+        // the same unrewritten text this test asserts on either way.
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        assert!(
+            fake.calls().iter().all(|c| !matches!(
+                c,
+                crate::delivery::tests_support::Call::Insert(_, text) if text != "fix the worklog entry"
+            )),
+            "got {:?}",
+            fake.calls()
+        );
+
+        let lines = journal.0.lock().unwrap();
+        let notices = lines
+            .iter()
+            .filter(|l| l.contains("rewrite unavailable"))
+            .count();
+        assert_eq!(notices, 1, "got {lines:?}");
+    }
+
+    #[test]
+    fn an_unavailable_rewrite_resolution_delivers_the_original_text_and_tells_once() {
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let mut runtime = runtime_with(fake.clone(), false);
+        runtime.rewrite = crate::rewrite::Resolution::Unavailable("agent not invoked".to_string());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let recorder = tone_recorder("rewrite-unavailable");
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        assert!(
+            fake.calls().iter().any(|c| matches!(
+                c,
+                crate::delivery::tests_support::Call::Insert(_, text) if text == "fix the worklog entry"
+            )),
+            "got {:?}",
+            fake.calls()
+        );
+
+        // Distinguishes Unavailable from Off: Unavailable tells once, Off never
+        // tells at all (see resolution_off_never_tells below). Two takes, one
+        // notice — the same shape a_failed_rewrite_engine_delivers_the_original_text_and_tells_once
+        // proves.
+        let lines = journal.0.lock().unwrap();
+        let notices = lines
+            .iter()
+            .filter(|l| l.contains("rewrite unavailable"))
+            .count();
+        assert_eq!(notices, 1, "got {lines:?}");
+    }
+
+    #[test]
+    fn resolution_off_never_tells() {
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let mut runtime = runtime_with(fake.clone(), false);
+        runtime.rewrite = crate::rewrite::Resolution::Off;
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let recorder = tone_recorder("rewrite-off");
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        assert!(
+            fake.calls().iter().any(|c| matches!(
+                c,
+                crate::delivery::tests_support::Call::Insert(_, text) if text == "fix the worklog entry"
+            )),
+            "got {:?}",
+            fake.calls()
+        );
+
+        // The distinguishing assertion versus the Unavailable test above: Off
+        // produces zero notices, not one.
+        let lines = journal.0.lock().unwrap();
+        assert!(
+            !lines.iter().any(|l| l.contains("rewrite unavailable")),
+            "Off must never tell, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_short_plain_transcript_with_a_configured_engine_still_skips_it() {
+        // Every other Resolution::Engine test above uses either a long
+        // string ("...so the skip heuristic never applies here") or the
+        // canned "fix the worklog entry", which is all-Latin and so fails
+        // has_latin_run before the wiring is even reached — neither could
+        // catch a reversed or missing skip check. "открой файл" has no Latin
+        // letters, is two words (well under the 8-word limit), and shares no
+        // word with an empty bias string — it genuinely satisfies all three
+        // of rewrite::skip::plain's checks (src/rewrite/skip.rs).
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let mut runtime = runtime_with(fake.clone(), false);
+        runtime.recognition = Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+            "открой файл".to_string()
+        ))));
+        // Bypasses the pane/transcript sources entirely so the bias string
+        // handed to the skip check is deterministically empty, not whatever
+        // a live-herdr-less Auto attempt happens to collect.
+        runtime.bias_source = Err("no pane source in this test".to_string());
+        // A Fake that WOULD change the delivered text if it were ever
+        // called — proving the skip really did bypass the engine, not just
+        // that plain() returns true in isolation.
+        runtime.rewrite = crate::rewrite::Resolution::Engine(Box::new(
+            crate::rewrite::tests_support::Fake(Ok("this must never be delivered".to_string())),
+        ));
+        let recorder = tone_recorder("skip-with-engine");
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+
+        assert_eq!(
+            fake.calls(),
+            vec![crate::delivery::tests_support::Call::Insert(
+                "w1:p2".into(),
+                "открой файл".into()
+            )]
+        );
     }
 
     /// A program that is certainly not there, so `bias::pane::read` misses

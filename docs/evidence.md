@@ -555,3 +555,52 @@ with no bias prompt and "pull request" with the same terms passed by hand
 through `--prompt`. This issue wires the same path automatically; whether it
 reaches the same result on a live take is not yet recorded. **Pending, owned
 by the repository's owner** — this session cannot hold a microphone.
+
+## The rewrite stage, against a real local server and a real program
+
+macOS 26.6.2, Rust 1.97.1, `ureq` 2.12.1. Verified two ways: 245 tests passing
+(`cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt
+--check`, `scripts/check_manifest.py` all clean, on `feat/36-rewrite-http-
+command` at `fb883c1`), and then by hand, against software already running on
+this machine — not a fixture, not a fake.
+
+**What the test suite establishes.** Both engines run against a scratch
+stand-in — a `TcpListener` for `http`, a real but trivial subprocess (`echo`,
+`true`) for `command` — covering successful rewrites, connection failure,
+timeout, a non-2xx response, a response whose JSON has no readable content,
+and both placeholder rules (`{transcript}` force-appended when absent,
+`{bias}` never is). The skip heuristic's three checks are each pinned by a
+test that fails if that one check alone is removed, and a daemon-level test
+confirms a transcript the heuristic judges plain is delivered without the
+configured engine ever being called. `off`, `agent` and an unrecognised value
+all route to the same "no engine available" path, told once per daemon
+lifetime, proven by exact notification counts.
+
+**What only a live run establishes, and was run for this entry.** Ollama was
+already installed and running on this machine, serving an OpenAI-compatible
+endpoint at `127.0.0.1:11434` with `gemma4:latest` loaded — nothing was
+started for this measurement that was not already there. A temporary,
+uncommitted test drove the real, compiled `rewrite::http::HttpEngine` against
+it:
+
+| transcript | bias | result |
+|---|---|---|
+| "мерж реквест готов, надо сделать пул реквест" | "recent terms: merge request, pull request" | "merge request готов, надо сделать pull request" |
+
+Both garbled English terms came back correct; the rest of the sentence was
+carried unchanged. The same transcript through the real, compiled
+`rewrite::command::CommandEngine`, configured with a `bash`/`sed` one-liner
+substituting the same two terms, produced the identical corrected sentence.
+
+This is the "пули квест" measurement's answer for the rewrite stage: given a
+context string naming the terms and a working engine — local, in this case,
+not cloud — the garbled term is recovered. Both temporary tests were reverted
+before commit; nothing here is a permanent part of the suite, since CI has no
+Ollama and a live server is not a dependency this project takes on for
+correctness — this paragraph is the record instead.
+
+**What this does not establish.** Whether the daemon's own take path, running
+as the actual plugin end to end from a keypress through a live herdr pane,
+produces the same result on a spoken take — this measurement drove the
+engines directly, not through `dictate`/`transcribe`. That is the same class
+of gap #21's and #26's manual steps named, and it is still open here.

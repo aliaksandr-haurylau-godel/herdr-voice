@@ -256,40 +256,78 @@ fn engine_and_model_findings(stt: &config::Stt, models: &Path) -> (Finding, Find
     (engine, model_line)
 }
 
-pub fn rewrite_finding(engine: &str, agent: &str) -> Finding {
-    match engine {
+pub fn rewrite_finding(rewrite: &config::Rewrite) -> Finding {
+    match rewrite.engine.as_str() {
         "off" => Finding {
             name: "rewrite",
             state: State::Ok,
             detail: "turned off in the configuration".to_string(),
         },
         "agent" => {
-            let candidates: Vec<&str> = if agent == "auto" {
+            // The take path treats "agent" as "no engine available" outright
+            // (`tasks/36/AC_36.md`, "Resolved during S1's gate") — this build
+            // does not invoke it for rewrite, regardless of what is on PATH.
+            // Reporting `Ok` here whenever the tool happens to be found would
+            // tell somebody the opposite of what a take actually does.
+            let candidates: Vec<&str> = if rewrite.agent == "auto" {
                 AGENT_CANDIDATES.to_vec()
             } else {
-                vec![agent]
+                vec![rewrite.agent.as_str()]
             };
-            match candidates.iter().find(|name| on_path(name)) {
-                Some(found) => Finding {
-                    name: "rewrite",
-                    state: State::Ok,
-                    detail: format!("found {found:?} in PATH"),
-                },
-                None => Finding {
-                    name: "rewrite",
-                    state: State::Missing,
-                    detail: format!(
-                        "none of {candidates:?} is in PATH; install one, or set \
-                         [rewrite] engine = \"off\" to insert transcripts unchanged"
-                    ),
-                },
+            let detail = match candidates.iter().find(|name| on_path(name)) {
+                Some(found) => format!(
+                    "{found:?} is on PATH, but this build does not yet invoke the agent \
+                     engine for rewrite; transcripts are delivered unrewritten. Set \
+                     [rewrite] engine to \"http\" or \"command\" for a working engine, or \
+                     \"off\" to silence this."
+                ),
+                None => format!(
+                    "none of {candidates:?} is on PATH, and this build does not yet invoke \
+                     the agent engine for rewrite either way; transcripts are delivered \
+                     unrewritten. Set [rewrite] engine to \"http\" or \"command\" for a \
+                     working engine, or \"off\" to silence this."
+                ),
+            };
+            Finding {
+                name: "rewrite",
+                state: State::Missing,
+                detail,
             }
         }
-        "http" | "command" => Finding {
-            name: "rewrite",
-            state: State::Missing,
-            detail: format!("the {engine:?} engine is not built yet; use \"agent\" or \"off\""),
-        },
+        "http" => {
+            if rewrite.url.is_empty() {
+                Finding {
+                    name: "rewrite",
+                    state: State::Missing,
+                    detail: "give [rewrite] a url, for example: url = \
+                             \"http://127.0.0.1:1234/v1/chat/completions\""
+                        .to_string(),
+                }
+            } else {
+                Finding {
+                    name: "rewrite",
+                    state: State::Ok,
+                    detail: format!("configured to post to {:?}", rewrite.url),
+                }
+            }
+        }
+        "command" => {
+            if rewrite.command.is_empty() {
+                Finding {
+                    name: "rewrite",
+                    state: State::Missing,
+                    detail: "give [rewrite] a command, for example: command = [\"claude\", \
+                             \"-p\", \"fix: {transcript}\"]"
+                        .to_string(),
+                }
+            } else {
+                Finding {
+                    name: "rewrite",
+                    state: State::Ok,
+                    detail: format!("configured to run {:?}", rewrite.command),
+                }
+            }
+        }
         other => Finding {
             name: "rewrite",
             state: State::Missing,
@@ -333,10 +371,7 @@ pub fn run() -> u8 {
             });
         }
     }
-    findings.push(rewrite_finding(
-        &loaded.config.rewrite.engine,
-        &loaded.config.rewrite.agent,
-    ));
+    findings.push(rewrite_finding(&loaded.config.rewrite));
     print!("{}", render(&findings));
     exit_code(&findings)
 }
@@ -567,15 +602,66 @@ mod tests {
 
     #[test]
     fn the_rewrite_engine_is_looked_for_by_name() {
-        assert_eq!(
-            rewrite_finding("agent", "definitely-not-installed").state,
-            State::Missing
-        );
-        assert_eq!(rewrite_finding("off", "auto").state, State::Ok);
-        assert_eq!(
-            rewrite_finding("agent", "auto").name,
-            "rewrite",
-            "auto resolves against the candidate list"
-        );
+        let unavailable = crate::config::Rewrite {
+            engine: "agent".to_string(),
+            agent: "definitely-not-installed".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(rewrite_finding(&unavailable).state, State::Missing);
+
+        let off = crate::config::Rewrite {
+            engine: "off".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(rewrite_finding(&off).state, State::Ok);
+
+        let auto = crate::config::Rewrite {
+            engine: "agent".to_string(),
+            agent: "auto".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(rewrite_finding(&auto).name, "rewrite");
+    }
+
+    #[test]
+    fn http_is_ok_when_a_url_is_configured() {
+        let rewrite = crate::config::Rewrite {
+            engine: "http".to_string(),
+            url: "http://127.0.0.1:1234/v1/chat/completions".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(rewrite_finding(&rewrite).state, State::Ok);
+    }
+
+    #[test]
+    fn http_is_missing_when_no_url_is_configured() {
+        let rewrite = crate::config::Rewrite {
+            engine: "http".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(rewrite_finding(&rewrite).state, State::Missing);
+    }
+
+    #[test]
+    fn command_is_ok_when_a_program_is_configured() {
+        let rewrite = crate::config::Rewrite {
+            engine: "command".to_string(),
+            command: vec!["echo".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(rewrite_finding(&rewrite).state, State::Ok);
+    }
+
+    #[test]
+    fn agent_is_missing_even_when_found_on_path() {
+        let rewrite = crate::config::Rewrite {
+            engine: "agent".to_string(),
+            agent: "auto".to_string(),
+            ..Default::default()
+        };
+        // Whether or not a real agent binary happens to be on this machine's
+        // PATH, the take path treats "agent" as unavailable, so doctor must
+        // report the same thing regardless.
+        assert_eq!(rewrite_finding(&rewrite).state, State::Missing);
     }
 }
