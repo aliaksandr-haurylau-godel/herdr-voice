@@ -7,6 +7,7 @@
 //! `tasks/13/DESIGN_13.md`, section 1.
 
 pub mod command;
+pub mod http;
 pub mod model;
 
 use std::fmt;
@@ -27,17 +28,26 @@ pub enum EngineError {
     },
     /// A name that is none of the three.
     Unknown(String),
-    /// `command` with nothing to run.
-    NotConfigured,
+    /// An engine with nothing to run: `command` with an empty argument list,
+    /// or `http` with an empty `url`.
+    NotConfigured {
+        engine: &'static str,
+        key: &'static str,
+        example: &'static str,
+    },
     Model(model::ModelError),
     Command(command::CommandError),
+    Http(http::HttpError),
 }
 
 /// The engines this build can be asked for.
 const ENGINES: &[&str] = &["candle", "http", "command"];
 
 /// What `[stt] command` might look like, taken from what the prototype ran.
-const EXAMPLE: &str = r#"command = ["whisper-cli", "-m", "{model}", "-f", "{audio}", "-l", "{language}", "-np", "-nt"]"#;
+const COMMAND_EXAMPLE: &str = r#"command = ["whisper-cli", "-m", "{model}", "-f", "{audio}", "-l", "{language}", "-np", "-nt"]"#;
+
+/// What `[stt] url` might look like for `engine = "http"`.
+const HTTP_EXAMPLE: &str = r#"url = "http://127.0.0.1:8080/v1/audio/transcriptions""#;
 
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -48,7 +58,7 @@ impl fmt::Display for EngineError {
             EngineError::NotBuilt { engine, issue } => write!(
                 f,
                 "the {engine:?} engine is not built in this version ({issue}); set \
-                 [stt] engine = \"command\" and give [stt] command a transcriber, for example:\n  {EXAMPLE}"
+                 [stt] engine = \"command\" and give [stt] command a transcriber, for example:\n  {COMMAND_EXAMPLE}"
             ),
             EngineError::Unknown(name) => write!(
                 f,
@@ -59,13 +69,14 @@ impl fmt::Display for EngineError {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            EngineError::NotConfigured => write!(
+            EngineError::NotConfigured { engine, key, example } => write!(
                 f,
-                "[stt] engine is \"command\" but [stt] command is empty, so there is nothing \
-                 to run. For example:\n  {EXAMPLE}"
+                "[stt] engine is {engine:?} but [stt] {key} is empty, so there is nothing \
+                 to run. For example:\n  {example}"
             ),
             EngineError::Model(e) => write!(f, "{e}"),
             EngineError::Command(e) => write!(f, "{e}"),
+            EngineError::Http(e) => write!(f, "{e}"),
         }
     }
 }
@@ -112,13 +123,24 @@ pub fn resolve_with(
             engine: "candle".to_string(),
             issue: "issue #15",
         }),
-        "http" => Err(EngineError::NotBuilt {
-            engine: "http".to_string(),
-            issue: "issue #16",
+        "http" if stt.url.is_empty() => Err(EngineError::NotConfigured {
+            engine: "http",
+            key: "url",
+            example: HTTP_EXAMPLE,
         }),
+        "http" => Ok(Box::new(http::HttpEngine::new(
+            stt.url.clone(),
+            stt.token.clone(),
+            stt.http_model.clone(),
+            stt.language.clone(),
+        ))),
         "command" => {
             if stt.command.is_empty() {
-                return Err(EngineError::NotConfigured);
+                return Err(EngineError::NotConfigured {
+                    engine: "command",
+                    key: "command",
+                    example: COMMAND_EXAMPLE,
+                });
             }
             let model = match model {
                 Some(Ok(path)) => Some(path),
@@ -202,20 +224,36 @@ mod tests {
     }
 
     #[test]
+    fn http_with_an_empty_url_names_the_key() {
+        let error = match resolve(&stt("http", &[]), &nowhere()) {
+            Err(error) => error,
+            Ok(_) => panic!("an empty url must not resolve"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("[stt] url"), "got {message}");
+    }
+
+    #[test]
+    fn http_with_a_url_resolves() {
+        let mut config = stt("http", &[]);
+        config.url = "http://127.0.0.1:1234/v1/audio/transcriptions".to_string();
+        assert!(resolve(&config, &nowhere()).is_ok());
+    }
+
+    #[test]
     fn the_unbuilt_engines_say_so_and_name_the_one_that_works() {
-        for (name, issue) in [("candle", "#15"), ("http", "#16")] {
-            let error = match resolve(&stt(name, &[]), &nowhere()) {
-                Err(error) => error,
-                Ok(_) => panic!("{name} must not resolve: it is not built"),
-            };
-            let message = error.to_string();
-            assert!(message.contains(name), "got {message}");
-            assert!(message.contains(issue), "got {message}");
-            assert!(
-                message.contains("command"),
-                "it must name what works: {message}"
-            );
-        }
+        let (name, issue) = ("candle", "#15");
+        let error = match resolve(&stt(name, &[]), &nowhere()) {
+            Err(error) => error,
+            Ok(_) => panic!("{name} must not resolve: it is not built"),
+        };
+        let message = error.to_string();
+        assert!(message.contains(name), "got {message}");
+        assert!(message.contains(issue), "got {message}");
+        assert!(
+            message.contains("command"),
+            "it must name what works: {message}"
+        );
     }
 
     #[test]

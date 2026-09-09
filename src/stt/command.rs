@@ -123,7 +123,11 @@ impl Engine for CommandEngine {
             &self.language,
             bias,
         );
-        let (program, arguments) = rendered.split_first().ok_or(EngineError::NotConfigured)?;
+        let (program, arguments) = rendered.split_first().ok_or(EngineError::NotConfigured {
+            engine: "command",
+            key: "command",
+            example: super::COMMAND_EXAMPLE,
+        })?;
 
         let output = Command::new(program).args(arguments).output();
         let output = match output {
