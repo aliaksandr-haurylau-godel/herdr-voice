@@ -7,6 +7,7 @@
 //! `tasks/13/DESIGN_13.md`, section 1.
 
 pub mod command;
+pub mod http;
 pub mod model;
 
 use std::fmt;
@@ -36,6 +37,7 @@ pub enum EngineError {
     },
     Model(model::ModelError),
     Command(command::CommandError),
+    Http(http::HttpError),
 }
 
 /// The engines this build can be asked for.
@@ -74,6 +76,7 @@ impl fmt::Display for EngineError {
             ),
             EngineError::Model(e) => write!(f, "{e}"),
             EngineError::Command(e) => write!(f, "{e}"),
+            EngineError::Http(e) => write!(f, "{e}"),
         }
     }
 }
