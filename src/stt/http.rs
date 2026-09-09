@@ -490,4 +490,26 @@ mod tests {
             "got {error:?}"
         );
     }
+
+    /// `std::fs::read` failing (a missing path) must be reported through
+    /// `HttpError::Refused`, not a panic. No listener is started: the read
+    /// fails before any connection would be attempted.
+    #[test]
+    fn a_missing_wav_file_is_refused_not_a_panic() {
+        let mut missing = std::env::temp_dir();
+        missing.push(format!("stt-http-test-missing-{}.wav", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+
+        let engine = HttpEngine::new(
+            "http://127.0.0.1:1/v1/audio/transcriptions".to_string(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
+        let error = engine.transcribe(&missing, "").expect_err("must fail");
+        assert!(
+            matches!(error, EngineError::Http(HttpError::Refused { .. })),
+            "got {error:?}"
+        );
+    }
 }
