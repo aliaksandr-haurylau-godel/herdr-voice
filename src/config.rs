@@ -53,13 +53,22 @@ impl Default for Audio {
 pub struct Stt {
     /// A model identifier, not a file name: the file is `ggml-<model>.bin`.
     pub model: String,
-    /// `candle`, `http` or `command`. The first two are not built yet.
+    /// `candle`, `http` or `command`. `candle` is not built yet (issue #15).
     pub engine: String,
     /// The spoken language, or `auto` to let the engine decide.
     pub language: String,
     /// The program and its arguments for `engine = "command"`, with `{audio}`,
     /// `{model}` and `{language}` replaced before it runs. Provisional name.
     pub command: Vec<String>,
+    /// The endpoint address for `engine = "http"`. Empty means unconfigured.
+    pub url: String,
+    /// An optional bearer token for `engine = "http"`. Empty means no
+    /// `Authorization` header is sent.
+    pub token: String,
+    /// The model name sent in the request for `engine = "http"`. Separate
+    /// from `model`, which stays a local-model identifier for `engine =
+    /// "command"` and is not read by the http engine.
+    pub http_model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -92,6 +101,9 @@ impl Default for Stt {
             engine: "candle".to_string(),
             language: "auto".to_string(),
             command: Vec::new(),
+            url: String::new(),
+            token: String::new(),
+            http_model: String::new(),
         }
     }
 }
@@ -240,6 +252,19 @@ mod tests {
         path.push(format!("herdr-voice-config-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&path).expect("create scratch");
         path
+    }
+
+    #[test]
+    fn an_stt_table_with_only_engine_set_to_http_keeps_the_other_defaults() {
+        let toml = r#"
+            [stt]
+            engine = "http"
+        "#;
+        let config: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(config.stt.engine, "http");
+        assert_eq!(config.stt.url, "");
+        assert_eq!(config.stt.token, "");
+        assert_eq!(config.stt.http_model, "");
     }
 
     #[test]
