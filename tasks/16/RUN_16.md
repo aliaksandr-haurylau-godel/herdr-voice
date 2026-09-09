@@ -131,3 +131,35 @@ names updating it rather than assuming it. The `"http"` case passes its own
 engine/key/example. Section 4 of `DESIGN_16.md` now states this in full.
 
 S2 is closed. Next is S3 Plan.
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_16.md
+  reviewer: planner
+  verdict: QUESTIONS
+  date: 2026-09-09
+  questions:
+    - "HttpEngine had no field and resolve_with's constructor call had no
+       parameter for [stt] language, so AC-3's language field could never
+       reach a request — Engine::transcribe itself carries only audio and
+       bias, so the language has to arrive at construction, and nothing
+       did."
+  blocker: null
+```
+
+Confirmed from the same pass: the `NotConfigured` payload fix does close
+AC-2 and AC-6, and the command case's existing test survives unchanged in
+substance. One thing named but not treated as a question: the `EXAMPLE`
+rename touches three sites, not two — the `NotBuilt` arm also reads the same
+constant (`src/stt.rs:51`); a plain rename, caught by the compiler, added to
+the design text for completeness.
+
+### Answered
+
+`HttpEngine` gains a `language: String` field, `HttpEngine::new` a fourth
+parameter, and `resolve_with`'s construction passes `stt.language.clone()`
+alongside `url`/`token`/`http_model` — the same way `model` and `token`
+already do, since the trait method itself takes only `audio` and `bias`.
+
+S2 continues; re-running the gate against the revised artifact.

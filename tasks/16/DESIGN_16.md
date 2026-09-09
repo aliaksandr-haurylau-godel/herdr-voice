@@ -18,7 +18,12 @@ pub struct HttpEngine {
     url: String,
     token: String,
     model: String,
+    language: String,
     agent: ureq::Agent,
+}
+
+impl HttpEngine {
+    pub fn new(url: String, token: String, model: String, language: String) -> HttpEngine { ... }
 }
 
 pub enum HttpError {
@@ -81,13 +86,25 @@ thread.
 ## 4. Resolution: `stt::resolve_with`
 
 ```rust
-"http" if stt.url.is_empty() => Err(EngineError::NotConfigured),
+"http" if stt.url.is_empty() => Err(EngineError::NotConfigured {
+    engine: "http",
+    key: "url",
+    example: HTTP_EXAMPLE,
+}),
 "http" => Ok(Box::new(http::HttpEngine::new(
     stt.url.clone(),
     stt.token.clone(),
     stt.http_model.clone(),
+    stt.language.clone(),
 ))),
 ```
+
+`stt.language` travels to the engine at construction, the same way `model`
+and `token` do — `Engine::transcribe` itself takes only `audio` and `bias`
+(`src/stt.rs:18`), so anything the engine needs beyond those two, including
+the language, has to arrive when it is built. `HttpEngine::transcribe` reads
+`self.language` per request the same way §2 already states the rule
+("omitted... when it is `\"auto\"`").
 
 `EngineError::NotConfigured` already exists and is what `"command"` returns
 for an empty argument list (`src/stt.rs:121`, and a defensive second site,
@@ -116,10 +133,14 @@ EngineError::NotConfigured { engine, key, example } => write!(
 
 The existing `EXAMPLE` constant (`src/stt.rs:40`) is renamed `COMMAND_EXAMPLE`
 and a sibling `HTTP_EXAMPLE` is added (`url = "http://127.0.0.1:8080/v1/
-audio/transcriptions"`, a generic local address, not a real one). Both
-existing construction sites (`src/stt.rs:121`, `src/stt/command.rs:126`,
-reachable from a child module via `super::COMMAND_EXAMPLE` since Rust's
-privacy allows a descendant module to see an ancestor's private items) pass
+audio/transcriptions"`, a generic local address, not a real one). The rename
+touches three sites, not two: the two `NotConfigured` construction sites
+below, and the existing `NotBuilt` arm's own reference to the same constant
+(`src/stt.rs:51`) — a plain rename, the compiler catches any site missed.
+Both `NotConfigured` construction sites (`src/stt.rs:121`, `src/stt/
+command.rs:126`, reachable from a child module via `super::COMMAND_EXAMPLE`
+since Rust's privacy allows a descendant module to see an ancestor's private
+items) pass
 `{ engine: "command", key: "command", example: COMMAND_EXAMPLE }` — the
 rendered text for the existing `"command"` case is unchanged, so
 `a_command_engine_with_nothing_to_run_names_the_key_and_shows_one`
@@ -176,7 +197,7 @@ copied along with that lesson already built in rather than rediscovered.
 |---|---|
 | AC-1 | §4 |
 | AC-2 | §4 (`EngineError::NotConfigured`, reused) |
-| AC-3 | §2, §3 |
+| AC-3 | §2, §3, §4 (`language` carried at construction) |
 | AC-3a | §2 (`prompt` field) |
 | AC-4 | §2 (`Authorization` header) |
 | AC-5 | §1 (three distinct `HttpError` variants), §3 |
