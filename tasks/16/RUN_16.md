@@ -282,3 +282,26 @@ parenthetical about AC-9 ("no code change needed") was also corrected to
 match Task 4 Step 6's actual content.
 
 S3 continues; re-running the gate against the revised artifact.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_16.md
+  reviewer: implementer
+  verdict: READY
+  date: 2026-09-09
+  questions: []
+  blocker: null
+```
+
+Fourth read, hunting specifically for anything the three prior fixes left
+inconsistent: Task 3's seven-step restructuring is internally consistent —
+the empty-enum scaffold compiles legitimately (`match *self {}` on an
+uninhabited enum), Step 2's test module genuinely fails against that
+scaffold, and no stray reference to a pre-renumbering step count survives
+anywhere else in the plan. A few file line ranges have drifted by one or
+two lines against the current file but land on the right symbol every
+time; the one line that must be exact (`src/stt.rs:121`, the empty-argv
+`NotConfigured` site) matches exactly.
+
+S3 is closed after three rounds. Next is S4 Implement.
