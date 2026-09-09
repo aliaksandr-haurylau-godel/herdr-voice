@@ -308,6 +308,16 @@ fn check_safetensors(path: &Path, size: u64) -> Result<(), StoreError> {
             why: "shorter than a header".to_string(),
         })?;
     let header = u64::from_le_bytes(length);
+    // A safetensors header is tens of kilobytes of JSON naming tensors. The cap
+    // is generous by three orders of magnitude and stops an unpinned file from
+    // sizing an allocation by its own first eight bytes.
+    const LARGEST_PLAUSIBLE_HEADER: u64 = 64 * 1024 * 1024;
+    if header > LARGEST_PLAUSIBLE_HEADER {
+        return Err(StoreError::NotSafetensors {
+            path: path.to_path_buf(),
+            why: format!("its header claims {header} bytes, which no model needs"),
+        });
+    }
     if header == 0 || header.saturating_add(8) > size {
         return Err(StoreError::NotSafetensors {
             path: path.to_path_buf(),

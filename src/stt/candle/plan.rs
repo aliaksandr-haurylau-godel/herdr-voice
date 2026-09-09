@@ -5,7 +5,7 @@
 //! answer produces a wrong transcript, and none of it needs weights to test.
 //! See `tasks/15/DESIGN_15.md`, sections 1 and 7.
 
-use candle_transformers::models::whisper::N_FRAMES;
+use candle_transformers::models::whisper::{self as whisper, N_FRAMES};
 
 /// A window of mel frames: where it starts, and how much of it is real audio
 /// rather than the zero padding that fills a window out to 30 seconds.
@@ -22,6 +22,19 @@ pub const MIN_REAL_FRAMES: usize = 100;
 /// Each timestamp token is 20 milliseconds and each mel frame is 10, so a
 /// timestamp's index doubles into frames.
 const FRAMES_PER_TIMESTAMP: usize = 2;
+
+/// How many mel frames a take's samples actually make, before `pcm_to_mel` pads
+/// them out.
+///
+/// This exists as its own function because getting it wrong is invisible:
+/// `pcm_to_mel` rounds the frame count up to a multiple of 1 500 and then adds
+/// 1 500 more, so a spectrogram is always 15 to 30 seconds longer than its
+/// audio. Planning windows against the spectrogram's length instead of this put
+/// a window of 2 real frames and 1 500 of silence through the model, and it came
+/// back "[BLANK_AUDIO]".
+pub fn real_frames(samples: usize) -> usize {
+    samples / whisper::HOP_LENGTH
+}
 
 /// The next window, or `None` when what is left is padding.
 pub fn next_window(frames: usize, seek: usize) -> Option<Window> {
@@ -88,6 +101,26 @@ pub fn last_timestamp(body: &[u32], ts_begin: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_real_frame_count_is_the_audio_and_not_the_padding() {
+        // pcm_to_mel rounds up to a multiple of 1500 frames and adds 1500 more,
+        // so a 30-second take makes a 4500-frame spectrogram holding 3000 frames
+        // of audio. Planning against 4500 decodes a window of pure silence, and
+        // the model obligingly transcribes it.
+        assert_eq!(real_frames(480_000), 3_000, "30 s at 16 kHz");
+        assert_eq!(real_frames(176_000), 1_100, "11 s at 16 kHz");
+        assert_eq!(real_frames(0), 0);
+
+        // And the guard only means something when it is given this number: with
+        // the padded 4500 a 30-second take yields a second window, with 3000 it
+        // does not.
+        assert!(
+            next_window(4_500, 2_998).is_some(),
+            "the padded count decodes silence"
+        );
+        assert!(next_window(3_000, 2_998).is_none(), "the real count stops");
+    }
 
     #[test]
     fn a_take_shorter_than_a_window_is_one_window() {

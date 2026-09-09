@@ -192,10 +192,17 @@ pub fn config_finding(loaded: &config::Loaded) -> Finding {
     }
 }
 
-/// What `stt::resolve_with` reports for the configured engine, printed exactly as
-/// the daemon would print it — so doctor and the daemon can never disagree. Takes a
-/// model lookup already performed elsewhere (`engine_and_model_findings`, below) so
-/// that reporting on both the engine and the model needs only one `locate` call.
+/// What `stt::check_with` reports for the configured engine. Takes a model lookup
+/// already performed elsewhere (`engine_and_model_findings`, below) so that
+/// reporting on both the engine and the model needs only one `locate` call.
+///
+/// This is every check the daemon makes that does not need the weights, and
+/// `resolve_with` is defined as `check_with` plus construction, so the two agree
+/// on everything checkable here. One thing is not: whether `tokenizer.json` is a
+/// genuinely Whisper tokenizer, which needs the file loaded and so is checked
+/// only when the engine is built. A hand-placed model can therefore be `ok` here
+/// and refused by the daemon; a pinned one cannot, because its tokenizer is
+/// digest-verified.
 fn engine_finding_from(stt: &config::Stt, state: &stt::ModelState) -> Finding {
     // `check_with`, never `resolve_with`: reporting must not load 1.6 GB of
     // weights and run an encoder pass to print six lines
@@ -637,6 +644,40 @@ mod tests {
     }
 
     #[test]
+    fn a_language_nobody_speaks_is_caught_before_the_daemon_meets_it() {
+        // Found by an S4 review: these checks lived only in CandleEngine::new, so
+        // doctor said `engine ok` and exited 0 for a configuration the daemon
+        // then refused at start. A typo in [stt] language was enough.
+        let models = scratch_models("candle-language");
+        write_candle_model(&models, "homegrown");
+        let stt = config::Stt {
+            engine: "candle".to_string(),
+            model: "homegrown".to_string(),
+            language: "klingon".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&stt, &models).0;
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(finding.detail.contains("klingon"), "got {}", finding.detail);
+        assert!(finding.detail.contains("auto"), "got {}", finding.detail);
+    }
+
+    #[test]
+    fn a_config_that_is_not_a_whisper_config_is_caught_too() {
+        let models = scratch_models("candle-badconfig");
+        write_candle_model(&models, "homegrown");
+        let dir = crate::stt::candle::store::directory(&models, "homegrown");
+        std::fs::write(dir.join("config.json"), br#"{"num_mel_bins":80}"#).unwrap();
+        let stt = config::Stt {
+            engine: "candle".to_string(),
+            model: "homegrown".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&stt, &models).0;
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+    }
+
+    #[test]
     fn doctor_reads_no_weights() {
         // The property that makes the check/load split worth having. A present,
         // verified model must still cost doctor nothing to report on: if this
@@ -668,9 +709,25 @@ mod tests {
         weights.extend_from_slice(body.as_bytes());
         weights.extend_from_slice(&[0u8; 4]);
         std::fs::write(dir.join("model.safetensors"), weights).unwrap();
-        std::fs::write(dir.join("config.json"), br#"{"num_mel_bins":80}"#).unwrap();
+        // A real Whisper config, not just valid JSON: `candle::precheck` reads it
+        // as a `whisper::Config`, which is what lets `doctor` catch a config.json
+        // that parses and is not a model's.
+        std::fs::write(dir.join("config.json"), WHISPER_CONFIG).unwrap();
         std::fs::write(dir.join("tokenizer.json"), br#"{"version":"1.0"}"#).unwrap();
     }
+
+    /// The smallest `config.json` that deserialises as a Whisper config.
+    const WHISPER_CONFIG: &[u8] = br#"{
+        "num_mel_bins": 80,
+        "max_source_positions": 1500,
+        "d_model": 384,
+        "encoder_attention_heads": 6,
+        "encoder_layers": 4,
+        "vocab_size": 51865,
+        "max_target_positions": 448,
+        "decoder_attention_heads": 6,
+        "decoder_layers": 4
+    }"#;
 
     #[test]
     fn the_model_line_is_not_used_when_the_argument_list_has_no_placeholder() {

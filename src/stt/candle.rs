@@ -49,6 +49,52 @@ fn check_mel_bins(bins: usize) -> Result<(), EngineError> {
     }
 }
 
+/// Everything about a candle model that can be judged without reading weights:
+/// the mel-bin count from `config.json` (two kilobytes) and the form of
+/// `[stt] language`.
+///
+/// It exists so `doctor` and the daemon agree. Both checks used to live only in
+/// `CandleEngine::new`, so `doctor` reported `engine ok` for a configuration the
+/// daemon then refused — a typo in `[stt] language` was enough. Found by an S4
+/// review. What still cannot be judged here is whether `tokenizer.json` is a
+/// Whisper tokenizer, which needs the file loaded; `new` checks that, and
+/// `doctor`'s comment says as much rather than claiming otherwise.
+pub fn precheck(found: &store::Found, language: &str) -> Result<(), EngineError> {
+    let config_path = found.dir().config();
+    let text = std::fs::read_to_string(&config_path).map_err(|e| {
+        EngineError::Candle(format!(
+            "cannot read {}: {e}. Run `herdr-voice model --choose` to install the \
+             model again",
+            config_path.display()
+        ))
+    })?;
+    let config: Config = serde_json::from_str(&text).map_err(|e| {
+        EngineError::Candle(format!(
+            "{} is not readable JSON ({e}); delete it and run \
+             `herdr-voice model --choose` again",
+            config_path.display()
+        ))
+    })?;
+    check_mel_bins(config.num_mel_bins)?;
+    check_language(language)
+}
+
+/// `auto`, or one of the languages Whisper knows. Checked without a tokenizer so
+/// `doctor` can check it too.
+fn check_language(language: &str) -> Result<(), EngineError> {
+    if language.eq_ignore_ascii_case("auto") {
+        return Ok(());
+    }
+    let lowered = language.to_lowercase();
+    if decode::LANGUAGES.contains(&lowered.as_str()) {
+        return Ok(());
+    }
+    Err(EngineError::Candle(format!(
+        "[stt] language is {language:?}, which Whisper does not know. Use a \
+         two-letter code such as \"en\" or \"ru\", or \"auto\" to detect it"
+    )))
+}
+
 /// A take, as samples, refusing anything that is not what the recorder writes.
 fn read_take(path: &Path) -> Result<Vec<f32>, EngineError> {
     let (pcm, rate) =
@@ -155,11 +201,15 @@ impl CandleEngine {
 impl Engine for CandleEngine {
     fn transcribe(&self, audio: &Path, bias: &str) -> Result<String, EngineError> {
         let pcm = read_take(audio)?;
+        // How much of the take is audio, before `pcm_to_mel` pads it out. The
+        // decoder plans windows against this, not against the spectrogram's
+        // length, so that its one-second guard is about audio and not padding.
+        let real_frames = plan::real_frames(pcm.len());
         let frames_data = mel::spectrogram(&self.config, &pcm, &self.filters);
-        let frames = frames_data.len() / self.config.num_mel_bins;
+        let padded_frames = frames_data.len() / self.config.num_mel_bins;
         let mel = Tensor::from_vec(
             frames_data,
-            (1, self.config.num_mel_bins, frames),
+            (1, self.config.num_mel_bins, padded_frames),
             &self.device,
         )
         .map_err(|e| EngineError::Candle(format!("cannot build the spectrogram: {e}")))?;
@@ -187,7 +237,7 @@ impl Engine for CandleEngine {
             &self.tokenizer,
             &self.tokens,
             &mel,
-            frames,
+            real_frames,
             &bias_ids,
             self.language,
             &self.config,

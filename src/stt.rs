@@ -145,10 +145,15 @@ pub fn locate_configured_model(stt: &Stt, models: &Path) -> ModelState {
 pub fn check_with(stt: &Stt, state: &ModelState) -> Result<Ready, EngineError> {
     match stt.engine.as_str() {
         "candle" => match state {
-            ModelState::Candle(Ok(found)) => Ok(Ready::Candle {
-                device: candle::device::select(),
-                model: found.clone(),
-            }),
+            ModelState::Candle(Ok(found)) => {
+                // Every check that needs no weights, so `doctor` and the daemon
+                // cannot disagree about a configuration the daemon will refuse.
+                candle::precheck(found, &stt.language)?;
+                Ok(Ready::Candle {
+                    device: candle::device::select(),
+                    model: found.clone(),
+                })
+            }
             ModelState::Candle(Err(why)) => Err(EngineError::Candle(why.to_string())),
             // Only reachable if a caller pairs a configuration with a lookup made
             // for a different one, which is a programming error rather than a

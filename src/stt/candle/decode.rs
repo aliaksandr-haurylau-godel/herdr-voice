@@ -183,7 +183,7 @@ pub fn run(
     tokenizer: &Tokenizer,
     tokens: &Tokens,
     mel: &Tensor,
-    frames: usize,
+    real_frames: usize,
     bias: &[u32],
     configured_language: Option<u32>,
     config: &Config,
@@ -194,14 +194,25 @@ pub fn run(
     let mut text = String::new();
     let mut previous: Vec<u32> = Vec::new();
 
-    while let Some(window) = plan::next_window(frames, seek) {
+    // The spectrogram is longer than the audio: `pcm_to_mel` rounds up to a
+    // multiple of 1 500 frames and then adds 1 500 more. Windows are planned
+    // against `real_frames` and sliced out of the padded tensor, which is what
+    // makes the one-second guard mean what it says. Planning against the padded
+    // length instead put a window of 2 real frames and 1 500 of silence through
+    // the model, and it came back "[BLANK_AUDIO]" — found by running a take of
+    // exactly 30 seconds.
+    let padded_frames = mel.dim(2).map_err(|e| e.to_string())?;
+
+    while let Some(window) = plan::next_window(real_frames, seek) {
+        // Whisper's encoder takes exactly 30 seconds. Where the spectrogram's own
+        // padding reaches that far, use it rather than building more.
+        let available = (padded_frames - window.start).min(N_FRAMES);
         let slice = mel
-            .narrow(2, window.start, window.len)
+            .narrow(2, window.start, available)
             .map_err(|e| e.to_string())?;
-        // Whisper's encoder takes exactly 30 seconds; a short window is padded.
-        let padded = if window.len < N_FRAMES {
+        let padded = if available < N_FRAMES {
             let pad = Tensor::zeros(
-                (1, config.num_mel_bins, N_FRAMES - window.len),
+                (1, config.num_mel_bins, N_FRAMES - available),
                 whisper::DTYPE,
                 device,
             )
@@ -228,11 +239,12 @@ pub fn run(
         // cut from the front, and the newest context is what must survive.
         let mut carry = bias.to_vec();
         carry.extend_from_slice(&previous);
-        let mut prefix = plan::prompt_tokens(
-            tokens.start_of_prev,
-            &carry,
-            config.max_target_positions / 2 - 1,
-        );
+        // saturating: `max_target_positions` comes from the model's config.json,
+        // which is digest-verified for a pinned model and only checked to be a
+        // Whisper config for a hand-placed one. A 0 or 1 there would underflow in
+        // a debug build, which `CLAUDE.md` counts as a panic path.
+        let prompt_cap = (config.max_target_positions / 2).saturating_sub(1);
+        let mut prefix = plan::prompt_tokens(tokens.start_of_prev, &carry, prompt_cap);
         // Timestamps on: the advance depends on them. No no_timestamps token.
         prefix.extend_from_slice(&[tokens.sot, language_token, tokens.transcribe]);
 

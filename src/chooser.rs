@@ -93,6 +93,41 @@ impl fetch::Progress for Line {
     }
 }
 
+/// The table a line opens, if it opens one: `[stt] # speech` is the `[stt]`
+/// table, and TOML says so.
+///
+/// A naive `starts_with('[') && ends_with(']')` misses exactly that line, and
+/// missing it made the editor append a second `[stt]` table and produce a file
+/// that does not parse — which `config::load` then discards whole, losing every
+/// other setting in it. Found by an S4 review.
+fn table_name(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    let mut rest = line.strip_prefix('[')?;
+    // Scan to the closing bracket, ignoring one inside a quoted key.
+    let mut quoted = false;
+    let mut end = None;
+    for (at, c) in rest.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            ']' if !quoted => {
+                end = Some(at);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let name = &rest[..end];
+    rest = &rest[end + 1..];
+    // Only whitespace or a comment may follow the header.
+    let tail = rest.trim_start();
+    if tail.is_empty() || tail.starts_with('#') {
+        Some(name.trim())
+    } else {
+        None
+    }
+}
+
 /// `[stt] model = "<identifier>"`, put into a configuration file's text without
 /// disturbing anything else in it.
 fn set_model_key(existing: &str, identifier: &str) -> String {
@@ -104,13 +139,13 @@ fn set_model_key(existing: &str, identifier: &str) -> String {
 
     for text in existing.lines() {
         let trimmed = text.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if let Some(name) = table_name(text) {
             // Leaving [stt] without having found a model key: add one at its end.
             if in_stt && !wrote {
                 out.push(line.clone());
                 wrote = true;
             }
-            in_stt = trimmed == "[stt]";
+            in_stt = name == "stt";
             saw_stt |= in_stt;
             out.push(text.to_string());
             continue;
@@ -161,7 +196,19 @@ fn write_model_key(
     // An absent configuration file is a valid state, so this is a create, not a
     // failure (`CLAUDE.md`, "Rules for the code").
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    std::fs::write(&path, set_model_key(&existing, identifier)).map_err(|e| e.to_string())?;
+    let edited = set_model_key(&existing, identifier);
+    // Never write a file that does not parse. `config::load` treats an
+    // unparsable file as absent and falls back to every default, so a bad edit
+    // here would silently discard every other setting the person has — the
+    // "silent failure" `CLAUDE.md` weighs the same as a wrong transcript. The
+    // caller prints the one line to add by hand when this refuses.
+    if toml::from_str::<toml::Value>(&edited).is_err() {
+        return Err(format!(
+            "the edit would have made {} unparsable, so nothing was written",
+            path.display()
+        ));
+    }
+    std::fs::write(&path, edited).map_err(|e| e.to_string())?;
     Ok(path)
 }
 
@@ -381,6 +428,44 @@ toasts = false
             "got {out}"
         );
         assert_eq!(parsed["stt"]["model"].as_str(), Some("small"), "got {out}");
+    }
+
+    #[test]
+    fn a_table_header_with_a_comment_after_it_is_still_that_table() {
+        // Found by an S4 review: `[stt] # speech` matched neither the header test
+        // nor the name test, so a second [stt] table was appended and the file
+        // stopped parsing — which config::load turns into "every setting lost".
+        let before =
+            "[rewrite]\nmodel = \"haiku\"\n\n[stt] # speech\nmodel = \"tiny\"\nlanguage = \"ru\"\n";
+        let out = set_model_key(before, "small");
+        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
+        assert_eq!(parsed["stt"]["model"].as_str(), Some("small"), "got {out}");
+        assert_eq!(parsed["stt"]["language"].as_str(), Some("ru"));
+        assert_eq!(parsed["rewrite"]["model"].as_str(), Some("haiku"));
+        assert_eq!(out.matches("[stt]").count(), 1, "one table, not two: {out}");
+        assert!(out.contains("# speech"), "the comment must survive: {out}");
+    }
+
+    #[test]
+    fn headers_are_recognised_whatever_surrounds_them() {
+        assert_eq!(table_name("[stt]"), Some("stt"));
+        assert_eq!(table_name("  [stt]  "), Some("stt"));
+        assert_eq!(table_name("[stt] # speech"), Some("stt"));
+        assert_eq!(table_name("[ stt ]"), Some("stt"));
+        assert_eq!(table_name("[a.b]"), Some("a.b"));
+        // Not headers.
+        assert_eq!(table_name("model = \"tiny\""), None);
+        assert_eq!(table_name("# [stt]"), None);
+        assert_eq!(table_name("[stt] model = 1"), None);
+        assert_eq!(table_name(""), None);
+    }
+
+    #[test]
+    fn spaces_inside_the_header_still_name_the_table() {
+        let out = set_model_key("[ stt ]\nlanguage = \"ru\"\n", "base");
+        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
+        assert_eq!(parsed["stt"]["model"].as_str(), Some("base"), "got {out}");
+        assert_eq!(out.matches("stt").count(), 1, "one table, not two: {out}");
     }
 
     #[test]

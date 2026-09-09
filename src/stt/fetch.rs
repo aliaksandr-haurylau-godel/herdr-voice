@@ -124,8 +124,17 @@ pub(crate) fn fetch_into(
     for file in entry.files.iter() {
         // Already there and whole: nothing to fetch. This is what makes a retry
         // after one failed file cheap instead of another three gigabytes.
-        if let Ok(metadata) = std::fs::metadata(dir.join(file.name)) {
-            if metadata.len() == file.bytes {
+        //
+        // The digest is checked, not just the size. Skipping on size alone made
+        // a right-length wrong-bytes file unrepairable: the fetch skipped it,
+        // the verification that follows refused it, and running `--choose`
+        // again did exactly the same thing forever. Hashing a file already in
+        // the page cache is cheap next to fetching it again.
+        let existing = dir.join(file.name);
+        if let Ok(metadata) = std::fs::metadata(&existing) {
+            if metadata.len() == file.bytes
+                && crate::stt::model::sha256_of(&existing).as_deref() == Ok(file.sha256)
+            {
                 progress.done(file.name);
                 continue;
             }
@@ -149,7 +158,15 @@ fn one(
     let part = dir.join(format!("{}.part", file.name));
     let final_path = dir.join(file.name);
 
-    let response = match ureq::get(&url).call() {
+    // A server that accepts the connection and then stalls would otherwise leave
+    // `herdr-voice model --choose` hanging with nothing on screen and no way to
+    // tell why. The read timeout is per read, not for the whole transfer, so a
+    // slow connection still finishes a three-gigabyte file.
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(20))
+        .timeout_read(std::time::Duration::from_secs(60))
+        .build();
+    let response = match agent.get(&url).call() {
         Ok(response) => response,
         Err(ureq::Error::Status(code, _)) => return Err(FetchError::Status { url, code }),
         Err(e) => {
@@ -513,6 +530,27 @@ mod tests {
         let dir = scratch("unknown");
         let error = model("no-such-model", &dir, &mut Silent).expect_err("must refuse");
         assert!(error.to_string().contains("no-such-model"), "got {error}");
+    }
+
+    #[test]
+    fn a_right_length_wrong_bytes_file_is_fetched_again_rather_than_skipped() {
+        // Found by an S4 review: skipping on size alone made this unrepairable —
+        // the fetch skipped the file, the verification that follows refused it,
+        // and running `--choose` again did the same thing forever.
+        let dir = scratch("repair");
+        let mut wrong = WEIGHTS.to_vec();
+        let last = wrong.len() - 1;
+        wrong[last] ^= 0xff;
+        std::fs::write(dir.join("model.safetensors"), &wrong).unwrap();
+
+        let (base, handle) = serve(all_three("200 OK"));
+        fetch_into(&base, &entry(), &dir, &mut Silent).expect("must repair it");
+        handle.join().unwrap();
+        assert_eq!(
+            std::fs::read(dir.join("model.safetensors")).unwrap(),
+            WEIGHTS,
+            "the damaged file must have been replaced"
+        );
     }
 
     #[test]

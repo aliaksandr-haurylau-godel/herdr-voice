@@ -50,10 +50,6 @@ pub fn write(path: &Path, samples: &[f32], rate: u32) -> io::Result<()> {
     std::fs::write(path, encode(samples, rate))
 }
 
-// `read` and `ReadError` have no caller until the built-in engine lands
-// (`tasks/15/PLAN_15.md`, Task 9), and this is a binary crate, so clippy's
-// dead-code lint fires until then. The allowance is on these two items only and
-// Task 9 removes it.
 /// Why a take could not be read back. Each names what was found, because the
 /// only useful thing to say about a file of the wrong shape is what shape it is.
 #[derive(Debug)]

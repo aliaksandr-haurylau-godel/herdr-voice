@@ -296,6 +296,12 @@ absolute home paths that expose an account name.
    for accuracy as well as speed, is still open.
 3. Windows as a whole: key auto-repeat through herdr, the named pipe, audio
    capture. Tracked as a separate issue for someone with a Windows machine.
-4. Recording starts with a short delay while the capture device opens, so the
+4. The built-in engine's decoder has no floor on how far a window advances. A
+   model that emits a timestamp one step past the window's start moves the seek
+   by two frames, so a thirty-second window can take some fifteen hundred passes
+   to cross. This matches the reference implementation and is not a hang, but
+   with no temperature fallback there is one fewer thing stopping a degenerate
+   window.
+5. Recording starts with a short delay while the capture device opens, so the
    first fraction of a second of speech can be lost. A permanently open capture
    stream would remove it at the cost of holding the microphone open.
