@@ -9,6 +9,7 @@
 pub mod candle;
 pub mod catalogue;
 pub mod command;
+pub mod fetch;
 pub mod model;
 
 use std::fmt;
