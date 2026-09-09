@@ -70,3 +70,36 @@ as the API's own `prompt` field, sent only when non-empty, matching
 `{prompt}`'s existing precedent rather than inventing a new rule.
 
 S1 is closed. Next is S2 Design.
+
+### S2 Design
+- artifact: `DESIGN_16.md`
+- produced: 2026-09-09
+
+Written directly, gated by the planner reviewer rather than a live chat
+approval — this repository's established substitution for
+`superpowers:brainstorming`'s approval step in an async run (`tasks/26/
+RUN_26.md`, `tasks/36/RUN_36.md`), used here for the same reason: the design
+decisions below are engineering choices `CLAUDE.md` already delegates, not
+scope or naming decisions (those — the three configuration keys and the wire
+contract — were already settled directly with the owner at S1).
+
+One real simplification found while writing this: `doctor` needs no change.
+`engine_finding_from` (`src/doctor.rs:199-215`) already delegates to
+`stt::resolve_with` and reports `Ok`/`Missing` generically, unlike
+`rewrite_finding`, which had to be hand-written because `rewrite::Resolution`
+carries a third state a plain `Result` cannot express. AC-9 is satisfied by
+`resolve_with`'s own fix alone.
+
+One deliberate departure from `rewrite::http::HttpError`'s two-variant shape:
+this engine's error type needs three variants, not two, since AC-5 asks for
+a connection failure and a non-2xx response to be told apart by message,
+which `rewrite::http`'s `Failed` variant collapses into one case.
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_16.md
+  reviewer: planner
+  verdict: null
+  date: null
+```
