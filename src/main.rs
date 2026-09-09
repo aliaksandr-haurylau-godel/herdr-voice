@@ -11,6 +11,7 @@
 mod audio;
 mod bias;
 mod capture;
+mod chooser;
 mod client;
 mod config;
 mod context;
@@ -109,7 +110,7 @@ pub const MIN_HERDR_VERSION: &str = "0.8.0";
 /// `not implemented yet` and exits `NOT_IMPLEMENTED`. Test-only: a constant used
 /// nowhere else would trip `dead_code`, and CI runs clippy with `-D warnings`.
 #[cfg(test)]
-const IMPLEMENTED: &[&str] = &["daemon", "doctor", "cancel", "dictate"];
+const IMPLEMENTED: &[&str] = &["daemon", "doctor", "cancel", "dictate", "model"];
 
 const USAGE: &str = "\
 herdr-voice — voice dictation for herdr
@@ -119,6 +120,7 @@ usage:
   herdr-voice doctor     report what is missing
   herdr-voice cancel     stop and discard the current recording
   herdr-voice dictate    start a recording, or finish the one running
+  herdr-voice model      list the speech models, or --choose to install one
   herdr-voice --version  print the version
 ";
 
@@ -158,11 +160,11 @@ fn main() -> ExitCode {
             }
             ExitCode::from(outcome.code)
         }
-        other @ (Command::Ptt
-        | Command::Setup
-        | Command::Status
-        | Command::Model
-        | Command::Mic) => {
+        Command::Model => {
+            let choosing = args.iter().any(|a| a == "--choose");
+            ExitCode::from(chooser::run(choosing))
+        }
+        other @ (Command::Ptt | Command::Setup | Command::Status | Command::Mic) => {
             eprintln!("{}: not implemented yet", other.name());
             ExitCode::from(NOT_IMPLEMENTED)
         }
@@ -211,13 +213,13 @@ mod tests {
     #[test]
     fn the_commands_this_issue_implements_are_not_in_the_unimplemented_arm() {
         // A guard against a later change quietly folding one back into the 69 arm.
-        for name in ["daemon", "doctor", "cancel", "dictate"] {
+        for name in ["daemon", "doctor", "cancel", "dictate", "model"] {
             assert!(
                 IMPLEMENTED.contains(&name),
                 "{name} is implemented and must not report 'not implemented yet'"
             );
         }
-        for name in ["ptt", "setup", "status", "model", "mic"] {
+        for name in ["ptt", "setup", "status", "mic"] {
             assert!(
                 !IMPLEMENTED.contains(&name),
                 "{name} is not implemented in this issue"
