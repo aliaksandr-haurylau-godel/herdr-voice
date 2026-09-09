@@ -275,6 +275,50 @@ mod tests {
         );
     }
 
+    /// The other tests in this module only check for substrings
+    /// (`request.contains("name=\"model\"")` and similar), which cannot tell
+    /// a well-formed multipart part from one missing its blank line or using
+    /// a bare `\n` instead of the required `\r\n` — every substring still
+    /// appears either way. This test captures one representative request
+    /// (every optional field present) and compares its body byte-for-byte
+    /// against the exact sequence the multipart spec requires, so a missing
+    /// blank line or a wrong line ending fails the comparison.
+    #[test]
+    fn the_full_multipart_body_matches_the_spec_byte_for_byte() {
+        let (url, handle) = respond_once(r#"{"text":"x"}"#);
+        let engine = HttpEngine::new(
+            url,
+            String::new(),
+            "whisper-1".to_string(),
+            "ru".to_string(),
+        );
+        engine
+            .transcribe(&wav_path(), "recent terms: pull request")
+            .expect("text");
+        let request = handle.join().expect("server thread");
+        let body = request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("a blank line must separate the request headers from the body");
+        let expected = format!(
+            "--{BOUNDARY}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"take.wav\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n\
+             RIFF....WAVEfmt \r\n\
+             --{BOUNDARY}\r\n\
+             Content-Disposition: form-data; name=\"model\"\r\n\r\n\
+             whisper-1\r\n\
+             --{BOUNDARY}\r\n\
+             Content-Disposition: form-data; name=\"language\"\r\n\r\n\
+             ru\r\n\
+             --{BOUNDARY}\r\n\
+             Content-Disposition: form-data; name=\"prompt\"\r\n\r\n\
+             recent terms: pull request\r\n\
+             --{BOUNDARY}--\r\n"
+        );
+        assert_eq!(body, expected);
+    }
+
     #[test]
     fn the_model_field_is_sent_when_configured() {
         let (url, handle) = respond_once(r#"{"text":"x"}"#);
