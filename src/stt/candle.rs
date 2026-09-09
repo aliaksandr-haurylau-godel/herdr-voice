@@ -5,10 +5,6 @@
 //! transcript wrong lives in `plan`, which no test needs weights to reach.
 //! See `tasks/15/DESIGN_15.md`, section 1.
 
-// The engine has no caller until `check_with` builds it (`tasks/15/PLAN_15.md`,
-// Task 10). Task 13 sweeps these allowances out and Task 14 greps for leftovers.
-#![allow(dead_code)]
-
 pub mod decode;
 pub mod device;
 pub mod mel;

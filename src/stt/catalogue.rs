@@ -7,12 +7,6 @@
 //! files were downloaded and hashed, because the API reports a git blob SHA-1 for
 //! those. See `tasks/15/DESIGN_15.md`, section 3.
 
-// Most of this module has no caller until `store`, `fetch` and the chooser land
-// (`tasks/15/PLAN_15.md`, Tasks 5, 6 and 12), and this is a binary crate, so
-// clippy's dead-code lint fires on the fields until then. Task 13 sweeps every
-// such allowance out of this issue's modules and Task 14 greps for leftovers.
-#![allow(dead_code)]
-
 /// Where the models are fetched from. No trailing slash: `fetch` joins paths
 /// with a leading one.
 pub const BASE: &str = "https://huggingface.co";

@@ -113,6 +113,10 @@ Three interchangeable engines:
 
 - `candle` — the built-in engine, pure Rust, no external toolchain. The model is
   chosen by the user on first run from a list with sizes, and downloaded then.
+  Models live in `<state>/models/candle/<identifier>/`, three files each, and a
+  download is verified against a pinned byte count and SHA-256 before anything
+  loads it: a truncated or substituted file is a named failure at that point
+  rather than a confusing one later.
 - `http` — any Whisper-compatible endpoint, cloud or a local server.
 - `command` — an arbitrary external program that reads audio and prints text.
 
@@ -279,7 +283,13 @@ absolute home paths that expose an account name.
    The herdr binary contains no GitHub token handling and does contain `rev-parse`,
    which suggests a git clone; this only matters if the repository is ever closed.
 2. How the built-in `candle` engine compares with whisper.cpp in speed and
-   accuracy on the same recordings. Only whisper.cpp has been measured so far.
+   accuracy on the same recordings. One number exists now and it is not
+   flattering: on a 66-second take with `large-v3-turbo` on Metal, the built-in
+   engine took 5.1 seconds against `whisper-cli`'s 1.65 seconds for 70 seconds of
+   speech. Loading the weights as F16, the obvious answer, is not available —
+   `candle-transformers` 0.11 mixes F32 constants into the Whisper graph. A
+   proper comparison, on the same recordings and for accuracy as well as speed,
+   is still open.
 3. Windows as a whole: key auto-repeat through herdr, the named pipe, audio
    capture. Tracked as a separate issue for someone with a Windows machine.
 4. Recording starts with a short delay while the capture device opens, so the

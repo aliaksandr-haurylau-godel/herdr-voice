@@ -36,7 +36,6 @@ fn mel_to_hz(mel: f64) -> f64 {
 
 /// `n_mels` triangular filters over the `N_FFT / 2 + 1` rFFT bins, row-major,
 /// each normalised by the width of the band it covers.
-#[allow(dead_code)]
 pub fn filters(n_mels: usize) -> Vec<f32> {
     let rate = SAMPLE_RATE as f64;
     let bins = N_FFT / 2 + 1;
@@ -62,7 +61,6 @@ pub fn filters(n_mels: usize) -> Vec<f32> {
 }
 
 /// The log-mel spectrogram of a take, row-major, `n_mels` rows.
-#[allow(dead_code)]
 pub fn spectrogram(config: &whisper::Config, pcm: &[f32], filters: &[f32]) -> Vec<f32> {
     whisper::audio::pcm_to_mel(config, pcm, filters)
 }

@@ -6,9 +6,6 @@
 //! not free to omit, and `tasks/15/DESIGN_15.md` section 10 records what that
 //! leaves open. See section 7 for the rest.
 
-// No caller until the engine below it is wired in (Task 10).
-#![allow(dead_code)]
-
 use candle_core::{IndexOp, Tensor, D};
 use candle_transformers::models::whisper::{self as whisper, model::Whisper, Config, N_FRAMES};
 use tokenizers::Tokenizer;
@@ -33,9 +30,10 @@ pub struct Tokens {
     pub sot: u32,
     pub eot: u32,
     pub transcribe: u32,
-    pub no_timestamps: u32,
     pub start_of_prev: u32,
-    /// The first timestamp token: everything at or above it is a time, not a word.
+    /// The first timestamp token: everything at or above it is a time, not a
+    /// word. Derived from `<|notimestamps|>`, which is not kept: nothing reads
+    /// it, because this engine always decodes with timestamps on.
     pub ts_begin: u32,
 }
 
@@ -51,7 +49,6 @@ impl Tokens {
             sot: id(whisper::SOT_TOKEN)?,
             eot: id(whisper::EOT_TOKEN)?,
             transcribe: id(whisper::TRANSCRIBE_TOKEN)?,
-            no_timestamps,
             start_of_prev: id("<|startofprev|>")?,
             ts_begin: no_timestamps + 1,
         })

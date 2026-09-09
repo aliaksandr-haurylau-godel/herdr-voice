@@ -6,10 +6,6 @@
 //! because a pinned size and digest exist here and did not there. See
 //! `tasks/15/DESIGN_15.md`, section 2.
 
-// No caller until the engine, `check_with`, `doctor` and the chooser land
-// (`tasks/15/PLAN_15.md`, Tasks 9 to 12). Task 13 sweeps these out.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 

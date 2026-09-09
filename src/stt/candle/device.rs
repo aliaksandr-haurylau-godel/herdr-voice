@@ -5,9 +5,6 @@
 //! hardware. Falling back is never a refusal, and never silent: it costs a
 //! factor of ten. See `tasks/15/DESIGN_15.md`, section 8.
 
-// No caller until `check_with` and the engine land (Tasks 9 and 10).
-#![allow(dead_code)]
-
 /// What the engine will run on, and — when it is not the fast answer — why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {

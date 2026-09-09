@@ -512,9 +512,22 @@ pub fn start() -> Result<Outcome, TransportError> {
     let models = transport::state_directory(&transport::Vars::from_env())
         .map(|state| state.join("models"))
         .unwrap_or_else(|| std::path::PathBuf::from("models"));
+    // Which device the built-in engine will run on, said out loud at start: the
+    // CPU is about ten times slower, and somebody who is on it should learn that
+    // now rather than after waiting a minute for a minute of speech
+    // (`tasks/15/DESIGN_15.md`, section 8). This costs one more `check_with`
+    // than strictly needed, which reads no weights, and it keeps the reporting
+    // out of `resolve_with`, which the daemon and `doctor` share.
+    let state = stt::locate_configured_model(&loaded.config.stt, &models);
+    if let Ok(stt::Ready::Candle { device, .. }) = stt::check_with(&loaded.config.stt, &state) {
+        eprintln!(
+            "recognition: the built-in engine, {}",
+            crate::stt::candle::device::describe(&device)
+        );
+    }
     // Not fatal: the daemon still answers `cancel`, and `doctor` reports the same
     // thing this does. The reason is kept and given to whoever finishes a take.
-    let recognition: Recognition = stt::resolve(&loaded.config.stt, &models).map_err(|e| {
+    let recognition: Recognition = stt::resolve_with(&loaded.config.stt, state).map_err(|e| {
         eprintln!("recognition unavailable: {e}");
         e.to_string()
     });

@@ -5,9 +5,6 @@
 //! answer produces a wrong transcript, and none of it needs weights to test.
 //! See `tasks/15/DESIGN_15.md`, sections 1 and 7.
 
-// No caller until the decoder lands (`tasks/15/PLAN_15.md`, Task 9).
-#![allow(dead_code)]
-
 use candle_transformers::models::whisper::N_FRAMES;
 
 /// A window of mel frames: where it starts, and how much of it is real audio

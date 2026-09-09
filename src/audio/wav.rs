@@ -54,7 +54,6 @@ pub fn write(path: &Path, samples: &[f32], rate: u32) -> io::Result<()> {
 // (`tasks/15/PLAN_15.md`, Task 9), and this is a binary crate, so clippy's
 // dead-code lint fires until then. The allowance is on these two items only and
 // Task 9 removes it.
-#[allow(dead_code)]
 /// Why a take could not be read back. Each names what was found, because the
 /// only useful thing to say about a file of the wrong shape is what shape it is.
 #[derive(Debug)]
@@ -107,7 +106,6 @@ impl fmt::Display for ReadError {
 
 impl std::error::Error for ReadError {}
 
-#[allow(dead_code)]
 /// The samples and the rate a take was written at. The inverse of `encode`, and
 /// deliberately no more general than that: `audio::resample` serves capture, and a
 /// take that is not the shape this crate writes is a fault to name rather than a

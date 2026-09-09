@@ -5,9 +5,6 @@
 //! every check, and there is no window in which a half-written model exists.
 //! See `tasks/15/DESIGN_15.md`, section 4.
 
-// No caller until the chooser lands (`tasks/15/PLAN_15.md`, Task 12).
-#![allow(dead_code)]
-
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

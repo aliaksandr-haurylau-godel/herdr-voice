@@ -36,7 +36,6 @@ pub enum EngineError {
     /// not right, a device, a take of the wrong shape, a decode that failed. The
     /// message is carried whole because each of those already names what to do.
     // Constructed from Task 10 onward, when `check_with` builds the engine.
-    #[allow(dead_code)]
     Candle(String),
     Model(model::ModelError),
     Command(command::CommandError),
@@ -136,11 +135,6 @@ pub fn locate_configured_model(stt: &Stt, models: &Path) -> ModelState {
         }
         _ => ModelState::NotUsed,
     }
-}
-
-/// The engine the configuration asks for, built and ready, or the reason it is not.
-pub fn resolve(stt: &Stt, models: &Path) -> Result<Box<dyn Engine + Send + Sync>, EngineError> {
-    resolve_with(stt, locate_configured_model(stt, models))
 }
 
 /// Every check the daemon makes before it loads anything, and every check
@@ -264,6 +258,13 @@ mod tests {
             command: command.iter().map(|s| s.to_string()).collect(),
             ..Stt::default()
         }
+    }
+
+    /// What `resolve` used to be. The daemon looks the model up itself now, so
+    /// it can report the device before loading, and the one-line wrapper stopped
+    /// having a caller outside these tests.
+    fn resolve(stt: &Stt, models: &Path) -> Result<Box<dyn Engine + Send + Sync>, EngineError> {
+        resolve_with(stt, locate_configured_model(stt, models))
     }
 
     fn nowhere() -> std::path::PathBuf {
