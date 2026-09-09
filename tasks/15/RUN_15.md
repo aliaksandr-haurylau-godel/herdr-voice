@@ -609,3 +609,53 @@ S3 is closed after four rounds. Next is S4 Implement.
 ## S4 Implement
 
 Executing `PLAN_15.md` task by task, one commit each, tests first.
+
+### Tasks 1 to 5 done
+
+| task | commit | tests |
+|---|---|---|
+| 1 the candle dependencies | `e462404` | 249 |
+| 2 `wav::read` | `4289c2b` | 253 |
+| 3 the mel filterbank | `ef95cb2` | 256 |
+| 4 the pinned catalogue | `f57f8f2` | 262 |
+| 5 the candle store | `7b761ad` | 272 |
+
+Four things worth recording, three of them mine.
+
+**Two commits went in with clippy red and were amended.** Both times the gate
+command was piped — `cargo clippy ... | tail -2` — and under `set -e` a
+pipeline's exit status is the last stage's, so `tail` succeeding hid clippy
+failing. The same mistake was then repeated inside the gate script written to
+prevent it. The script now redirects to a file and tests the exit status
+directly, and no gate command in this run is piped. Both affected commits
+(Tasks 2 and 4) were amended after the real failure was seen, so no commit on
+this branch is red; the branch was checked at its tip after each amend.
+
+**The dead-code lint fires on every module before its consumer lands.** This is
+a binary crate, so anything not yet called from `main` is dead code and clippy
+runs at `-D warnings`. Each new module carries a narrow `#![allow(dead_code)]`
+with a comment naming the task that removes it. Task 13 sweeps them and Task 14
+greps for leftovers — a plan step added for this, because an allowance left
+behind silently stops catching real dead code later.
+
+**`cargo test --lib` does not work here.** `PLAN_15.md` uses it in several task
+steps; this crate has only a `[[bin]]` target, so the command is
+`cargo test <filter>`. Not corrected in the plan retroactively — the plan is the
+artifact that was gated, and this belongs in the run.
+
+**A test helper raced itself, and a test asserted the wrong thing.** The store's
+`sha` helper derived its scratch file's name from the content's length and first
+byte; every fixture writes identical bytes, `cargo test` runs on many threads,
+and two threads wrote and deleted one path underneath each other. Replaced with a
+process-wide counter. Separately,
+`the_right_size_and_the_wrong_bytes_are_caught_by_the_digest` flipped the file's
+last byte, which is header JSON, so check 3 caught it and the digest was never
+reached — the test passed for the wrong reason in the sense that it proved the
+format check, not the digest. The safetensors fixture now carries a real tensor
+data region and the flip lands there. Found by running the tests, not by reading
+them.
+
+Mutation-tested before committing, each confirmed to turn the suite red:
+zeroing the mel filterbank; replacing the Slaney scale with a linear one;
+skipping the store's digest check; checking the digest before the size; and
+returning `Verified` for a model nobody pinned.
