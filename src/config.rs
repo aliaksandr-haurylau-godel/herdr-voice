@@ -276,6 +276,9 @@ mod tests {
         assert_eq!(defaults.stt.engine, "candle");
         assert_eq!(defaults.stt.language, "auto");
         assert!(defaults.stt.command.is_empty());
+        assert_eq!(defaults.stt.url, "");
+        assert_eq!(defaults.stt.token, "");
+        assert_eq!(defaults.stt.http_model, "");
         assert_eq!(defaults.rewrite.engine, "agent");
         assert_eq!(defaults.rewrite.agent, "auto");
     }
