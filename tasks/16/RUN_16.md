@@ -305,3 +305,60 @@ time; the one line that must be exact (`src/stt.rs:121`, the empty-argv
 `NotConfigured` site) matches exactly.
 
 S3 is closed after three rounds. Next is S4 Implement.
+
+## Gate S4
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff on feat/16-http-recognition since 851821c
+  reviewer: one review, mutation-testing every field-presence rule and error variant
+  verdict: QUESTIONS
+  date: 2026-09-09
+  blocker: null
+```
+
+517 insertions across `src/stt.rs`, `src/stt/http.rs` (new), `src/stt/
+command.rs`, `src/config.rs`, `src/doctor.rs`. All four gates green, 264
+tests. Seventeen mutations run; fifteen caught. No correctness defect —
+both misses are coverage gaps in already-correct code, confirmed by direct
+byte-level inspection of the shipped multipart body and by checking the
+real `status` code is genuinely carried through, not hardcoded.
+
+Clean: the `NotConfigured` refactor (both engines name themselves
+correctly); all eight field-presence mutations across `model`/`language`/
+`prompt`/`Authorization` (`language`'s "omit when auto" rule confirmed as
+the deliberate opposite of `command::render`'s literal substitution); no
+leak of the transcript, bias, audio bytes or request/response bodies into
+any error message; no panic path, including a missing WAV file returning
+`Err`; no trace of Task 3's empty-enum scaffold; `doctor`'s test fix is a
+real, meaningful assertion; no absolute path or private name anywhere.
+
+### Sent back for fixing
+
+1. **`HttpError::Failed`'s `status` field can be hardcoded to `500` and
+   nothing catches it.** `a_non_2xx_response_is_a_failure_naming_the_status`
+   is the only test exercising this variant, and its fixture happens to use
+   status 500 — mutating `status: code` to `status: 500` leaves every test
+   green. Add a second case with a different status (e.g. 503) to the same
+   test or a sibling one, so the real code path (carrying `code` through,
+   not a fixed value) is what's actually proven.
+2. **The multipart body's tests are substring checks only** (`request.
+   contains("name=\"model\"")` and similar) and would not catch a
+   malformed part — a missing blank line between a part's headers and its
+   content, or a `\n` where `\r\n` belongs. Both mutations left all twelve
+   tests green. Add at least one test that inspects the captured request's
+   exact structure closely enough to catch these two classes (a full-body
+   equality check against an expected byte string for one representative
+   request is the most direct way, given the boundary is a fixed constant).
+3. **The WAV-read-failure path has no dedicated test.** `std::fs::read`
+   failing (a missing file) is mapped to `HttpError::Refused` without a
+   panic — verified by the reviewer with a scratch test, but no equivalent
+   ships in the diff. Add one.
+4. **`every_key_has_a_default` doesn't assert the three new `Stt` fields.**
+   Its name promises checking every key against `Config::default()`; add
+   `url`/`token`/`http_model` to it rather than relying only on the
+   separate partial-TOML test to cover the same ground.
+
+None of the four is a design or scope question — all are additional tests
+against code already confirmed correct by direct inspection.
