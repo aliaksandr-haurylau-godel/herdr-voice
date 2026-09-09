@@ -90,8 +90,43 @@ thread.
 ```
 
 `EngineError::NotConfigured` already exists and is what `"command"` returns
-for an empty argument list (`src/stt.rs`) — reused here rather than adding a
-second "not configured" variant. This closes AC-2 without a new type.
+for an empty argument list (`src/stt.rs:121`, and a defensive second site,
+`src/stt/command.rs:126`, for the case `render` somehow produces an empty
+argument list even though `resolve_with` already checked `stt.command` was
+non-empty — unreachable in practice, still has to compile). Today it is a
+unit variant with a hard-coded `Display` naming `[stt] command` specifically
+(`src/stt.rs:62-66`) — reused as-is for `"http"`, it would tell somebody
+whose `[stt] url` is empty to fill in `[stt] command` instead, which fails
+AC-2 ("a distinct, named case") and AC-6 alike, and reaches `doctor` verbatim
+through `engine_finding_from`'s `e.to_string()` (`src/doctor.rs:212`).
+
+`NotConfigured` gains a payload instead of a second variant:
+
+```rust
+NotConfigured { engine: &'static str, key: &'static str, example: &'static str },
+```
+
+```rust
+EngineError::NotConfigured { engine, key, example } => write!(
+    f,
+    "[stt] engine is {engine:?} but [stt] {key} is empty, so there is nothing \
+     to run. For example:\n  {example}"
+),
+```
+
+The existing `EXAMPLE` constant (`src/stt.rs:40`) is renamed `COMMAND_EXAMPLE`
+and a sibling `HTTP_EXAMPLE` is added (`url = "http://127.0.0.1:8080/v1/
+audio/transcriptions"`, a generic local address, not a real one). Both
+existing construction sites (`src/stt.rs:121`, `src/stt/command.rs:126`,
+reachable from a child module via `super::COMMAND_EXAMPLE` since Rust's
+privacy allows a descendant module to see an ancestor's private items) pass
+`{ engine: "command", key: "command", example: COMMAND_EXAMPLE }` — the
+rendered text for the existing `"command"` case is unchanged, so
+`a_command_engine_with_nothing_to_run_names_the_key_and_shows_one`
+(`src/stt.rs:234`) keeps asserting the same string, only through the new
+payload shape; the plan names updating it explicitly rather than assuming it
+compiles unchanged. `"http"`'s new empty-`url` site passes `{ engine: "http",
+key: "url", example: HTTP_EXAMPLE }`.
 
 ## 5. Configuration
 

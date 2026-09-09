@@ -103,3 +103,31 @@ gate:
   verdict: null
   date: null
 ```
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_16.md
+  reviewer: planner
+  verdict: QUESTIONS
+  date: 2026-09-09
+  questions:
+    - "Reusing EngineError::NotConfigured as-is for the http engine's empty
+       url reaches doctor with a message naming [stt] command, not [stt]
+       url — failing AC-2 and AC-6, and the design did not say how a message
+       becomes engine-specific while keeping one variant."
+  blocker: null
+```
+
+### Answered
+
+`NotConfigured` gains a payload — `{ engine, key, example }` — rather than a
+second variant. Both existing construction sites (`src/stt.rs:121`,
+`src/stt/command.rs:126`) updated to pass the `"command"` case explicitly;
+the rendered text for that case is unchanged, so the existing test
+(`a_command_engine_with_nothing_to_run_names_the_key_and_shows_one`,
+`src/stt.rs:234`) keeps its assertion, only through the new shape — the plan
+names updating it rather than assuming it. The `"http"` case passes its own
+engine/key/example. Section 4 of `DESIGN_16.md` now states this in full.
+
+S2 is closed. Next is S3 Plan.
