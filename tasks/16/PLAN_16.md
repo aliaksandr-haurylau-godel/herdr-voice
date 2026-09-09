@@ -208,8 +208,11 @@ git commit -m "Add [stt]'s new keys: url, token, http_model"
 
 **Files:**
 - Create: `src/stt/http.rs`
-- Modify: `src/stt.rs` (`pub mod http;` beside the existing `pub mod
-  command;`)
+- Modify: `src/stt.rs`: `pub mod http;` beside the existing `pub mod
+  command;`; `EngineError` (`:22-34`) gains a sixth variant, `Http(http::
+  HttpError)`, alongside `Command(command::CommandError)`; the `Display`
+  impl (`:44-68`) gains a matching arm, `EngineError::Http(e) => write!(f,
+  "{e}")`, the same one-line delegation `Command(e)` already uses.
 
 **Before starting:** read `src/rewrite/http.rs` in full — this task ports
 its `HttpEngine` shape (a dedicated `ureq::Agent`, pooling disabled, a fixed
@@ -392,7 +395,26 @@ mod tests {
 Run: `cargo test --bin herdr-voice stt::http`
 Expected: FAIL to compile — the module does not exist yet.
 
-- [ ] **Step 3: Implement `HttpEngine`, `HttpError`, the multipart body**
+- [ ] **Step 3: Give `EngineError` its sixth variant, then implement
+  `HttpEngine`, `HttpError`, the multipart body**
+
+In `src/stt.rs`, add the variant and the `Display` arm before writing
+`src/stt/http.rs` — the new module's own tests construct
+`EngineError::Http(...)` and cannot compile without it:
+
+```rust
+// In EngineError, alongside Command(command::CommandError):
+Http(http::HttpError),
+```
+
+```rust
+// In the Display impl, alongside EngineError::Command(e) => write!(f, "{e}"):
+EngineError::Http(e) => write!(f, "{e}"),
+```
+
+`pub mod http;` also needs adding to `src/stt.rs` at this point (not
+deferred to a later step) — the variant's own type, `http::HttpError`,
+does not resolve until the module is declared.
 
 At the top of `src/stt/http.rs`, the same import `src/stt/command.rs:11` uses:
 
@@ -471,9 +493,10 @@ file, but must not panic).
 Run: `cargo test --bin herdr-voice stt::http`
 Expected: PASS, all twelve tests.
 
-- [ ] **Step 5: Register the module**
+- [ ] **Step 5: Run the whole suite**
 
-Add `pub mod http;` to `src/stt.rs` beside `pub mod command;`.
+`pub mod http;` and the `Http` variant were already added in Step 3, so
+this step is the whole-crate check, not a registration step.
 
 Run: `cargo test`
 Expected: PASS, no regressions elsewhere.
@@ -494,6 +517,9 @@ git commit -m "Add stt::http, the Whisper-compatible endpoint recognition engine
   `the_unbuilt_engines_say_so_and_name_the_one_that_works` test)
 - Modify: `src/config.rs:56` (the stale `engine` doc comment, if Task 2 did
   not already correct it)
+- Modify: `src/doctor.rs:561-569` (the `"engine-http"` block inside
+  `the_engine_line_names_what_resolve_reports_for_each_engine` — see Step 6;
+  this is a real, necessary edit, not an optional cleanup)
 
 **Before starting:** read `DESIGN_16.md` §4 for the exact match arms.
 
@@ -558,12 +584,36 @@ holds for.
 Run: `cargo test --bin herdr-voice stt::`
 Expected: PASS, including the two new tests and the narrowed loop test.
 
-- [ ] **Step 6: Confirm `doctor` needs no change (`DESIGN_16.md` §6)**
+- [ ] **Step 6: Fix the one pre-existing `doctor` test this wiring breaks**
 
-Run: `cargo test --bin herdr-voice doctor::` — expected PASS with no
-modification to `src/doctor.rs`. If any `doctor` test fails, that
-contradicts the design's own claim and is a finding to report, not a gap to
-silently patch around.
+`DESIGN_16.md` §6's claim — that `engine_finding_from`'s generic delegation
+means `doctor.rs` itself needs no code change — holds for `doctor.rs`'s
+production code, but not for one of its existing *tests*:
+`the_engine_line_names_what_resolve_reports_for_each_engine`'s `"engine-
+http"` block (`src/doctor.rs:561-569`) builds a plain `Stt::default()` with
+`engine = "http"` (so `url` is empty) and asserts
+`finding.detail.contains("#16")` — text only `EngineError::NotBuilt`'s
+`Display` produces. Once `"http"` with an empty `url` returns
+`NotConfigured` instead, that assertion fails.
+
+Replace the `"#16"` assertion with one matching what `NotConfigured` now
+says:
+
+```rust
+let models = scratch_models("engine-http");
+let http = config::Stt {
+    engine: "http".to_string(),
+    ..config::Stt::default()
+};
+let finding = engine_and_model_findings(&http, &models).0;
+assert_eq!(finding.state, State::Missing);
+assert!(finding.detail.contains("http"), "got {finding:?}");
+assert!(finding.detail.contains("url"), "got {finding:?}");
+```
+
+Run: `cargo test --bin herdr-voice doctor::`
+Expected: PASS, including this test in its corrected form and every other
+`doctor` test unchanged.
 
 - [ ] **Step 7: Run the whole suite**
 
@@ -573,7 +623,7 @@ Expected: all four green.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/stt.rs src/config.rs
+git add src/stt.rs src/config.rs src/doctor.rs
 git commit -m "Wire [stt] engine = \"http\" into resolve_with"
 ```
 

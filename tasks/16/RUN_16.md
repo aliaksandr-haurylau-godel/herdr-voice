@@ -217,3 +217,37 @@ gate:
   verdict: null
   date: null
 ```
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_16.md
+  reviewer: implementer
+  verdict: QUESTIONS
+  date: 2026-09-09
+  questions:
+    - "No task ever adds EngineError::Http(http::HttpError) to src/stt.rs's
+       EngineError enum, even though Task 3's own tests construct it and
+       DESIGN_16.md §1 requires it — Task 3 cannot compile without a
+       variant no step adds."
+    - "Task 4 Step 7's 'all four green' is unreachable as written:
+       src/doctor.rs:569 asserts finding.detail.contains(\"#16\") for the
+       http engine, text only NotBuilt produces — once resolve_with's
+       http arm stops returning NotBuilt, this pre-existing test fails,
+       and no task lists src/doctor.rs as a file to modify."
+  blocker: null
+```
+
+### Answered
+
+Task 3 now adds the `Http` variant and its `Display` arm as its own first
+sub-step, before the module it depends on is even written, with the reason
+stated (the module's own tests cannot compile without it). Task 4 gains a
+new step and a listed file (`src/doctor.rs:561-569`) that replaces the
+`"#16"` assertion with one matching what `NotConfigured` now says
+(`finding.detail.contains("url")`) — a real fix, not an optional cleanup.
+`DESIGN_16.md` §6 corrected to distinguish "no change to `doctor.rs`'s
+production code" from "one existing test needs updating," which is what the
+gate's second question actually found.
+
+S3 continues; re-running the gate against the revised artifact.

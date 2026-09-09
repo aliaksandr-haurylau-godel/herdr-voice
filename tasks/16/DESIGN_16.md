@@ -172,14 +172,21 @@ file.
 
 ## 6. `doctor`
 
-No change needed. `engine_finding_from` (`src/doctor.rs:199-215`) already
-delegates to `stt::resolve_with` and reports `Ok`/`Missing` from whatever it
-returns — unlike `rewrite_finding`, which hand-writes a per-engine match
-because `rewrite::Resolution` carries a third state (`Unavailable`) a plain
-`Result` cannot express. `stt::resolve_with`'s return type is already a
-`Result`, so once its `"http"` arm stops returning `NotBuilt`, `doctor`'s
-existing generic path reports the real state on its own. AC-9 is satisfied
-by section 4 alone.
+No change to `doctor.rs`'s production code. `engine_finding_from`
+(`src/doctor.rs:199-215`) already delegates to `stt::resolve_with` and
+reports `Ok`/`Missing` from whatever it returns — unlike `rewrite_finding`,
+which hand-writes a per-engine match because `rewrite::Resolution` carries a
+third state (`Unavailable`) a plain `Result` cannot express. `stt::
+resolve_with`'s return type is already a `Result`, so once its `"http"` arm
+stops returning `NotBuilt`, `doctor`'s existing generic path reports the
+real state on its own. AC-9 is satisfied by section 4 alone.
+
+One existing *test* does need updating, not because `doctor`'s own logic is
+wrong but because it asserted on the old, temporary state:
+`the_engine_line_names_what_resolve_reports_for_each_engine`'s `"engine-
+http"` block (`src/doctor.rs:561-569`) checks for `"#16"` in the message —
+text only `NotBuilt` produces. The plan assigns fixing this alongside the
+`resolve_with` wiring itself, since both changes land in the same task.
 
 ## 7. Test doubles
 
