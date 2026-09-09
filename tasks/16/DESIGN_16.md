@@ -196,7 +196,7 @@ copied along with that lesson already built in rather than rediscovered.
 | AC | Covered by |
 |---|---|
 | AC-1 | §4 |
-| AC-2 | §4 (`EngineError::NotConfigured`, reused) |
+| AC-2 | §4 (`EngineError::NotConfigured`, with its new payload) |
 | AC-3 | §2, §3, §4 (`language` carried at construction) |
 | AC-3a | §2 (`prompt` field) |
 | AC-4 | §2 (`Authorization` header) |

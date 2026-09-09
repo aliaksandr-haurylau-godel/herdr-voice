@@ -163,3 +163,32 @@ alongside `url`/`token`/`http_model` — the same way `model` and `token`
 already do, since the trait method itself takes only `audio` and `bias`.
 
 S2 continues; re-running the gate against the revised artifact.
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_16.md
+  reviewer: planner
+  verdict: READY
+  date: 2026-09-09
+  questions: []
+  blocker: null
+```
+
+Third read, hunting specifically for anything the two prior fixes left
+inconsistent: struct field order, constructor signature and every call site
+agree; the `NotConfigured` payload is the same shape everywhere it appears.
+
+Three small stale spots noted for the plan, none reopening the gate — each a
+determined consequence of AC-1, not a design question:
+
+- `the_unbuilt_engines_say_so_and_name_the_one_that_works` (`src/stt.rs:204`)
+  loops over `[("candle", "#15"), ("http", "#16")]`; once `"http"` stops
+  returning `NotBuilt`, its half of that loop needs removing.
+- The coverage table's AC-2 row said "reused" before the payload existed —
+  corrected above.
+- `src/config.rs:56`'s doc comment ("candle, http or command. The first two
+  are not built yet.") is stale once this issue lands; `[stt] engine`'s
+  comment needs updating to name only `candle` as unbuilt.
+
+S2 is closed after three rounds. Next is S3 Plan.
