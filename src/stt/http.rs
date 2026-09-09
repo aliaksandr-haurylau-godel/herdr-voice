@@ -254,9 +254,9 @@ mod tests {
         haystack.windows(needle.len()).position(|w| w == needle)
     }
 
-    fn wav_path() -> std::path::PathBuf {
+    fn wav_path(tag: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("stt-http-test-{}.wav", std::process::id()));
+        path.push(format!("stt-http-test-{tag}-{}.wav", std::process::id()));
         std::fs::write(&path, b"RIFF....WAVEfmt ").expect("write fixture wav");
         path
     }
@@ -265,7 +265,9 @@ mod tests {
     fn the_transcript_is_read_back() {
         let (url, handle) = respond_once(r#"{"text":"pull request, not \"pulley quest\""}"#);
         let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
-        let text = engine.transcribe(&wav_path(), "").expect("text");
+        let text = engine
+            .transcribe(&wav_path("the_transcript_is_read_back"), "")
+            .expect("text");
         assert_eq!(text, "pull request, not \"pulley quest\"");
         let request = handle.join().expect("server thread");
         assert!(request.contains("multipart/form-data"), "got {request}");
@@ -293,7 +295,10 @@ mod tests {
             "ru".to_string(),
         );
         engine
-            .transcribe(&wav_path(), "recent terms: pull request")
+            .transcribe(
+                &wav_path("the_full_multipart_body_matches_the_spec_byte_for_byte"),
+                "recent terms: pull request",
+            )
             .expect("text");
         let request = handle.join().expect("server thread");
         let body = request
@@ -328,7 +333,9 @@ mod tests {
             "whisper-1".to_string(),
             "auto".to_string(),
         );
-        engine.transcribe(&wav_path(), "").expect("text");
+        engine
+            .transcribe(&wav_path("the_model_field_is_sent_when_configured"), "")
+            .expect("text");
         let request = handle.join().expect("server thread");
         assert!(
             request.contains("name=\"model\"") && request.contains("whisper-1"),
@@ -340,7 +347,12 @@ mod tests {
     fn the_model_field_is_absent_when_not_configured() {
         let (url, handle) = respond_once(r#"{"text":"x"}"#);
         let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
-        engine.transcribe(&wav_path(), "").expect("text");
+        engine
+            .transcribe(
+                &wav_path("the_model_field_is_absent_when_not_configured"),
+                "",
+            )
+            .expect("text");
         let request = handle.join().expect("server thread");
         assert!(!request.contains("name=\"model\""), "got {request}");
     }
@@ -349,7 +361,9 @@ mod tests {
     fn the_language_field_is_sent_unless_auto() {
         let (url, handle) = respond_once(r#"{"text":"x"}"#);
         let engine = HttpEngine::new(url, String::new(), String::new(), "ru".to_string());
-        engine.transcribe(&wav_path(), "").expect("text");
+        engine
+            .transcribe(&wav_path("the_language_field_is_sent_unless_auto"), "")
+            .expect("text");
         let request = handle.join().expect("server thread");
         assert!(
             request.contains("name=\"language\"") && request.contains("\r\nru\r\n"),
@@ -361,7 +375,9 @@ mod tests {
     fn the_language_field_is_absent_when_auto() {
         let (url, handle) = respond_once(r#"{"text":"x"}"#);
         let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
-        engine.transcribe(&wav_path(), "").expect("text");
+        engine
+            .transcribe(&wav_path("the_language_field_is_absent_when_auto"), "")
+            .expect("text");
         let request = handle.join().expect("server thread");
         assert!(!request.contains("name=\"language\""), "got {request}");
     }
@@ -371,7 +387,10 @@ mod tests {
         let (url, handle) = respond_once(r#"{"text":"x"}"#);
         let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
         engine
-            .transcribe(&wav_path(), "recent terms: pull request")
+            .transcribe(
+                &wav_path("the_prompt_field_carries_the_bias_string_when_non_empty"),
+                "recent terms: pull request",
+            )
             .expect("text");
         let request = handle.join().expect("server thread");
         assert!(
@@ -384,7 +403,9 @@ mod tests {
     fn an_empty_bias_sends_no_prompt_field() {
         let (url, handle) = respond_once(r#"{"text":"x"}"#);
         let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
-        engine.transcribe(&wav_path(), "").expect("text");
+        engine
+            .transcribe(&wav_path("an_empty_bias_sends_no_prompt_field"), "")
+            .expect("text");
         let request = handle.join().expect("server thread");
         assert!(!request.contains("name=\"prompt\""), "got {request}");
     }
@@ -393,7 +414,12 @@ mod tests {
     fn an_empty_token_sends_no_authorization_header() {
         let (url, handle) = respond_once(r#"{"text":"x"}"#);
         let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
-        engine.transcribe(&wav_path(), "").expect("text");
+        engine
+            .transcribe(
+                &wav_path("an_empty_token_sends_no_authorization_header"),
+                "",
+            )
+            .expect("text");
         let request = handle.join().expect("server thread");
         assert!(
             !request.to_lowercase().contains("authorization"),
@@ -410,7 +436,9 @@ mod tests {
             String::new(),
             "auto".to_string(),
         );
-        engine.transcribe(&wav_path(), "").expect("text");
+        engine
+            .transcribe(&wav_path("a_token_is_sent_as_a_bearer_header"), "")
+            .expect("text");
         let request = handle.join().expect("server thread");
         assert!(request.contains("Bearer secret-token"), "got {request}");
     }
@@ -427,7 +455,12 @@ mod tests {
             String::new(),
             "auto".to_string(),
         );
-        let error = engine.transcribe(&wav_path(), "").expect_err("must fail");
+        let error = engine
+            .transcribe(
+                &wav_path("a_non_2xx_response_is_a_failure_naming_the_status"),
+                "",
+            )
+            .expect_err("must fail");
         assert!(
             matches!(
                 error,
@@ -453,7 +486,12 @@ mod tests {
             String::new(),
             "auto".to_string(),
         );
-        let error = engine.transcribe(&wav_path(), "").expect_err("must fail");
+        let error = engine
+            .transcribe(
+                &wav_path("a_different_non_2xx_status_is_carried_through_unchanged"),
+                "",
+            )
+            .expect_err("must fail");
         assert!(
             matches!(
                 error,
@@ -468,7 +506,12 @@ mod tests {
     fn a_response_with_no_readable_text_is_unreadable() {
         let (url, handle) = respond_once(r#"{"choices":[]}"#);
         let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
-        let error = engine.transcribe(&wav_path(), "").expect_err("must fail");
+        let error = engine
+            .transcribe(
+                &wav_path("a_response_with_no_readable_text_is_unreadable"),
+                "",
+            )
+            .expect_err("must fail");
         assert!(
             matches!(error, EngineError::Http(HttpError::Unreadable { .. })),
             "got {error:?}"
@@ -484,7 +527,12 @@ mod tests {
             String::new(),
             "auto".to_string(),
         );
-        let error = engine.transcribe(&wav_path(), "").expect_err("must fail");
+        let error = engine
+            .transcribe(
+                &wav_path("a_connection_that_refuses_is_named_by_address"),
+                "",
+            )
+            .expect_err("must fail");
         assert!(
             matches!(error, EngineError::Http(HttpError::Refused { .. })),
             "got {error:?}"

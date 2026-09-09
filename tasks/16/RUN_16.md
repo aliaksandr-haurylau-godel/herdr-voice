@@ -421,3 +421,23 @@ made once before while writing issue #36's evidence entry
 afterward and found nothing else.
 
 S5 is closed. Next: the pull request for #16.
+
+## Found by real CI, after the pull request was open
+
+`ubuntu-latest` failed on the first push:
+`stt::http::tests::the_full_multipart_body_matches_the_spec_byte_for_byte`
+compared an empty file-field body against the expected `RIFF....WAVEfmt `
+bytes. Root cause: `wav_path()` (`src/stt/http.rs`) named its fixture file
+by `std::process::id()` alone — the same value for every test in one
+`cargo test` binary, since `cargo test` runs tests as threads inside one
+process, not one process per test. All fifteen call sites wrote to and read
+from the same path, racing each other; a read landing between one test's
+write and a later test's overwrite (or after another test's file had
+already been replaced with different content) explains a run that passed
+locally and failed on a different machine's scheduling. Fixed by giving
+`wav_path` a `tag: &str` parameter and tagging every call site with its own
+test's name, the same per-test-uniqueness convention `bias_scratch(tag)`
+(`src/daemon.rs:1290`) already established elsewhere in this codebase.
+
+Verified: eight full-suite reruns at `--test-threads=32` (well above the
+default), all green, after the fix.
