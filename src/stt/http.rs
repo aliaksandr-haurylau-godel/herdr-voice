@@ -70,7 +70,11 @@ impl std::fmt::Display for HttpError {
                 "cannot reach {url:?}: {detail}; check the server is running and the address is \
                  correct"
             ),
-            HttpError::Failed { url, status, detail } => {
+            HttpError::Failed {
+                url,
+                status,
+                detail,
+            } => {
                 write!(f, "{url:?} answered with status {status}: {detail}")
             }
             HttpError::Unreadable { url, detail } => write!(
@@ -134,13 +138,10 @@ impl Engine for HttpEngine {
 
         let body = build_body(&audio_bytes, &self.model, &self.language, bias);
 
-        let mut request = self
-            .agent
-            .post(&self.url)
-            .set(
-                "Content-Type",
-                &format!("multipart/form-data; boundary={BOUNDARY}"),
-            );
+        let mut request = self.agent.post(&self.url).set(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={BOUNDARY}"),
+        );
         if !self.token.is_empty() {
             request = request.set("Authorization", &format!("Bearer {}", self.token));
         }
@@ -277,7 +278,12 @@ mod tests {
     #[test]
     fn the_model_field_is_sent_when_configured() {
         let (url, handle) = respond_once(r#"{"text":"x"}"#);
-        let engine = HttpEngine::new(url, String::new(), "whisper-1".to_string(), "auto".to_string());
+        let engine = HttpEngine::new(
+            url,
+            String::new(),
+            "whisper-1".to_string(),
+            "auto".to_string(),
+        );
         engine.transcribe(&wav_path(), "").expect("text");
         let request = handle.join().expect("server thread");
         assert!(
@@ -345,13 +351,21 @@ mod tests {
         let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
         engine.transcribe(&wav_path(), "").expect("text");
         let request = handle.join().expect("server thread");
-        assert!(!request.to_lowercase().contains("authorization"), "got {request}");
+        assert!(
+            !request.to_lowercase().contains("authorization"),
+            "got {request}"
+        );
     }
 
     #[test]
     fn a_token_is_sent_as_a_bearer_header() {
         let (url, handle) = respond_once(r#"{"text":"x"}"#);
-        let engine = HttpEngine::new(url, "secret-token".to_string(), String::new(), "auto".to_string());
+        let engine = HttpEngine::new(
+            url,
+            "secret-token".to_string(),
+            String::new(),
+            "auto".to_string(),
+        );
         engine.transcribe(&wav_path(), "").expect("text");
         let request = handle.join().expect("server thread");
         assert!(request.contains("Bearer secret-token"), "got {request}");
@@ -359,10 +373,24 @@ mod tests {
 
     #[test]
     fn a_non_2xx_response_is_a_failure_naming_the_status() {
-        let (url, handle) = respond_once_with_status("500 Internal Server Error", r#"{"error":"model not loaded"}"#);
-        let engine = HttpEngine::new(url.clone(), String::new(), String::new(), "auto".to_string());
+        let (url, handle) = respond_once_with_status(
+            "500 Internal Server Error",
+            r#"{"error":"model not loaded"}"#,
+        );
+        let engine = HttpEngine::new(
+            url.clone(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
         let error = engine.transcribe(&wav_path(), "").expect_err("must fail");
-        assert!(matches!(error, EngineError::Http(HttpError::Failed { status: 500, .. })), "got {error:?}");
+        assert!(
+            matches!(
+                error,
+                EngineError::Http(HttpError::Failed { status: 500, .. })
+            ),
+            "got {error:?}"
+        );
         handle.join().expect("server thread");
     }
 
@@ -371,7 +399,10 @@ mod tests {
         let (url, handle) = respond_once(r#"{"choices":[]}"#);
         let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
         let error = engine.transcribe(&wav_path(), "").expect_err("must fail");
-        assert!(matches!(error, EngineError::Http(HttpError::Unreadable { .. })), "got {error:?}");
+        assert!(
+            matches!(error, EngineError::Http(HttpError::Unreadable { .. })),
+            "got {error:?}"
+        );
         handle.join().expect("server thread");
     }
 
@@ -384,6 +415,9 @@ mod tests {
             "auto".to_string(),
         );
         let error = engine.transcribe(&wav_path(), "").expect_err("must fail");
-        assert!(matches!(error, EngineError::Http(HttpError::Refused { .. })), "got {error:?}");
+        assert!(
+            matches!(error, EngineError::Http(HttpError::Refused { .. })),
+            "got {error:?}"
+        );
     }
 }

@@ -123,10 +123,17 @@ pub fn resolve_with(
             engine: "candle".to_string(),
             issue: "issue #15",
         }),
-        "http" => Err(EngineError::NotBuilt {
-            engine: "http".to_string(),
-            issue: "issue #16",
+        "http" if stt.url.is_empty() => Err(EngineError::NotConfigured {
+            engine: "http",
+            key: "url",
+            example: HTTP_EXAMPLE,
         }),
+        "http" => Ok(Box::new(http::HttpEngine::new(
+            stt.url.clone(),
+            stt.token.clone(),
+            stt.http_model.clone(),
+            stt.language.clone(),
+        ))),
         "command" => {
             if stt.command.is_empty() {
                 return Err(EngineError::NotConfigured {
@@ -217,20 +224,36 @@ mod tests {
     }
 
     #[test]
+    fn http_with_an_empty_url_names_the_key() {
+        let error = match resolve(&stt("http", &[]), &nowhere()) {
+            Err(error) => error,
+            Ok(_) => panic!("an empty url must not resolve"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("[stt] url"), "got {message}");
+    }
+
+    #[test]
+    fn http_with_a_url_resolves() {
+        let mut config = stt("http", &[]);
+        config.url = "http://127.0.0.1:1234/v1/audio/transcriptions".to_string();
+        assert!(resolve(&config, &nowhere()).is_ok());
+    }
+
+    #[test]
     fn the_unbuilt_engines_say_so_and_name_the_one_that_works() {
-        for (name, issue) in [("candle", "#15"), ("http", "#16")] {
-            let error = match resolve(&stt(name, &[]), &nowhere()) {
-                Err(error) => error,
-                Ok(_) => panic!("{name} must not resolve: it is not built"),
-            };
-            let message = error.to_string();
-            assert!(message.contains(name), "got {message}");
-            assert!(message.contains(issue), "got {message}");
-            assert!(
-                message.contains("command"),
-                "it must name what works: {message}"
-            );
-        }
+        let (name, issue) = ("candle", "#15");
+        let error = match resolve(&stt(name, &[]), &nowhere()) {
+            Err(error) => error,
+            Ok(_) => panic!("{name} must not resolve: it is not built"),
+        };
+        let message = error.to_string();
+        assert!(message.contains(name), "got {message}");
+        assert!(message.contains(issue), "got {message}");
+        assert!(
+            message.contains("command"),
+            "it must name what works: {message}"
+        );
     }
 
     #[test]

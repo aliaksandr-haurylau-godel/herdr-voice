@@ -566,7 +566,7 @@ mod tests {
         let finding = engine_and_model_findings(&http, &models).0;
         assert_eq!(finding.state, State::Missing);
         assert!(finding.detail.contains("http"), "got {finding:?}");
-        assert!(finding.detail.contains("#16"), "got {finding:?}");
+        assert!(finding.detail.contains("url"), "got {finding:?}");
 
         let models = scratch_models("engine-command");
         let command = command_stt(&["prog", "{audio}"]);
