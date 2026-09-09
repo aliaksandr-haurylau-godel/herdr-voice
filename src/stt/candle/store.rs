@@ -137,6 +137,35 @@ impl fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+/// How many times an engine has been built over the weights, counted only in
+/// tests. Thread-local for the reason `model::locate_calls` is: `cargo test` runs
+/// on many threads and a process-wide counter would pick up unrelated tests.
+/// It pins one property: `doctor` reports on a model without loading it.
+#[cfg(test)]
+pub(crate) mod weight_reads {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn reset() {
+        COUNT.with(|c| c.set(0));
+    }
+
+    pub(crate) fn get() -> usize {
+        COUNT.with(|c| c.get())
+    }
+
+    /// `pub(crate)`, not `pub(super)`. The precedent in `src/stt/model.rs` uses
+    /// `pub(super)` because `locate` calls it from inside its own module; the
+    /// caller here is `CandleEngine::new` in `src/stt/candle.rs`, this module's
+    /// parent, which `pub(super)` does not reach.
+    pub(crate) fn increment() {
+        COUNT.with(|c| c.set(c.get() + 1));
+    }
+}
+
 /// Where a candle model lives. A directory per identifier, under `candle/`, so
 /// the flat `ggml-<model>.bin` namespace beside it is left exactly as it is.
 pub fn directory(models: &Path, identifier: &str) -> PathBuf {

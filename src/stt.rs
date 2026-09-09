@@ -32,6 +32,12 @@ pub enum EngineError {
     Unknown(String),
     /// `command` with nothing to run.
     NotConfigured,
+    /// Anything the built-in engine could not do: a model that is not there or
+    /// not right, a device, a take of the wrong shape, a decode that failed. The
+    /// message is carried whole because each of those already names what to do.
+    // Constructed from Task 10 onward, when `check_with` builds the engine.
+    #[allow(dead_code)]
+    Candle(String),
     Model(model::ModelError),
     Command(command::CommandError),
 }
@@ -67,6 +73,7 @@ impl fmt::Display for EngineError {
                 "[stt] engine is \"command\" but [stt] command is empty, so there is nothing \
                  to run. For example:\n  {EXAMPLE}"
             ),
+            EngineError::Candle(why) => write!(f, "{why}"),
             EngineError::Model(e) => write!(f, "{e}"),
             EngineError::Command(e) => write!(f, "{e}"),
         }
