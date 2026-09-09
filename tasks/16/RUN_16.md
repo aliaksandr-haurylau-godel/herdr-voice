@@ -192,3 +192,28 @@ determined consequence of AC-1, not a design question:
   comment needs updating to name only `candle` as unbuilt.
 
 S2 is closed after three rounds. Next is S3 Plan.
+
+### S3 Plan
+- artifact: `PLAN_16.md`
+- produced: 2026-09-09
+
+Six tasks: the `NotConfigured` payload refactor (1), `[stt]`'s three new
+keys (2), `stt::http` itself (3), wiring plus cleanup of the two stale spots
+S2's third pass found (4), S4 review (5), S5 verify (6). Smaller in scope
+than issues #21, #26 or #36 — this engine reuses `ureq` and mirrors
+`rewrite::http`'s shape directly rather than introducing new infrastructure.
+
+Self-review found two things before this went to gate: a redundant
+`super::HttpError::` qualification in three test assertions (`use super::*`
+already brings `HttpError` into scope) and a missing note that `src/stt/
+http.rs` needs the same `use super::{Engine, EngineError};` import
+`src/stt/command.rs:11` already has — both fixed.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_16.md
+  reviewer: implementer
+  verdict: null
+  date: null
+```
