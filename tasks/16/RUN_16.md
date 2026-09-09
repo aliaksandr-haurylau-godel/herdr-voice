@@ -43,3 +43,30 @@ gate:
   verdict: null
   date: null
 ```
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_16.md
+  reviewer: designer
+  verdict: READY
+  date: 2026-09-09
+```
+
+Two corrections applied before closing, both from the reviewer's notes:
+requirement 2's rationale for omitting `language` when it is `"auto"`
+originally claimed to mirror `command::render`'s treatment of `"auto"`
+(`src/stt/command.rs:32`) — that function does the opposite, substituting
+`"auto"` literally because `whisper-cli` reads it as "detect it." The rule
+itself (omit the field) was already correct in AC-3; only the stated reason
+was wrong, corrected to explain that the API's `language` field has no
+`"auto"` meaning of its own.
+
+The reviewer also noted the wire contract as written never sends the bias
+string `Engine::transcribe`'s second parameter carries (widened by issue
+#26), unlike the `command` engine, which already substitutes it into
+`{prompt}` (`src/stt/command.rs:37`). Added AC-3a: the bias string travels
+as the API's own `prompt` field, sent only when non-empty, matching
+`{prompt}`'s existing precedent rather than inventing a new rule.
+
+S1 is closed. Next is S2 Design.
