@@ -5,5 +5,7 @@
 //! transcript wrong lives in `plan`, which no test needs weights to reach.
 //! See `tasks/15/DESIGN_15.md`, section 1.
 
+pub mod device;
 pub mod mel;
+pub mod plan;
 pub mod store;
