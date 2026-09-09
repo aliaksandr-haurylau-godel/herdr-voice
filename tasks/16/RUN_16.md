@@ -362,3 +362,26 @@ real, meaningful assertion; no absolute path or private name anywhere.
 
 None of the four is a design or scope question — all are additional tests
 against code already confirmed correct by direct inspection.
+
+All four fixed and verified fresh. `HttpError::Failed`'s status now proven
+with a second case (503) alongside the original 500 fixture. The multipart
+body has a byte-exact comparison test alongside the substring-based ones,
+catching both the missing-blank-line and the wrong-line-ending mutations.
+The missing-WAV-file path has a dedicated test, confirmed to catch a
+`.unwrap()` regression by inducing a real panic and reverting. `every_key_
+has_a_default` now checks `url`/`token`/`http_model` against
+`Config::default()` directly. 267 tests, six consecutive full reruns here
+and by the implementer, all green.
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff on feat/16-http-recognition since 851821c, at 9b5e0ed
+  reviewer: one review plus one round of fixes, verified fresh
+  verdict: READY
+  date: 2026-09-09
+  blocker: null
+```
+
+S4 is closed. Next is S5: verify by test suite, then by a real endpoint if
+one is reachable.
