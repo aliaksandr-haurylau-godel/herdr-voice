@@ -6,6 +6,7 @@
 //! string are the only things that change between takes. See
 //! `tasks/13/DESIGN_13.md`, section 1.
 
+pub mod candle;
 pub mod command;
 pub mod model;
 
