@@ -394,6 +394,32 @@ mod tests {
         handle.join().expect("server thread");
     }
 
+    /// A different status than `a_non_2xx_response_is_a_failure_naming_the_status`'s
+    /// fixture: that test alone would still pass against a `status: 500`
+    /// hardcoded into `HttpError::Failed`, since its own fixture happens to
+    /// answer with 500. This one proves the real code path — the status
+    /// carried through from `ureq::Error::Status`, not a fixed value.
+    #[test]
+    fn a_different_non_2xx_status_is_carried_through_unchanged() {
+        let (url, handle) =
+            respond_once_with_status("503 Service Unavailable", r#"{"error":"overloaded"}"#);
+        let engine = HttpEngine::new(
+            url.clone(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
+        let error = engine.transcribe(&wav_path(), "").expect_err("must fail");
+        assert!(
+            matches!(
+                error,
+                EngineError::Http(HttpError::Failed { status: 503, .. })
+            ),
+            "got {error:?}"
+        );
+        handle.join().expect("server thread");
+    }
+
     #[test]
     fn a_response_with_no_readable_text_is_unreadable() {
         let (url, handle) = respond_once(r#"{"choices":[]}"#);
