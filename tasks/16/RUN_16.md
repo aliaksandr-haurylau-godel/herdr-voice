@@ -385,3 +385,39 @@ gate:
 
 S4 is closed. Next is S5: verify by test suite, then by a real endpoint if
 one is reachable.
+
+## Gate S5
+
+```yaml
+gate:
+  stage: S5
+  artifact: docs/evidence.md, "The http recognition engine, against a real
+    whisper.cpp server"
+  verdict: pass
+  date: 2026-09-09
+  platform: macOS 26.6.2, Rust 1.97.1, ureq 2.12.1
+```
+
+Fresh run on `feat/16-http-recognition` at `9b5e0ed`: 267 passed, 0 failed;
+clippy/fmt/manifest clean.
+
+A live server was already running on this machine for an unrelated purpose
+(OpenWhispr's `whisper-server-darwin-arm64`, port 8178, `/inference`).
+A temporary, uncommitted test drove the real, compiled
+`stt::http::HttpEngine` against it: a synthesized 16 kHz mono WAV, "Please
+open the pull request and merge it," came back transcribed exactly. Caught
+a second, real fact worth recording while checking: this server speaks
+whisper.cpp's own `/inference` route, not a path named `/v1/audio/
+transcriptions` — the engine's own `[stt] url` is fully configurable, so
+this needed no code change, only the right address, and it is noted in the
+evidence entry so the same distinction is not rediscovered later. The
+temporary test was reverted (`git checkout -- src/stt/http.rs`) before this
+commit; nothing live-server-dependent is part of the permanent suite.
+
+A stray tool-artifact string (`</new_string>`) was caught and removed from
+the evidence entry before this commit — the same class of mistake this run
+made once before while writing issue #36's evidence entry
+(`tasks/36/RUN_36.md`, "Rebased onto #26's merge"); swept the file
+afterward and found nothing else.
+
+S5 is closed. Next: the pull request for #16.
