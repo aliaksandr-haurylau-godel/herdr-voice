@@ -6,3 +6,4 @@
 //! See `tasks/15/DESIGN_15.md`, section 1.
 
 pub mod mel;
+pub mod store;

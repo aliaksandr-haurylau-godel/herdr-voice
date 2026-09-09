@@ -155,7 +155,7 @@ pub fn locate(models: &Path, model: &str) -> Result<PathBuf, ModelError> {
 
 /// A SHA-256 of a file, computed here rather than pulled in: one digest, used once,
 /// against a dependency the project would carry forever.
-fn sha256_of(path: &Path) -> Result<String, String> {
+pub(crate) fn sha256_of(path: &Path) -> Result<String, String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
