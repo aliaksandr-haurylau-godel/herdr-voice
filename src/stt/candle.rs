@@ -243,3 +243,57 @@ mod tests {
         assert_eq!(read_take(&path).expect("must read").len(), 1600);
     }
 }
+
+/// A check that drives the real engine over a real model and a real take.
+///
+/// `#[ignore]`d, so `cargo test` never runs it and the suite keeps passing with
+/// no model and no network. It is kept rather than deleted because issue #2 —
+/// comparing this engine with whisper.cpp — needs exactly this harness, and
+/// because every timing in `docs/evidence.md` for the built-in engine was
+/// produced with it. Run it as:
+///
+/// ```sh
+/// LIVE_MODELS=<state>/models LIVE_MODEL=tiny LIVE_WAV=take.wav \
+///   cargo test --release candle::live -- --ignored --nocapture
+/// ```
+///
+/// `LIVE_BIAS` sets the bias string, and `LIVE_CPU` forces the CPU so the
+/// fallback can be measured on a machine that has a GPU.
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs a downloaded model; see the module comment"]
+    fn transcribes_a_real_take() {
+        let models = std::path::PathBuf::from(
+            std::env::var("LIVE_MODELS").expect("LIVE_MODELS: the models directory"),
+        );
+        let wav = std::path::PathBuf::from(
+            std::env::var("LIVE_WAV").expect("LIVE_WAV: a 16 kHz mono WAV"),
+        );
+        let identifier = std::env::var("LIVE_MODEL").expect("LIVE_MODEL: a model identifier");
+        let bias = std::env::var("LIVE_BIAS").unwrap_or_default();
+
+        let entry = crate::stt::catalogue::get(&identifier);
+        let found = store::locate(&models, &identifier, entry).expect("the model must verify");
+
+        let selection = if std::env::var("LIVE_CPU").is_ok() {
+            device::Selection::Cpu {
+                why: "forced by the live check",
+            }
+        } else {
+            device::select()
+        };
+
+        let started = std::time::Instant::now();
+        let engine = CandleEngine::new(&found, "auto", &selection).expect("must build");
+        eprintln!("LIVE build+warm: {:?}", started.elapsed());
+
+        let started = std::time::Instant::now();
+        let text = engine.transcribe(&wav, &bias).expect("must transcribe");
+        eprintln!("LIVE transcribe: {:?}", started.elapsed());
+        eprintln!("LIVE text: {text}");
+        assert!(!text.is_empty(), "the transcript must not be empty");
+    }
+}

@@ -51,8 +51,11 @@ pub fn device_for(selection: &Selection) -> candle_core::Device {
 pub fn describe(selection: &Selection) -> String {
     match selection {
         Selection::Metal => "on the GPU, through Metal".to_string(),
+        // The numbers are measured, not estimated: on this machine a 66-second
+        // take took 12-14 s on Metal and 71 s on the CPU with `large-v3-turbo`,
+        // and 0.9-1.3 s against 7.8 s with `tiny`. See `docs/evidence.md`.
         Selection::Cpu { why } => format!(
-            "on the CPU ({why}), which is about ten times slower than the GPU — a \
+            "on the CPU ({why}), which is roughly six times slower than the GPU — a \
              minute of speech takes about a minute with the default model. Set \
              [stt] model to \"tiny\" if that is too slow"
         ),
@@ -90,7 +93,7 @@ mod tests {
         );
         // Ten times slower is a different product, not a slower one. The person
         // must learn that before they wait a minute for a minute of speech.
-        assert!(text.contains("ten times"), "it must name the cost: {text}");
+        assert!(text.contains("six times"), "it must name the cost: {text}");
         assert!(
             text.contains("tiny"),
             "it must name a model that stays usable: {text}"

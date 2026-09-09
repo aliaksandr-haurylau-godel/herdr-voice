@@ -285,11 +285,15 @@ absolute home paths that expose an account name.
 2. How the built-in `candle` engine compares with whisper.cpp in speed and
    accuracy on the same recordings. One number exists now and it is not
    flattering: on a 66-second take with `large-v3-turbo` on Metal, the built-in
-   engine took 5.1 seconds against `whisper-cli`'s 1.65 seconds for 70 seconds of
-   speech. Loading the weights as F16, the obvious answer, is not available —
-   `candle-transformers` 0.11 mixes F32 constants into the Whisper graph. A
-   proper comparison, on the same recordings and for accuracy as well as speed,
-   is still open.
+   engine took 12 to 14 seconds against `whisper-cli`'s 1.65 seconds for 70
+   seconds of speech — roughly eight times slower with the same model. Two
+   reasons are known and both are upstream: the weights cannot be loaded as F16,
+   because `candle-transformers` 0.11 mixes F32 constants into the Whisper graph,
+   and its decoder derives positional embeddings from the whole prefix on every
+   step, so it must be re-fed each time and decoding is quadratic in the tokens
+   generated. The model chosen matters more than either: `tiny` transcribes the
+   same take in about a second. A proper comparison, on the same recordings and
+   for accuracy as well as speed, is still open.
 3. Windows as a whole: key auto-repeat through herdr, the named pipe, audio
    capture. Tracked as a separate issue for someone with a Windows machine.
 4. Recording starts with a short delay while the capture device opens, so the
