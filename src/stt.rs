@@ -27,8 +27,13 @@ pub enum EngineError {
     },
     /// A name that is none of the three.
     Unknown(String),
-    /// `command` with nothing to run.
-    NotConfigured,
+    /// An engine with nothing to run: `command` with an empty argument list,
+    /// or `http` with an empty `url`.
+    NotConfigured {
+        engine: &'static str,
+        key: &'static str,
+        example: &'static str,
+    },
     Model(model::ModelError),
     Command(command::CommandError),
 }
@@ -37,7 +42,10 @@ pub enum EngineError {
 const ENGINES: &[&str] = &["candle", "http", "command"];
 
 /// What `[stt] command` might look like, taken from what the prototype ran.
-const EXAMPLE: &str = r#"command = ["whisper-cli", "-m", "{model}", "-f", "{audio}", "-l", "{language}", "-np", "-nt"]"#;
+const COMMAND_EXAMPLE: &str = r#"command = ["whisper-cli", "-m", "{model}", "-f", "{audio}", "-l", "{language}", "-np", "-nt"]"#;
+
+/// What `[stt] url` might look like for `engine = "http"`.
+const HTTP_EXAMPLE: &str = r#"url = "http://127.0.0.1:8080/v1/audio/transcriptions""#;
 
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -48,7 +56,7 @@ impl fmt::Display for EngineError {
             EngineError::NotBuilt { engine, issue } => write!(
                 f,
                 "the {engine:?} engine is not built in this version ({issue}); set \
-                 [stt] engine = \"command\" and give [stt] command a transcriber, for example:\n  {EXAMPLE}"
+                 [stt] engine = \"command\" and give [stt] command a transcriber, for example:\n  {COMMAND_EXAMPLE}"
             ),
             EngineError::Unknown(name) => write!(
                 f,
@@ -59,10 +67,10 @@ impl fmt::Display for EngineError {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            EngineError::NotConfigured => write!(
+            EngineError::NotConfigured { engine, key, example } => write!(
                 f,
-                "[stt] engine is \"command\" but [stt] command is empty, so there is nothing \
-                 to run. For example:\n  {EXAMPLE}"
+                "[stt] engine is {engine:?} but [stt] {key} is empty, so there is nothing \
+                 to run. For example:\n  {example}"
             ),
             EngineError::Model(e) => write!(f, "{e}"),
             EngineError::Command(e) => write!(f, "{e}"),
@@ -118,7 +126,11 @@ pub fn resolve_with(
         }),
         "command" => {
             if stt.command.is_empty() {
-                return Err(EngineError::NotConfigured);
+                return Err(EngineError::NotConfigured {
+                    engine: "command",
+                    key: "command",
+                    example: COMMAND_EXAMPLE,
+                });
             }
             let model = match model {
                 Some(Ok(path)) => Some(path),
