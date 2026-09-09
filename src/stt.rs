@@ -88,20 +88,53 @@ pub fn wants_our_model(argv: &[String]) -> bool {
     argv.iter().any(|argument| argument.contains("{model}"))
 }
 
-/// The model this configuration would use, if it asks for one at all. `None` means
-/// nothing here would ever look for a model: the engine is not `command`, or its
-/// argument list has no `{model}` placeholder. `Some(Err(_))` means one was expected
-/// and not found. Exposed so that a caller who needs both the engine's readiness and
-/// the model's own state — `doctor`, in particular — can locate the file once and
-/// derive both from that single result, instead of asking twice for the same read.
-pub fn locate_configured_model(
-    stt: &Stt,
-    models: &Path,
-) -> Option<Result<PathBuf, model::ModelError>> {
-    if stt.engine == "command" && wants_our_model(&stt.command) {
-        Some(model::locate(models, &stt.model))
-    } else {
-        None
+/// What the configured engine wants from the models directory, and whether it is
+/// there. One value, looked up once, read by both `check_with` and `doctor` — the
+/// property PR #20 gave `doctor` when it stopped reading a model twice per run.
+#[derive(Debug)]
+pub enum ModelState {
+    /// Nothing in this configuration would ever look for a model: the engine is
+    /// `http`, or `command` with no `{model}` placeholder.
+    NotUsed,
+    /// The ggml file `[stt] command` asks for, unchanged in every respect.
+    Ggml(Result<PathBuf, model::ModelError>),
+    /// The directory `[stt] engine = "candle"` loads.
+    Candle(Result<candle::store::Found, candle::store::StoreError>),
+}
+
+/// Everything that can be decided without reading weights.
+#[derive(Debug)]
+pub enum Ready {
+    /// The ggml path when the argument list has a `{model}` placeholder, and
+    /// `None` when it brings its own. Carried because `check_with` consumes the
+    /// lookup and `resolve_with` builds only from what `check_with` returned.
+    ///
+    /// No `program` field: nothing reads one. `resolve_with` takes the whole
+    /// argument list from the configuration, and giving `doctor` a program name
+    /// to print would change the `command` engine's report, which is not this
+    /// issue's to change.
+    Command { model: Option<PathBuf> },
+    Candle {
+        device: candle::device::Selection,
+        model: candle::store::Found,
+    },
+}
+
+/// The model this configuration would use, if it asks for one at all. Exposed so
+/// that a caller who needs both the engine's readiness and the model's own state
+/// — `doctor`, in particular — can locate it once and derive both from that
+/// single result, instead of asking twice for the same read.
+pub fn locate_configured_model(stt: &Stt, models: &Path) -> ModelState {
+    match stt.engine.as_str() {
+        "candle" => ModelState::Candle(candle::store::locate(
+            models,
+            &stt.model,
+            catalogue::get(&stt.model),
+        )),
+        "command" if wants_our_model(&stt.command) => {
+            ModelState::Ggml(model::locate(models, &stt.model))
+        }
+        _ => ModelState::NotUsed,
     }
 }
 
@@ -110,18 +143,27 @@ pub fn resolve(stt: &Stt, models: &Path) -> Result<Box<dyn Engine + Send + Sync>
     resolve_with(stt, locate_configured_model(stt, models))
 }
 
-/// Builds the engine from a model lookup the caller already performed, so that a
-/// caller who also needs to report on the model's own state — `doctor` — never asks
-/// `locate` a second time for what `resolve` would otherwise look up itself.
-pub fn resolve_with(
-    stt: &Stt,
-    model: Option<Result<PathBuf, model::ModelError>>,
-) -> Result<Box<dyn Engine + Send + Sync>, EngineError> {
+/// Every check the daemon makes before it loads anything, and every check
+/// `doctor` makes at all. Takes the lookup by reference so the caller keeps it:
+/// `doctor` reports on the model separately from the engine, out of this one
+/// value. Reads no weights, which is the whole reason it exists apart from
+/// `resolve_with` (`tasks/15/DESIGN_15.md`, section 2c).
+pub fn check_with(stt: &Stt, state: &ModelState) -> Result<Ready, EngineError> {
     match stt.engine.as_str() {
-        "candle" => Err(EngineError::NotBuilt {
-            engine: "candle".to_string(),
-            issue: "issue #15",
-        }),
+        "candle" => match state {
+            ModelState::Candle(Ok(found)) => Ok(Ready::Candle {
+                device: candle::device::select(),
+                model: found.clone(),
+            }),
+            ModelState::Candle(Err(why)) => Err(EngineError::Candle(why.to_string())),
+            // Only reachable if a caller pairs a configuration with a lookup made
+            // for a different one, which is a programming error rather than a
+            // state a person can reach. Reported, never panicked on.
+            other => Err(EngineError::Candle(format!(
+                "the model was looked up for a different engine ({other:?}); this is \
+                 a defect in the plugin, not in your configuration"
+            ))),
+        },
         "http" => Err(EngineError::NotBuilt {
             engine: "http".to_string(),
             issue: "issue #16",
@@ -130,18 +172,35 @@ pub fn resolve_with(
             if stt.command.is_empty() {
                 return Err(EngineError::NotConfigured);
             }
-            let model = match model {
-                Some(Ok(path)) => Some(path),
-                Some(Err(e)) => return Err(EngineError::Model(e)),
-                None => None,
+            let model = match state {
+                ModelState::Ggml(Ok(path)) => Some(path.clone()),
+                ModelState::Ggml(Err(e)) => return Err(EngineError::Model(e.clone())),
+                _ => None,
             };
-            Ok(Box::new(command::CommandEngine::new(
-                stt.command.clone(),
-                model,
-                stt.language.clone(),
-            )))
+            Ok(Ready::Command { model })
         }
         other => Err(EngineError::Unknown(other.to_string())),
+    }
+}
+
+/// `check_with`, and then build what it approved. Defined this way on purpose:
+/// every error `doctor` prints is produced by the code the daemon runs, and the
+/// only thing this adds is the load itself.
+pub fn resolve_with(
+    stt: &Stt,
+    state: ModelState,
+) -> Result<Box<dyn Engine + Send + Sync>, EngineError> {
+    match check_with(stt, &state)? {
+        Ready::Command { model } => Ok(Box::new(command::CommandEngine::new(
+            stt.command.clone(),
+            model,
+            stt.language.clone(),
+        ))),
+        Ready::Candle { device, model } => Ok(Box::new(candle::CandleEngine::new(
+            &model,
+            &stt.language,
+            &device,
+        )?)),
     }
 }
 
@@ -212,19 +271,130 @@ mod tests {
     }
 
     #[test]
-    fn the_unbuilt_engines_say_so_and_name_the_one_that_works() {
-        for (name, issue) in [("candle", "#15"), ("http", "#16")] {
-            let error = match resolve(&stt(name, &[]), &nowhere()) {
-                Err(error) => error,
-                Ok(_) => panic!("{name} must not resolve: it is not built"),
-            };
-            let message = error.to_string();
-            assert!(message.contains(name), "got {message}");
-            assert!(message.contains(issue), "got {message}");
-            assert!(
-                message.contains("command"),
-                "it must name what works: {message}"
-            );
+    fn http_is_the_only_engine_still_unbuilt_here() {
+        // candle was in this list until this issue. http leaves it in #16.
+        let error = match resolve(&stt("http", &[]), &nowhere()) {
+            Err(error) => error,
+            Ok(_) => panic!("http must not resolve: it is not built"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("http"), "got {message}");
+        assert!(message.contains("#16"), "got {message}");
+        assert!(
+            message.contains("command"),
+            "it must name what works: {message}"
+        );
+    }
+
+    #[test]
+    fn candle_no_longer_reports_itself_unbuilt() {
+        let error = match resolve(&stt("candle", &[]), &nowhere()) {
+            Err(error) => error,
+            Ok(_) => panic!("with no model at all it cannot resolve"),
+        };
+        assert!(
+            !matches!(error, EngineError::NotBuilt { .. }),
+            "candle is built; it fails for want of a model, not for want of code: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("large-v3-turbo"),
+            "it must name the model: {message}"
+        );
+        assert!(
+            message.contains("model --choose"),
+            "it must say what to do: {message}"
+        );
+    }
+
+    #[test]
+    fn the_lookup_answers_for_the_engine_that_is_configured() {
+        let models = nowhere();
+
+        // http asks for nothing of ours.
+        assert!(matches!(
+            locate_configured_model(&stt("http", &[]), &models),
+            ModelState::NotUsed
+        ));
+        // command with no placeholder brings its own.
+        assert!(matches!(
+            locate_configured_model(&stt("command", &["prog", "{audio}"]), &models),
+            ModelState::NotUsed
+        ));
+        // command with a placeholder asks for the ggml file.
+        assert!(matches!(
+            locate_configured_model(&stt("command", &["prog", "-m", "{model}"]), &models),
+            ModelState::Ggml(Err(_))
+        ));
+        // candle asks for its own directory — this is what changed.
+        assert!(matches!(
+            locate_configured_model(&stt("candle", &[]), &models),
+            ModelState::Candle(Err(_))
+        ));
+    }
+
+    #[test]
+    fn check_with_approves_a_command_engine_and_keeps_its_model_path() {
+        // Ready::Command carries the path because check_with consumed the lookup
+        // and resolve_with builds only from what check_with returned.
+        let path = std::path::PathBuf::from("/models/ggml-tiny.bin");
+        let ready = check_with(
+            &stt("command", &["prog", "-m", "{model}"]),
+            &ModelState::Ggml(Ok(path.clone())),
+        )
+        .expect("must approve");
+        match ready {
+            Ready::Command { model } => assert_eq!(model, Some(path)),
+            other => panic!("expected Command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_with_refuses_an_empty_command_and_an_unknown_engine_as_before() {
+        assert!(matches!(
+            check_with(&stt("command", &[]), &ModelState::NotUsed),
+            Err(EngineError::NotConfigured)
+        ));
+        assert!(matches!(
+            check_with(&stt("vosk", &[]), &ModelState::NotUsed),
+            Err(EngineError::Unknown(_))
+        ));
+    }
+
+    #[test]
+    fn check_with_passes_a_store_failure_through_with_its_own_words() {
+        let state = ModelState::Candle(Err(candle::store::StoreError::DigestMismatch {
+            path: std::path::PathBuf::from("/models/candle/tiny/model.safetensors"),
+        }));
+        let error = check_with(&stt("candle", &[]), &state).expect_err("must refuse");
+        let message = error.to_string();
+        assert!(message.contains("digest"), "got {message}");
+        assert!(message.contains("model --choose"), "got {message}");
+    }
+
+    #[test]
+    fn resolve_with_never_disagrees_with_check_with() {
+        // The property that makes the split safe. Everything check_with refuses,
+        // resolve_with must refuse with the same words — it is defined as
+        // check_with plus construction.
+        let cases = [
+            (stt("command", &[]), ModelState::NotUsed),
+            (stt("vosk", &[]), ModelState::NotUsed),
+            (stt("http", &[]), ModelState::NotUsed),
+            (
+                stt("candle", &[]),
+                ModelState::Candle(Err(candle::store::StoreError::Missing {
+                    dir: std::path::PathBuf::from("/models/candle/tiny"),
+                    identifier: "tiny".to_string(),
+                    absent: "model.safetensors",
+                })),
+            ),
+        ];
+        for (config, state) in cases {
+            let checked = check_with(&config, &state).err().map(|e| e.to_string());
+            let resolved = resolve_with(&config, state).err().map(|e| e.to_string());
+            assert_eq!(checked, resolved, "for engine {:?}", config.engine);
+            assert!(checked.is_some(), "for engine {:?}", config.engine);
         }
     }
 

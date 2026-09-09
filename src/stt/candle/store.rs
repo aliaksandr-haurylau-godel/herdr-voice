@@ -55,7 +55,7 @@ impl Found {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StoreError {
     Missing {
         dir: PathBuf,
