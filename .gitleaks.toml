@@ -33,6 +33,16 @@ tags = ["policy", "mail"]
   # named, and this rule's group 1 is only "(com|net|org)" — an allowlist keyed
   # on the source line would silently clear a real address sharing a line with
   # an example.com one, which "match" does not.
+  #
+  # `noreply@anthropic.com` is the no-reply address in the Co-Authored-By line
+  # every commit in this repository's history already carries. It names the maker
+  # of the tool, not an employer, a client or an internal system, so it is outside
+  # what this rule exists to catch — and it is public in `git log` regardless. It
+  # is allowlisted exactly, not as a whole domain, so a real address at that
+  # domain would still be caught.
   [rules.allowlist]
   regexTarget = "match"
-  regexes = ['''@example\.(com|net|org)\b''']
+  regexes = [
+    '''@example\.(com|net|org)\b''',
+    '''\bnoreply@anthropic\.com\b''',
+  ]
