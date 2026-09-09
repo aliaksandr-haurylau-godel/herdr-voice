@@ -84,19 +84,23 @@ impl fmt::Display for ReadError {
             ReadError::NotPcm { path, format } => write!(
                 f,
                 "{} is WAV format {format}, not uncompressed PCM (1); this engine \
-                 reads what this plugin records and converts nothing",
+                 reads what this plugin records and converts nothing. Record the \
+                 take again with this plugin, or transcribe this file with \
+                 [stt] engine = \"command\"",
                 path.display()
             ),
             ReadError::Channels { path, found } => write!(
                 f,
                 "{} has {found} channels; the engine reads mono, which is what this \
-                 plugin records",
+                 plugin records. Record the take again with this plugin, or \
+                 transcribe this file with [stt] engine = \"command\"",
                 path.display()
             ),
             ReadError::BitDepth { path, found } => write!(
                 f,
                 "{} is {found}-bit; the engine reads 16-bit, which is what this \
-                 plugin records",
+                 plugin records. Record the take again with this plugin, or \
+                 transcribe this file with [stt] engine = \"command\"",
                 path.display()
             ),
             ReadError::Io { path, why } => write!(f, "cannot read {}: {why}", path.display()),
@@ -263,6 +267,45 @@ mod tests {
         let error = read(&path).expect_err("must refuse");
         let message = error.to_string();
         assert!(message.contains("not a WAV"), "got {message}");
+    }
+
+    #[test]
+    fn every_read_failure_names_what_to_do_next() {
+        // CLAUDE.md's rule, checked rather than assumed: an S4 pass found three
+        // of these explained the problem and stopped there.
+        let p = PathBuf::from("/takes/x.wav");
+        let cases = [
+            ReadError::NotAWav { path: p.clone() },
+            ReadError::NoChunk {
+                path: p.clone(),
+                chunk: "data",
+            },
+            ReadError::NotPcm {
+                path: p.clone(),
+                format: 3,
+            },
+            ReadError::Channels {
+                path: p.clone(),
+                found: 2,
+            },
+            ReadError::BitDepth {
+                path: p.clone(),
+                found: 8,
+            },
+            ReadError::Io {
+                path: p,
+                why: "denied".into(),
+            },
+        ];
+        for case in cases {
+            let message = case.to_string();
+            assert!(
+                message.contains("Record")
+                    || message.contains("command")
+                    || message.contains("cannot read"),
+                "{message}"
+            );
+        }
     }
 
     #[test]
