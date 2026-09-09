@@ -236,7 +236,44 @@ two — `Refused` for a transport-level failure (`ureq::Error::Transport`),
   `EngineError::Http`).
 - Consumed by: Task 4 (`stt::resolve_with`)
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Scaffold the module so it is part of the crate before any
+  test is written**
+
+Rust does not compile a file the module tree does not declare, so writing
+the test module first (as a later step in this task does) against an
+undeclared `src/stt/http.rs` would not fail to compile — `cargo test`
+would simply collect zero tests for it. Declare the module and its types
+as an empty scaffold first, confirm *that* compiles, then write tests
+against it — the tests are what should fail to compile next, not the
+module's absence.
+
+Create `src/stt/http.rs`:
+
+```rust
+use super::{Engine, EngineError};
+
+#[derive(Debug)]
+pub enum HttpError {}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {}
+    }
+}
+
+impl std::error::Error for HttpError {}
+```
+
+In `src/stt.rs`: add `pub mod http;` beside `pub mod command;`; add
+`Http(http::HttpError)` to `EngineError` alongside `Command(command::
+CommandError)`; add `EngineError::Http(e) => write!(f, "{e}")` to the
+`Display` impl, the same one-line delegation `Command(e)` already uses.
+
+Run: `cargo build`
+Expected: succeeds — an empty `HttpError` scaffold compiles, `EngineError`
+gains its sixth variant, nothing yet references `HttpEngine`.
+
+- [ ] **Step 2: Write the failing tests**
 
 Copy `respond_once`/`respond_once_with_status`/`find_subslice` from
 `src/rewrite/http.rs`'s test module verbatim (same signatures; the double
@@ -390,37 +427,20 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify the tests fail**
+- [ ] **Step 3: Run to verify the tests fail**
 
 Run: `cargo test --bin herdr-voice stt::http`
-Expected: FAIL to compile — the module does not exist yet.
+Expected: FAIL to compile — the scaffolded `HttpError` from Step 1 has no
+variants and `HttpEngine` does not exist yet, so the test module's own
+references to `HttpEngine::new(...)`, `HttpError::Failed { .. }`, etc. do
+not resolve. This is the real compile failure Step 1's scaffolding was
+built to produce.
 
-- [ ] **Step 3: Give `EngineError` its sixth variant, then implement
-  `HttpEngine`, `HttpError`, the multipart body**
+- [ ] **Step 4: Implement `HttpEngine`, `HttpError`'s real variants, and the
+  multipart body**
 
-In `src/stt.rs`, add the variant and the `Display` arm before writing
-`src/stt/http.rs` — the new module's own tests construct
-`EngineError::Http(...)` and cannot compile without it:
-
-```rust
-// In EngineError, alongside Command(command::CommandError):
-Http(http::HttpError),
-```
-
-```rust
-// In the Display impl, alongside EngineError::Command(e) => write!(f, "{e}"):
-EngineError::Http(e) => write!(f, "{e}"),
-```
-
-`pub mod http;` also needs adding to `src/stt.rs` at this point (not
-deferred to a later step) — the variant's own type, `http::HttpError`,
-does not resolve until the module is declared.
-
-At the top of `src/stt/http.rs`, the same import `src/stt/command.rs:11` uses:
-
-```rust
-use super::{Engine, EngineError};
-```
+Replace Step 1's empty scaffold in `src/stt/http.rs` with the real types —
+the `use super::{Engine, EngineError};` import from Step 1 stays.
 
 ```rust
 pub struct HttpEngine {
@@ -488,20 +508,20 @@ would be reported elsewhere in this codebase (an `io::Error` wrapped into
 not expected to fail in practice, since the caller always has a real take
 file, but must not panic).
 
-- [ ] **Step 4: Run to verify the tests pass**
+- [ ] **Step 5: Run to verify the tests pass**
 
 Run: `cargo test --bin herdr-voice stt::http`
 Expected: PASS, all twelve tests.
 
-- [ ] **Step 5: Run the whole suite**
+- [ ] **Step 6: Run the whole suite**
 
-`pub mod http;` and the `Http` variant were already added in Step 3, so
+`pub mod http;` and the `Http` variant were already added in Step 1, so
 this step is the whole-crate check, not a registration step.
 
 Run: `cargo test`
 Expected: PASS, no regressions elsewhere.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/stt/http.rs src/stt.rs
@@ -681,8 +701,9 @@ AC-1 → Task 4. AC-2 → Task 1, Task 4. AC-3 → Task 3
 `HttpError`-variant tests). AC-6 → Task 1, Task 3 (every `Display` arm names
 what to check). AC-7 → Task 3 (the fixed timeout, ported unchanged from
 `rewrite::http`). AC-8 → Task 3 (the scratch listener; no test opens a real
-connection). AC-9 → Task 4, Step 6 (no code change needed, confirmed by
-running `doctor`'s existing tests).
+connection). AC-9 → Task 4, Step 6 (`doctor.rs`'s production code needs no
+change; one pre-existing test's assertion needed updating to match the new
+`NotConfigured` message, done in that step).
 
 ## What could not be cut into a checkable task
 

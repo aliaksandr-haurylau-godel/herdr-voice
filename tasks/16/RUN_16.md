@@ -251,3 +251,34 @@ production code" from "one existing test needs updating," which is what the
 gate's second question actually found.
 
 S3 continues; re-running the gate against the revised artifact.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_16.md
+  reviewer: implementer
+  verdict: QUESTIONS
+  date: 2026-09-09
+  questions:
+    - "Task 3's steps disagreed on when the module joins the crate: the test
+       file was to be written before pub mod http; existed, so the stated
+       'FAIL to compile' at the verify-it-fails step would not actually
+       happen — an undeclared module is invisible to rustc, so cargo test
+       would report zero tests collected, not a compile failure."
+  blocker: null
+```
+
+### Answered
+
+Task 3 restructured into seven steps instead of six: a new Step 1 scaffolds
+`src/stt/http.rs` with an empty `HttpError` enum and declares `pub mod
+http;` plus the `EngineError::Http` variant, confirmed to compile on its own
+first; Step 2 then writes the full test module, which now genuinely fails
+to compile (Step 3) since `HttpEngine` does not exist and the scaffolded
+`HttpError` has no variants for the tests to construct. Step 4 replaces the
+scaffold with the real implementation. Steps 5-7 (verify pass, whole suite,
+commit) follow unchanged in substance, renumbered. The stale Coverage-table
+parenthetical about AC-9 ("no code change needed") was also corrected to
+match Task 4 Step 6's actual content.
+
+S3 continues; re-running the gate against the revised artifact.
