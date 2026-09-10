@@ -629,31 +629,20 @@ internal system, and this repository does not receive those.
 | target | pinned at the start, delivered to that same pane |
 | submission | none: the text sat unsent in the input box, which is the designed behaviour |
 
-**Form came back right and one term did not.** Sentence capitalization and
-commas were present, and one English word survived inside the Russian speech.
-But the multiplexer's own name came back as an ordinary English word, twice in
-one phrase — the most likely proper noun any take of this plugin will ever
-carry, lost. Two of the three things that could have restored it were absent
-before recognition began, and neither is a fault of this engine:
+**Form came back right; one proper noun did not.** Sentence capitalization and
+commas were present, and an English common noun survived inside the Russian
+speech. One proper noun did not: the multiplexer's own name came back as a
+similar-sounding ordinary English word, twice in the same phrase.
 
-- **The bias string could not carry the term.** The journal recorded
-  `file_count=40 file_chars=393 conversation_chars=1124 prompt_chars=600
-  truncated=true`. Checked against git afterwards: of the 55 paths in
-  `git status` and the last twenty commits, **none** contains the multiplexer's
-  name. The component collects file and directory *names*, and the name appears
-  in this repository's file *contents* and in its upstream repository name, not
-  in the paths of the files being touched — the checkout is a worktree directory
-  named for the issue. So the component that issue #31 calls "the one that
-  works" had nothing to offer here.
-- **The rewrite stage did not run.** `[rewrite] engine` defaults to `agent`,
-  which no build invokes; the daemon said so once and delivered the transcript
-  unrewritten. The measurement above, in "Context and its effect on the
-  transcript", records that it is the rewrite stage and not recognition that
-  restores terms. That stage never saw this take.
+Why it happened is **not diagnosed here, by the owner's decision**: one take
+cannot tell a systematic failure from a bad take, and the plugin needs more real
+use before that question can be answered. If it recurs in ordinary use it gets
+an issue of its own then. Recorded as an observation, not as an open finding.
 
-The take also reproduced the budget behaviour issue #31 describes, on real
-speech rather than on a sample: file names took 393 of the 600 characters and
-the conversation was truncated from 1 124 characters into what was left.
+**The invocation.** Two `dictate` invocations about 21 seconds apart. The first
+printed `recording for wJ:pA`, the second `delivered to wJ:pA [-34.1 dB]` — the
+target pinned at the start and the delivery going to that same pane. Verified on
+macOS 26.6.2, Apple silicon, herdr 0.9.0, release build.
 
 **Speed, warm, on this machine.** Measured through the real engine over a WAV
 file, three runs each, after the model was loaded and the first pass had warmed

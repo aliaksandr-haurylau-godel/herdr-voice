@@ -674,43 +674,33 @@ named a client and an internal system. `docs/evidence.md` describes it in
 English, the way that file's "Context and its effect on the transcript" section
 already describes its own phrase. It was not read out of the pane.
 
-### The defect: the multiplexer's own name came back as an English word, twice
+### An observation, deferred by the owner's decision
 
-Established before attributing it, because two of the three things that could
-have restored it were absent before recognition began.
+The take came back with correct punctuation and capitalization and with an
+English common noun preserved inside the Russian speech. One proper noun did
+not survive: the multiplexer's own name came back as a similar-sounding
+ordinary English word, twice in the same phrase.
 
-**1. The pane's working directory was this repository — and the bias string
-still could not carry the term.** The journal recorded `file_count=40
-file_chars=393 conversation_chars=1124 prompt_chars=600 truncated=true`.
-Checked against git afterwards: of the 55 paths in `git status` and the last
-twenty commits, **none** contains the multiplexer's name. `bias::collect`
-gathers file and directory *names*; the name is in this repository's file
-*contents* and in its upstream repository name, and the checkout is a worktree
-directory named for the issue. So the answer is neither "the term was absent
-from the directory" nor "the term was available and recognition lost it": the
-term was everywhere in the directory and nowhere in the kind of thing the bias
-mechanism collects.
+**This is not being diagnosed, and #15's scope does not widen over it.** One
+take cannot distinguish a systematic failure from a bad take, and the plugin
+needs more real use first. If it recurs in ordinary use it gets its own issue
+then. No root-cause work, no fix, no issue.
 
-**2. The rewrite stage did not run at all.** `[rewrite] engine` defaults to
-`agent`, which no build invokes; the daemon said so once and delivered the
-transcript unrewritten. `docs/evidence.md` already records that it is the
-rewrite stage and not recognition that restores terms. So the stage that would
-have repaired this never saw the take.
+Two facts were established before that decision was taken, and are kept here
+because discarding measured facts is worse than leaving them unused. Neither is
+being pursued:
 
-**3. It is issue #31's mechanic, reproduced, but not a complete explanation.**
-#31 says file names are assembled first and the cut falls on the conversation,
-which loses silently. That happened here exactly: 393 of the 600 characters went
-to file names and the conversation was cut from 1 124 characters into what was
-left. But #31 also argues that the file-name component is "the one that works",
-and here it contributed nothing usable — it could not, for the reason above.
-Whether the term sat in the discarded 900 characters of conversation cannot be
-established without reading that pane, which this run was told not to do.
+- Of the 55 paths in `git status` and the last twenty commits of the pane's
+  working directory, none contains the multiplexer's name. `bias::collect`
+  gathers file and directory names, and the name lives in this repository's file
+  contents and its upstream repository name rather than in the paths being
+  touched.
+- The rewrite stage did not run: `[rewrite] engine` defaults to `agent`, which no
+  build invokes, so the transcript was delivered unrewritten.
 
-So: **not a defect of #15.** The built-in engine transcribed what it was given,
-with the right punctuation and one English word intact. What failed is upstream
-of it — a bias mechanism that collects names rather than terms, and a rewrite
-stage that is unconfigured by default. Recorded here and in `docs/evidence.md`;
-no GitHub issue opened, that being the owner's call.
+The journal also recorded `file_count=40 file_chars=393 conversation_chars=1124
+prompt_chars=600 truncated=true`, which is the budget behaviour issue #31
+describes, seen on real speech. That belongs to #31 and is not acted on here.
 
 ### A separate finding, more serious than the transcription miss
 

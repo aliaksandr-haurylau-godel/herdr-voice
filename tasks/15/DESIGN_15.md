@@ -16,6 +16,12 @@ take path (`daemon::transcribe`, `src/daemon.rs:315`) gets no new branch. Contex
 and delivery are untouched. `stt::model::locate` and the `ggml-<model>.bin`
 contract keep serving `[stt] command` exactly as they do today, unchanged.
 
+> **Superseded in one respect, 2026-09-10.** The owner chose `command` as the
+> shipped default for `[stt] engine`, on the measurement in `docs/evidence.md`.
+> Everything in this document about how the `candle` engine is built, verified
+> and chosen still holds; it is no longer what an unconfigured install runs.
+> Sections 3 and 8 carry the specific consequences.
+
 The model list and the download source were settled by the owner on 2026-09-09:
 six models, `tiny` through `large-v3`, fetched from the `openai/whisper-*`
 repositories on Hugging Face, pinned by commit and verified by SHA-256. They are
@@ -323,6 +329,13 @@ because the API reports a git blob SHA-1 for those, not a SHA-256.
 `large-v3-turbo` stays the default of `[stt] model`: it is already the default
 (`src/config.rs:88-97`) and is the model every recognition number in
 `docs/evidence.md` was produced with.
+
+> **Still true, 2026-09-10, and worth stating precisely.** The default that
+> changed is `[stt] engine`, not `[stt] model`. `large-v3-turbo` remains the
+> model this catalogue defaults to; it is simply not loaded unless the engine is
+> set to `candle`. One consequence: `--choose` writes `[stt] model` and never
+> `[stt] engine`, so on a default install installing a model does not by itself
+> make anything use it.
 
 Refreshing the table is a deliberate act with a script beside it,
 `scripts/model_catalogue.py`, which regenerates it from the API and re-hashes the
