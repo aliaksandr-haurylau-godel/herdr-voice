@@ -605,7 +605,6 @@ produces the same result on a spoken take — this measurement drove the
 engines directly, not through `dictate`/`transcribe`. That is the same class
 of gap #21's and #26's manual steps named, and it is still open here.
 
-<<<<<<< HEAD
 ## The built-in engine, by hand on macOS
 
 macOS 26.6.2, Apple silicon, herdr 0.9.0, release build, `candle` 0.11.0 on
@@ -686,7 +685,6 @@ take above went through the `dictate` action with a hand-built invocation
 context, not through a bound key, because no key on this machine is bound to
 this plugin — the keys that exist run the shell prototype.
 
-=======
 ## The http recognition engine, against a real whisper.cpp server
 
 macOS 26.6.2, Rust 1.97.1, `ureq` 2.12.1. Verified two ways: 267 tests
@@ -737,4 +735,3 @@ the OpenAI Whisper transcription API's shape (`multipart/form-data`, JSON
 `{"text": ...}` back), and this one server's compatibility with it is what
 was actually exercised, not every server that might call itself
 "Whisper-compatible."
->>>>>>> origin/main
