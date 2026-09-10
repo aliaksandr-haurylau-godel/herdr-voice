@@ -8,8 +8,17 @@
 /// What the engine will run on, and — when it is not the fast answer — why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
+    /// Only `select` on macOS constructs this, so on every other platform it is
+    /// dead code and CI builds with `-D warnings`. The type stays
+    /// platform-independent — `describe` and the tests exercise both variants
+    /// everywhere, which is what keeps the CPU report testable on a runner with
+    /// no GPU — so the allowance is narrowed to the platforms where the fact
+    /// actually holds rather than applied to the type.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Metal,
-    Cpu { why: &'static str },
+    Cpu {
+        why: &'static str,
+    },
 }
 
 /// Ask for a device. Never fails: a slow transcript beats no transcript, and the

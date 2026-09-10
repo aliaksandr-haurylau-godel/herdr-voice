@@ -807,3 +807,23 @@ Verified after the merge: 349 tests (this issue's plus #16's), all four gates
 green, `stt::http`'s own 15 tests untouched, the built-in engine still
 transcribing a real take correctly, and the bare-machine `doctor` naming the
 empty `[stt] command` with an example.
+
+## CI, first run: one red, on a platform this machine cannot compile for
+
+`ubuntu-latest` failed clippy at 1m15s: `variant 'Metal' is never constructed`.
+`select` only constructs `Selection::Metal` inside `#[cfg(target_os = "macos")]`,
+so on Linux and Windows the variant has no constructor, and CI sets
+`RUSTFLAGS: -D warnings` globally.
+
+**No local gate on this machine could have caught it.** All four were green,
+and they compile for macOS only; there is no rustup here, so no other target's
+standard library is installed and `cargo clippy --target …` cannot run. This
+class of failure — code that is dead on one platform and live on another — is
+visible to CI and not to the four gates. Worth knowing before the next issue
+touches a `cfg`.
+
+Fixed by narrowing the allowance to where the fact holds,
+`#[cfg_attr(not(target_os = "macos"), allow(dead_code))]` on the variant, rather
+than by allowing dead code on the type. `describe` and the tests still exercise
+both variants on every platform, which is what keeps the CPU report testable on
+a runner with no GPU.
