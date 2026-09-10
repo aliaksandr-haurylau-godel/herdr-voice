@@ -111,14 +111,18 @@ comes back as a single punctuation mark.
 
 Three interchangeable engines:
 
-- `candle` — the built-in engine, pure Rust, no external toolchain. The model is
-  chosen by the user on first run from a list with sizes, and downloaded then.
+- `command` — an arbitrary external program that reads audio and prints text.
+  The default, because it is the fast path: `whisper-cli` transcribes a
+  70-second take in 1.65 seconds against the built-in engine's 12 to 14 seconds
+  for 66 seconds of the same speech with the same model.
+- `candle` — the built-in engine, pure Rust, no external toolchain. Not the
+  default, and fully supported: set `[stt] engine` to choose it. The model is
+  chosen from a list with sizes and downloaded by `herdr-voice model --choose`.
   Models live in `<state>/models/candle/<identifier>/`, three files each, and a
   download is verified against a pinned byte count and SHA-256 before anything
   loads it: a truncated or substituted file is a named failure at that point
   rather than a confusing one later.
 - `http` — any Whisper-compatible endpoint, cloud or a local server.
-- `command` — an arbitrary external program that reads audio and prints text.
 
 The model name and the spoken language are configuration, not code.
 
@@ -227,7 +231,7 @@ input = ""                # device name; empty means the system default
 silence_db = -60
 
 [stt]
-engine = "candle"         # candle | http | command
+engine = "command"        # command | candle | http
 model  = "large-v3-turbo"
 language = "auto"
 

@@ -53,7 +53,8 @@ impl Default for Audio {
 pub struct Stt {
     /// A model identifier, not a file name: the file is `ggml-<model>.bin`.
     pub model: String,
-    /// `candle`, `http` or `command`. The first two are not built yet.
+    /// `candle`, `http` or `command`. All three are built; `command` is the
+    /// default.
     pub engine: String,
     /// The spoken language, or `auto` to let the engine decide.
     pub language: String,
@@ -89,7 +90,12 @@ impl Default for Stt {
     fn default() -> Self {
         Stt {
             model: "large-v3-turbo".to_string(),
-            engine: "candle".to_string(),
+            // `command` — whisper-cli — is the default because it is the fast
+            // path: measured at 1.65 s for a 70-second take against the
+            // built-in engine's 12-14 s for 66 seconds with the same model
+            // (`docs/evidence.md`). `candle` is fully supported and needs no
+            // external program; it is chosen by setting this key.
+            engine: "command".to_string(),
             language: "auto".to_string(),
             command: Vec::new(),
         }
@@ -248,7 +254,7 @@ mod tests {
         assert_eq!(defaults.audio.input, "");
         assert_eq!(defaults.audio.silence_db, -60.0);
         assert_eq!(defaults.stt.model, "large-v3-turbo");
-        assert_eq!(defaults.stt.engine, "candle");
+        assert_eq!(defaults.stt.engine, "command");
         assert_eq!(defaults.stt.language, "auto");
         assert!(defaults.stt.command.is_empty());
         assert_eq!(defaults.rewrite.engine, "agent");

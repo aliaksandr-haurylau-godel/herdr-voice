@@ -604,3 +604,95 @@ as the actual plugin end to end from a keypress through a live herdr pane,
 produces the same result on a spoken take — this measurement drove the
 engines directly, not through `dictate`/`transcribe`. That is the same class
 of gap #21's and #26's manual steps named, and it is still open here.
+
+## The built-in engine, by hand on macOS
+
+macOS 26.6.2, Apple silicon, herdr 0.9.0, release build, `candle` 0.11.0 on
+Metal. Models under `<state>/models/candle/<identifier>/`, installed by
+`herdr-voice model --choose` and verified against the pinned byte count and
+SHA-256 before anything loaded them.
+
+**A spoken take went through the built-in engine, end to end.** The daemon was
+started against the real installation, `doctor` reported `engine ok — "candle"
+is ready, running on the GPU, through Metal` and `model ok`, and a take was
+driven through the `dictate` action twice: once to start, once to stop. The
+phrase was Russian and carried English technical terms — the plugin's own
+domain: a plugin, a skill, recording sound, and the multiplexer this plugin runs
+inside. It is not reproduced here, because it also named a client and an
+internal system, and this repository does not receive those.
+
+| what | result |
+|---|---|
+| hold | about 21 seconds |
+| level | −34.1 dB, well above the −60 dB floor, and louder than the −46.9 dB take already recorded above |
+| target | pinned at the start, delivered to that same pane |
+| submission | none: the text sat unsent in the input box, which is the designed behaviour |
+
+**Form came back right and one term did not.** Sentence capitalization and
+commas were present, and one English word survived inside the Russian speech.
+But the multiplexer's own name came back as an ordinary English word, twice in
+one phrase — the most likely proper noun any take of this plugin will ever
+carry, lost. Two of the three things that could have restored it were absent
+before recognition began, and neither is a fault of this engine:
+
+- **The bias string could not carry the term.** The journal recorded
+  `file_count=40 file_chars=393 conversation_chars=1124 prompt_chars=600
+  truncated=true`. Checked against git afterwards: of the 55 paths in
+  `git status` and the last twenty commits, **none** contains the multiplexer's
+  name. The component collects file and directory *names*, and the name appears
+  in this repository's file *contents* and in its upstream repository name, not
+  in the paths of the files being touched — the checkout is a worktree directory
+  named for the issue. So the component that issue #31 calls "the one that
+  works" had nothing to offer here.
+- **The rewrite stage did not run.** `[rewrite] engine` defaults to `agent`,
+  which no build invokes; the daemon said so once and delivered the transcript
+  unrewritten. The measurement above, in "Context and its effect on the
+  transcript", records that it is the rewrite stage and not recognition that
+  restores terms. That stage never saw this take.
+
+The take also reproduced the budget behaviour issue #31 describes, on real
+speech rather than on a sample: file names took 393 of the 600 characters and
+the conversation was truncated from 1 124 characters into what was left.
+
+**Speed, warm, on this machine.** Measured through the real engine over a WAV
+file, three runs each, after the model was loaded and the first pass had warmed
+the kernels.
+
+| model | 11-second take | 66-second take |
+|---|---|---|
+| `tiny` | 0.15 s | 0.9–1.3 s |
+| `large-v3-turbo` | 2.3–3.3 s | 12–14 s |
+
+Against the 1.65 s that `whisper-cli` took for a 70-second take with the same
+`large-v3-turbo` on Metal, recorded above, the built-in engine is roughly eight
+times slower with the same model. Two causes, both upstream and neither fixable
+here: `candle-transformers` 0.11 mixes F32 constants into the Whisper graph, so
+the weights cannot be loaded as F16 — trying it fails with `dtype mismatch in
+add, lhs: F16, rhs: F32` — and its decoder derives positional embeddings from
+the whole prefix on every step, so the prefix must be re-fed each step and
+decoding is quadratic in the tokens generated. Feeding only the new token, the
+obvious fix, returns an empty transcript. The model chosen matters more than
+either: `tiny` transcribes the 66-second take in about a second, which is faster
+than `whisper-cli` with the large model. Issue #2 is where the comparison is
+made properly; these are its first numbers.
+
+**On the CPU.** Forced, on the same machine and the same 66-second take:
+`tiny` 7.8 s, `large-v3-turbo` 71 s — roughly six times slower than Metal, and
+for the default model about as long as the speech itself. Every Linux and
+Windows build takes this path today.
+
+**Found by running it: a window of padding is transcribed as speech.**
+`pcm_to_mel` rounds the frame count up to a multiple of 1 500 and then adds
+1 500 more, so a spectrogram is always 15 to 30 seconds longer than its audio.
+Planning windows against that length instead of the audio's put a window of two
+real frames and 1 500 of silence through the model, and a take of exactly 30
+seconds came back with a trailing `[BLANK_AUDIO]`. Fixed before this entry was
+written; windows are planned against the real frame count and a test pins the
+difference.
+
+**What is not measured here.** Accuracy against whisper.cpp on the same
+recordings, which is issue #2. The engine on any platform but macOS. And the
+take above went through the `dictate` action with a hand-built invocation
+context, not through a bound key, because no key on this machine is bound to
+this plugin — the keys that exist run the shell prototype.
+

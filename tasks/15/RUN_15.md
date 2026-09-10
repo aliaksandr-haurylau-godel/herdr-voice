@@ -659,3 +659,131 @@ Mutation-tested before committing, each confirmed to turn the suite red:
 zeroing the mel filterbank; replacing the Slaney scale with a linear one;
 skipping the store's digest check; checking the digest before the size; and
 returning `Verified` for a model nobody pinned.
+
+## The live take, and what it found
+
+Driven on 2026-09-10 against the real installation: the daemon started on the
+owner's own state and configuration directories, `large-v3-turbo` installed by
+`herdr-voice model --choose` over the network and verified against the pinned
+byte count and digest, `doctor` reporting `engine ok — "candle" is ready,
+running on the GPU, through Metal`. The take was two `dictate` invocations about
+21 seconds apart, delivered to the pane pinned at the start, unsent, at −34.1 dB.
+
+**The phrase is not recorded anywhere in this repository and must not be.** It
+named a client and an internal system. `docs/evidence.md` describes it in
+English, the way that file's "Context and its effect on the transcript" section
+already describes its own phrase. It was not read out of the pane.
+
+### The defect: the multiplexer's own name came back as an English word, twice
+
+Established before attributing it, because two of the three things that could
+have restored it were absent before recognition began.
+
+**1. The pane's working directory was this repository — and the bias string
+still could not carry the term.** The journal recorded `file_count=40
+file_chars=393 conversation_chars=1124 prompt_chars=600 truncated=true`.
+Checked against git afterwards: of the 55 paths in `git status` and the last
+twenty commits, **none** contains the multiplexer's name. `bias::collect`
+gathers file and directory *names*; the name is in this repository's file
+*contents* and in its upstream repository name, and the checkout is a worktree
+directory named for the issue. So the answer is neither "the term was absent
+from the directory" nor "the term was available and recognition lost it": the
+term was everywhere in the directory and nowhere in the kind of thing the bias
+mechanism collects.
+
+**2. The rewrite stage did not run at all.** `[rewrite] engine` defaults to
+`agent`, which no build invokes; the daemon said so once and delivered the
+transcript unrewritten. `docs/evidence.md` already records that it is the
+rewrite stage and not recognition that restores terms. So the stage that would
+have repaired this never saw the take.
+
+**3. It is issue #31's mechanic, reproduced, but not a complete explanation.**
+#31 says file names are assembled first and the cut falls on the conversation,
+which loses silently. That happened here exactly: 393 of the 600 characters went
+to file names and the conversation was cut from 1 124 characters into what was
+left. But #31 also argues that the file-name component is "the one that works",
+and here it contributed nothing usable — it could not, for the reason above.
+Whether the term sat in the discarded 900 characters of conversation cannot be
+established without reading that pane, which this run was told not to do.
+
+So: **not a defect of #15.** The built-in engine transcribed what it was given,
+with the right punctuation and one English word intact. What failed is upstream
+of it — a bias mechanism that collects names rather than terms, and a rewrite
+stage that is unconfigured by default. Recorded here and in `docs/evidence.md`;
+no GitHub issue opened, that being the owner's call.
+
+### A separate finding, more serious than the transcription miss
+
+**The daemon writes every transcript to its journal, unconditionally.**
+`src/daemon.rs:365` calls `runtime.journal.write(&delivering_line(&text))`, and
+`delivering_line` (`src/daemon.rs:448-450`) is `format!("delivering: {text}")`.
+The default journal is `StderrJournal` (`src/daemon.rs:440-442`), and `[ui]
+journal` does not gate it. Under herdr the daemon's stderr is what `herdr plugin
+log list` shows.
+
+So every dictated phrase is written out in full — and this take proved it with
+speech that named a client and an internal system. For a dictation plugin whose
+own repository rule is that such names must never be recorded, that is a
+confidentiality defect, not a logging preference. It is also inconsistent with
+what this repository already decided next door: `bias_line` was deliberately
+built never to contain the bias string, on a hit or a miss.
+
+It is **pre-existing**, from #22, and not introduced by this issue, so it is not
+fixed here. It is the most urgent thing this run found. The transcripts this run
+produced were kept only in a scratch file outside the repository, which has been
+scrubbed of every `delivering:` line and the daemon stopped.
+
+### Whether this makes #27 more urgent: yes
+
+#27 is "doctor says command is ready without having checked anything about the
+program". The bare-machine case is still handled well — with nothing configured,
+`doctor` says `engine missing — [stt] engine is "command" but [stt] command is
+empty, so there is nothing to run`, with a working example, and exits 1;
+verified by running it. #27 bites one step later, as soon as the person fills
+that key in.
+
+What the default decision changes is which path is the common one. Before,
+`candle` was the default and `doctor` verified its model by exact name, byte
+count, safetensors header and pinned digest. Now the default is `command`, whose
+program `doctor` does not check at all. The default path went from fully
+verified to unverified, so #27 stops being a wart on a minority configuration
+and becomes the first thing a new user meets. Not fixed here.
+
+## The default engine is `command`
+
+- `src/config.rs`: `Stt::default().engine` is `"command"`, with the reason and
+  the measurement beside it; the doc comment no longer says two engines are
+  unbuilt. `every_key_has_a_default` updated.
+- `docs/design.md` §4: `command` is listed first and named the default with the
+  measurement; `candle` is described as fully supported and chosen by
+  configuration. §7's block shows `engine = "command"`.
+- `README.md`: the default is described as `command`, with `candle` as the
+  no-external-program option and a pointer to the measurement.
+
+### What the model picker now means
+
+`herdr-voice model` and `--choose` still work and nothing in them is
+unreachable, but the flow has a gap at its end: **installing a model no longer
+implies using it.** `--choose` downloads, verifies, and then writes `[stt]
+model` — never `[stt] engine`. On a default install that leaves the person with
+a verified multi-gigabyte model on disk and an engine that ignores it.
+
+This was not reasoned out; it happened. Installing `large-v3-turbo` for the live
+take printed "large-v3-turbo is installed and already configured" and wrote no
+configuration file at all, because that model is already the default `[stt]
+model`. The engine had to be set by hand for the take to exercise candle.
+Worth an issue; not opened here.
+
+### Lines in the artifacts that assumed candle was the default
+
+`AC_15.md` and `DESIGN_15.md` were gated as they stand and are left as written;
+these are the places a reader must not take at face value.
+
+| where | what it says | now |
+|---|---|---|
+| `AC_15.md`, as-is | "`\"candle\"` is the shipped default of `[stt] engine`… so a fresh install refuses every take until this issue lands" | the default is `command`; a fresh install refuses every take because `[stt] command` is empty |
+| `AC_15.md`, AC-10 | frames `doctor`'s model line around `engine = "candle"` being the common case | still correct for that engine, no longer the default one |
+| `AC_15.md`, out of scope | "a plugin installed by somebody else would need an external binary to hear anything" as the reason no release is tagged | that is now the shipped default, deliberately |
+| `DESIGN_15.md` §0 | "The model list and the download source were settled by the owner" | still true, and the engine they belong to is no longer the default |
+| `DESIGN_15.md` §3 | "`large-v3-turbo` stays the default of `[stt] model`" | still true: `[stt] model` is unchanged, it is `[stt] engine` that moved |
+| `DESIGN_15.md` §8 | the device report at daemon start | only printed when the configured engine is candle, so a default install never sees it |
