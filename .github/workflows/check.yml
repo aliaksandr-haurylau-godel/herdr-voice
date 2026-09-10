@@ -61,3 +61,25 @@ jobs:
       - uses: actions/checkout@v4
       - name: the manifest must parse and name commands that exist
         run: python3 scripts/check_manifest.py
+
+  debris:
+    name: editing debris
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: conflict markers and editing-tool tags
+        # The same rule the pre-commit hook runs, on the tree rather than on a
+        # staged diff, because a hook can be absent from a clone and CI cannot.
+        run: |
+          if grep -rInE '^(<<<<<<< |>>>>>>> |=======$)' . \
+               --exclude-dir=.git --exclude-dir=target; then
+            echo "editing debris: a tracked file carries a merge-conflict marker" >&2
+            exit 1
+          fi
+          if grep -rInE '(^|[^`])</?(new|old)_string>' . \
+               --exclude-dir=.git --exclude-dir=target; then
+            echo "editing debris: a tracked file carries an editing-tool tag" >&2
+            exit 1
+          fi
+          echo "no conflict markers, no editing-tool tags"

@@ -33,3 +33,22 @@ if [ -f "$root/.leakwords" ]; then
     fi
   done < "$root/.leakwords"
 fi
+
+# 3. Editing debris: conflict markers left by a merge, and the tag pairs an
+# editing tool leaves behind when a replacement goes wrong. Neither is ever
+# wanted in a tracked file, and none of the four gates looks for them —
+# `docs/evidence.md` reached `main` with three conflict markers in it, and the
+# `<new_string>` family has been committed twice. Both patterns are matched only
+# where they are debris rather than prose: a marker must open the line, and a tag
+# must not be preceded by a backtick, so writing about either in a document
+# stays possible.
+if printf '%s\n' "$staged" | grep -q -E '^\+(<<<<<<< |>>>>>>> |=======$)'; then
+  echo "editing debris: staged changes add a merge-conflict marker" >&2
+  echo "resolve the conflict, then stage the resolved file" >&2
+  exit 1
+fi
+if printf '%s\n' "$staged" | grep -q -E '^\+.*(^|[^`])</?(new|old)_string>'; then
+  echo "editing debris: staged changes add an editing-tool tag" >&2
+  echo "remove the stray replacement tag the editing tool left behind" >&2
+  exit 1
+fi
