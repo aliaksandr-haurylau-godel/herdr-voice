@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{self, Source};
-use crate::stt::{self, model};
+use crate::stt;
 use crate::transport;
 use crate::MIN_HERDR_VERSION;
 
@@ -192,15 +192,32 @@ pub fn config_finding(loaded: &config::Loaded) -> Finding {
     }
 }
 
-/// What `stt::resolve_with` reports for the configured engine, printed exactly as
-/// the daemon would print it — so doctor and the daemon can never disagree. Takes a
-/// model lookup already performed elsewhere (`engine_and_model_findings`, below) so
-/// that reporting on both the engine and the model needs only one `locate` call.
-fn engine_finding_from(
-    stt: &config::Stt,
-    model: Option<Result<PathBuf, model::ModelError>>,
-) -> Finding {
-    match stt::resolve_with(stt, model) {
+/// What `stt::check_with` reports for the configured engine. Takes a model lookup
+/// already performed elsewhere (`engine_and_model_findings`, below) so that
+/// reporting on both the engine and the model needs only one `locate` call.
+///
+/// This is every check the daemon makes that does not need the weights, and
+/// `resolve_with` is defined as `check_with` plus construction, so the two agree
+/// on everything checkable here. One thing is not: whether `tokenizer.json` is a
+/// genuinely Whisper tokenizer, which needs the file loaded and so is checked
+/// only when the engine is built. A hand-placed model can therefore be `ok` here
+/// and refused by the daemon; a pinned one cannot, because its tokenizer is
+/// digest-verified.
+fn engine_finding_from(stt: &config::Stt, state: &stt::ModelState) -> Finding {
+    // `check_with`, never `resolve_with`: reporting must not load 1.6 GB of
+    // weights and run an encoder pass to print six lines
+    // (`tasks/15/DESIGN_15.md`, section 2c). `resolve_with` is defined as
+    // `check_with` plus construction, so the two can never disagree about what
+    // is wrong.
+    match stt::check_with(stt, state) {
+        Ok(stt::Ready::Candle { device, .. }) => Finding {
+            name: "engine",
+            state: State::Ok,
+            detail: format!(
+                "\"candle\" is ready, running {}",
+                crate::stt::candle::device::describe(&device)
+            ),
+        },
         Ok(_) => Finding {
             name: "engine",
             state: State::Ok,
@@ -217,13 +234,9 @@ fn engine_finding_from(
 /// The model line. Takes a model lookup already performed elsewhere
 /// (`engine_and_model_findings`, below) for the same reason `engine_finding_from`
 /// does: one `locate` call answers both lines, not one each.
-fn model_finding_from(
-    stt: &config::Stt,
-    models: &Path,
-    model: Option<Result<PathBuf, model::ModelError>>,
-) -> Finding {
-    match model {
-        None => Finding {
+fn model_finding_from(stt: &config::Stt, models: &Path, state: &stt::ModelState) -> Finding {
+    match state {
+        stt::ModelState::NotUsed => Finding {
             name: "model",
             state: State::NotUsed,
             detail: format!(
@@ -233,12 +246,34 @@ fn model_finding_from(
                 models.display()
             ),
         },
-        Some(Ok(path)) => Finding {
+        stt::ModelState::Ggml(Ok(path)) => Finding {
             name: "model",
             state: State::Ok,
             detail: format!("{}", path.display()),
         },
-        Some(Err(e)) => Finding {
+        stt::ModelState::Candle(Ok(found)) => match found {
+            crate::stt::candle::store::Found::Verified(dir) => Finding {
+                name: "model",
+                state: State::Ok,
+                detail: format!("{}", dir.dir.display()),
+            },
+            crate::stt::candle::store::Found::Unpinned { dir, identifier } => Finding {
+                name: "model",
+                state: State::Ok,
+                detail: format!(
+                    "{} — this plugin does not offer {identifier}, so it did not check \
+                     its size or its digest. Run `herdr-voice model` for the models it \
+                     does offer",
+                    dir.dir.display()
+                ),
+            },
+        },
+        stt::ModelState::Ggml(Err(e)) => Finding {
+            name: "model",
+            state: State::Missing,
+            detail: e.to_string(),
+        },
+        stt::ModelState::Candle(Err(e)) => Finding {
             name: "model",
             state: State::Missing,
             detail: e.to_string(),
@@ -250,9 +285,12 @@ fn model_finding_from(
 /// real model file is read and hashed only once for the pair, not once per line. See
 /// PR #20's finding on `doctor` reading a multi-gigabyte model twice.
 fn engine_and_model_findings(stt: &config::Stt, models: &Path) -> (Finding, Finding) {
-    let model = stt::locate_configured_model(stt, models);
-    let engine = engine_finding_from(stt, model.clone());
-    let model_line = model_finding_from(stt, models, model);
+    let state = stt::locate_configured_model(stt, models);
+    // By reference, not cloned: the one-lookup property is literal rather than
+    // nearly true, and a multi-gigabyte model is read and hashed once for the
+    // pair.
+    let engine = engine_finding_from(stt, &state);
+    let model_line = model_finding_from(stt, models, &state);
     (engine, model_line)
 }
 
@@ -379,6 +417,7 @@ pub fn run() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stt::model;
 
     #[test]
     fn a_version_is_read_out_of_what_herdr_prints() {
@@ -507,18 +546,188 @@ mod tests {
     }
 
     #[test]
-    fn the_model_line_is_not_used_when_the_engine_is_not_built() {
+    fn the_model_line_is_not_used_only_for_engines_that_ask_for_nothing() {
+        // candle was in this list until issue #15 built it. It uses a model now,
+        // and the assertion that said otherwise had to go rather than be weakened.
         let models = scratch_models("not-built");
-        for engine in ["candle", "http"] {
-            let stt = config::Stt {
-                engine: engine.to_string(),
-                ..config::Stt::default()
-            };
-            let finding = engine_and_model_findings(&stt, &models).1;
-            assert_eq!(finding.state, State::NotUsed, "engine {engine}");
-            assert!(finding.detail.contains("[stt] model"), "got {finding:?}");
-        }
+        let stt = config::Stt {
+            engine: "http".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&stt, &models).1;
+        assert_eq!(finding.state, State::NotUsed);
+        assert!(finding.detail.contains("[stt] model"), "got {finding:?}");
     }
+
+    #[test]
+    fn the_candle_model_line_reports_the_directory_it_wants() {
+        let models = scratch_models("candle-missing");
+        let stt = config::Stt {
+            engine: "candle".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&stt, &models).1;
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(
+            finding.detail.contains("large-v3-turbo"),
+            "got {}",
+            finding.detail
+        );
+        assert!(
+            finding.detail.contains("model --choose"),
+            "got {}",
+            finding.detail
+        );
+    }
+
+    #[test]
+    fn a_pinned_model_whose_bytes_are_wrong_is_missing_not_ok() {
+        // A small fixture under a pinned identifier is exactly the shape of a
+        // truncated download, and doctor must say so rather than accept it.
+        let models = scratch_models("candle-pinned-wrong");
+        write_candle_model(&models, "large-v3-turbo");
+        let stt = config::Stt {
+            engine: "candle".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&stt, &models).1;
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(
+            finding.detail.contains("1617824864"),
+            "it must name the size it wanted: {}",
+            finding.detail
+        );
+    }
+
+    #[test]
+    fn an_unpinned_model_is_ok_and_says_which_checks_were_skipped() {
+        // The path a model placed by hand takes: usable, and honest about what
+        // was not verified.
+        let models = scratch_models("candle-unpinned");
+        write_candle_model(&models, "homegrown");
+        let stt = config::Stt {
+            engine: "candle".to_string(),
+            model: "homegrown".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&stt, &models).1;
+        assert_eq!(finding.state, State::Ok, "an unpinned model still works");
+        assert!(
+            finding.detail.contains("did not check"),
+            "it must name the checks it skipped: {}",
+            finding.detail
+        );
+        assert!(
+            finding.detail.contains("homegrown"),
+            "got {}",
+            finding.detail
+        );
+    }
+
+    #[test]
+    fn the_candle_engine_line_names_the_device() {
+        let models = scratch_models("candle-device");
+        write_candle_model(&models, "homegrown");
+        let stt = config::Stt {
+            engine: "candle".to_string(),
+            model: "homegrown".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&stt, &models).0;
+        assert_eq!(finding.state, State::Ok, "got {finding:?}");
+        let lowered = finding.detail.to_lowercase();
+        assert!(
+            lowered.contains("metal") || lowered.contains("cpu"),
+            "the engine line must say what it runs on: {}",
+            finding.detail
+        );
+    }
+
+    #[test]
+    fn a_language_nobody_speaks_is_caught_before_the_daemon_meets_it() {
+        // Found by an S4 review: these checks lived only in CandleEngine::new, so
+        // doctor said `engine ok` and exited 0 for a configuration the daemon
+        // then refused at start. A typo in [stt] language was enough.
+        let models = scratch_models("candle-language");
+        write_candle_model(&models, "homegrown");
+        let stt = config::Stt {
+            engine: "candle".to_string(),
+            model: "homegrown".to_string(),
+            language: "klingon".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&stt, &models).0;
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(finding.detail.contains("klingon"), "got {}", finding.detail);
+        assert!(finding.detail.contains("auto"), "got {}", finding.detail);
+    }
+
+    #[test]
+    fn a_config_that_is_not_a_whisper_config_is_caught_too() {
+        let models = scratch_models("candle-badconfig");
+        write_candle_model(&models, "homegrown");
+        let dir = crate::stt::candle::store::directory(&models, "homegrown");
+        std::fs::write(dir.join("config.json"), br#"{"num_mel_bins":80}"#).unwrap();
+        let stt = config::Stt {
+            engine: "candle".to_string(),
+            model: "homegrown".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&stt, &models).0;
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+    }
+
+    #[test]
+    fn doctor_reads_no_weights() {
+        // The property that makes the check/load split worth having. A present,
+        // verified model must still cost doctor nothing to report on: if this
+        // regresses, `herdr-voice doctor` silently starts taking seconds and
+        // loading gigabytes, and nothing else would catch it.
+        let models = scratch_models("no-weights");
+        write_candle_model(&models, "homegrown");
+        let stt = config::Stt {
+            engine: "candle".to_string(),
+            model: "homegrown".to_string(),
+            ..config::Stt::default()
+        };
+        crate::stt::candle::store::weight_reads::reset();
+        let _ = engine_and_model_findings(&stt, &models);
+        assert_eq!(
+            crate::stt::candle::store::weight_reads::get(),
+            0,
+            "doctor loaded the weights"
+        );
+    }
+
+    /// A small, well-formed candle model: three real files, none of them the
+    /// gigabyte the catalogue pins. Enough for every check but size and digest.
+    fn write_candle_model(models: &Path, identifier: &str) {
+        let dir = crate::stt::candle::store::directory(models, identifier);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = r#"{"a":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+        let mut weights = (body.len() as u64).to_le_bytes().to_vec();
+        weights.extend_from_slice(body.as_bytes());
+        weights.extend_from_slice(&[0u8; 4]);
+        std::fs::write(dir.join("model.safetensors"), weights).unwrap();
+        // A real Whisper config, not just valid JSON: `candle::precheck` reads it
+        // as a `whisper::Config`, which is what lets `doctor` catch a config.json
+        // that parses and is not a model's.
+        std::fs::write(dir.join("config.json"), WHISPER_CONFIG).unwrap();
+        std::fs::write(dir.join("tokenizer.json"), br#"{"version":"1.0"}"#).unwrap();
+    }
+
+    /// The smallest `config.json` that deserialises as a Whisper config.
+    const WHISPER_CONFIG: &[u8] = br#"{
+        "num_mel_bins": 80,
+        "max_source_positions": 1500,
+        "d_model": 384,
+        "encoder_attention_heads": 6,
+        "encoder_layers": 4,
+        "vocab_size": 51865,
+        "max_target_positions": 448,
+        "decoder_attention_heads": 6,
+        "decoder_layers": 4
+    }"#;
 
     #[test]
     fn the_model_line_is_not_used_when_the_argument_list_has_no_placeholder() {
@@ -548,6 +757,8 @@ mod tests {
 
     #[test]
     fn the_engine_line_names_what_resolve_reports_for_each_engine() {
+        // candle is built now: it fails for want of a model, not for want of
+        // code, and the line says which model and what to do about it.
         let models = scratch_models("engine-candle");
         let candle = config::Stt {
             engine: "candle".to_string(),
@@ -555,8 +766,12 @@ mod tests {
         };
         let finding = engine_and_model_findings(&candle, &models).0;
         assert_eq!(finding.state, State::Missing);
-        assert!(finding.detail.contains("candle"), "got {finding:?}");
-        assert!(finding.detail.contains("#15"), "got {finding:?}");
+        assert!(finding.detail.contains("large-v3-turbo"), "got {finding:?}");
+        assert!(finding.detail.contains("model --choose"), "got {finding:?}");
+        assert!(
+            !finding.detail.contains("#15"),
+            "candle is built; it must not report itself unbuilt: {finding:?}"
+        );
 
         let models = scratch_models("engine-http");
         let http = config::Stt {

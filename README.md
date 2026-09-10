@@ -44,9 +44,17 @@ herdr plugin install aliaksandr-haurylau-godel/herdr-voice
 herdr plugin manifests cannot declare keybindings, so two lines go into your herdr
 configuration. The plugin's `setup` action prints them and offers to append them.
 
-Speech recognition needs an external engine until the built-in one is built, which
-is tracked as issue #15. Set `[stt] engine = "command"` and give `[stt] command`
-the program and arguments to run — for example a local `whisper-cli` invocation.
+Speech recognition has three engines. The default is `command`: give
+`[stt] command` the program and arguments to run — for example a local
+`whisper-cli` invocation — because that is the fastest of the three on the
+machine this was measured on.
+
+It can also run with no external program at all. Set `[stt] engine = "candle"`
+and install a model with `herdr-voice model --choose`, which lists the models
+with their sizes, downloads the one you pick and verifies it against a pinned
+byte count and digest before anything loads it. `herdr-voice model` lists them
+without installing anything. That engine is slower — see `docs/evidence.md` —
+and needs nothing on the machine but this plugin.
 
 ## Building it
 

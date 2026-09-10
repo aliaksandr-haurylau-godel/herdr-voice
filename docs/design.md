@@ -111,10 +111,18 @@ comes back as a single punctuation mark.
 
 Three interchangeable engines:
 
-- `candle` — the built-in engine, pure Rust, no external toolchain. The model is
-  chosen by the user on first run from a list with sizes, and downloaded then.
-- `http` — any Whisper-compatible endpoint, cloud or a local server.
 - `command` — an arbitrary external program that reads audio and prints text.
+  The default, because it is the fast path: `whisper-cli` transcribes a
+  70-second take in 1.65 seconds against the built-in engine's 12 to 14 seconds
+  for 66 seconds of the same speech with the same model.
+- `candle` — the built-in engine, pure Rust, no external toolchain. Not the
+  default, and fully supported: set `[stt] engine` to choose it. The model is
+  chosen from a list with sizes and downloaded by `herdr-voice model --choose`.
+  Models live in `<state>/models/candle/<identifier>/`, three files each, and a
+  download is verified against a pinned byte count and SHA-256 before anything
+  loads it: a truncated or substituted file is a named failure at that point
+  rather than a confusing one later.
+- `http` — any Whisper-compatible endpoint, cloud or a local server.
 
 The model name and the spoken language are configuration, not code.
 
@@ -223,7 +231,7 @@ input = ""                # device name; empty means the system default
 silence_db = -60
 
 [stt]
-engine = "candle"         # candle | http | command
+engine = "command"        # command | candle | http
 model  = "large-v3-turbo"
 language = "auto"
 
@@ -279,9 +287,25 @@ absolute home paths that expose an account name.
    The herdr binary contains no GitHub token handling and does contain `rev-parse`,
    which suggests a git clone; this only matters if the repository is ever closed.
 2. How the built-in `candle` engine compares with whisper.cpp in speed and
-   accuracy on the same recordings. Only whisper.cpp has been measured so far.
+   accuracy on the same recordings. One number exists now and it is not
+   flattering: on a 66-second take with `large-v3-turbo` on Metal, the built-in
+   engine took 12 to 14 seconds against `whisper-cli`'s 1.65 seconds for 70
+   seconds of speech — roughly eight times slower with the same model. Two
+   reasons are known and both are upstream: the weights cannot be loaded as F16,
+   because `candle-transformers` 0.11 mixes F32 constants into the Whisper graph,
+   and its decoder derives positional embeddings from the whole prefix on every
+   step, so it must be re-fed each time and decoding is quadratic in the tokens
+   generated. The model chosen matters more than either: `tiny` transcribes the
+   same take in about a second. A proper comparison, on the same recordings and
+   for accuracy as well as speed, is still open.
 3. Windows as a whole: key auto-repeat through herdr, the named pipe, audio
    capture. Tracked as a separate issue for someone with a Windows machine.
-4. Recording starts with a short delay while the capture device opens, so the
+4. The built-in engine's decoder has no floor on how far a window advances. A
+   model that emits a timestamp one step past the window's start moves the seek
+   by two frames, so a thirty-second window can take some fifteen hundred passes
+   to cross. This matches the reference implementation and is not a hang, but
+   with no temperature fallback there is one fewer thing stopping a degenerate
+   window.
+5. Recording starts with a short delay while the capture device opens, so the
    first fraction of a second of speech can be lost. A permanently open capture
    stream would remove it at the cost of holding the microphone open.

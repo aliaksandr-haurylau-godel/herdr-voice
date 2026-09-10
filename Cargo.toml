@@ -2,6 +2,11 @@
 name = "herdr-voice"
 version = "0.0.0"
 edition = "2021"
+# Unverified against the candle stack: no candle crate declares a rust-version,
+# so cargo cannot check it, both CI workflows build `stable`, and only 1.98 is
+# installed on the machine this was added from. The number is left as it was
+# rather than raised to 1.98, which would claim a floor nobody has established
+# either. Verifying it needs a 1.82 toolchain and one `cargo build`.
 rust-version = "1.82"
 description = "Voice dictation for the herdr terminal multiplexer"
 license = "MIT"
@@ -13,12 +18,27 @@ name = "herdr-voice"
 path = "src/main.rs"
 
 [dependencies]
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
 cpal = "0.18"
 interprocess = { version = "2.4.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 0.22, not 0.23: candle-core depends on 0.22 itself, and matching it keeps one
+# copy of a large crate in the tree instead of two.
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 toml = "1"
 ureq = { version = "2", features = ["json"] }
+
+# Metal must be enabled on every candle crate, not only candle-core: the fused
+# layer-norm kernel lives behind the feature on candle-nn, and without it
+# inference fails at the first encoder layer with
+# "Metal error no metal implementation for layer-norm".
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.11", features = ["metal"] }
+candle-nn = { version = "0.11", features = ["metal"] }
+candle-transformers = { version = "0.11", features = ["metal"] }
 
 [profile.release]
 strip = true

@@ -605,6 +605,88 @@ produces the same result on a spoken take — this measurement drove the
 engines directly, not through `dictate`/`transcribe`. That is the same class
 of gap #21's and #26's manual steps named, and it is still open here.
 
+<<<<<<< HEAD
+## The built-in engine, by hand on macOS
+
+macOS 26.6.2, Apple silicon, herdr 0.9.0, release build, `candle` 0.11.0 on
+Metal. Models under `<state>/models/candle/<identifier>/`, installed by
+`herdr-voice model --choose` and verified against the pinned byte count and
+SHA-256 before anything loaded them.
+
+**A spoken take went through the built-in engine, end to end.** The daemon was
+started against the real installation, `doctor` reported `engine ok — "candle"
+is ready, running on the GPU, through Metal` and `model ok`, and a take was
+driven through the `dictate` action twice: once to start, once to stop. The
+phrase was Russian and carried English technical terms — the plugin's own
+domain: a plugin, a skill, recording sound, and the multiplexer this plugin runs
+inside. It is not reproduced here, because it also named a client and an
+internal system, and this repository does not receive those.
+
+| what | result |
+|---|---|
+| hold | about 21 seconds |
+| level | −34.1 dB, well above the −60 dB floor, and louder than the −46.9 dB take already recorded above |
+| target | pinned at the start, delivered to that same pane |
+| submission | none: the text sat unsent in the input box, which is the designed behaviour |
+
+**Form came back right; one proper noun did not.** Sentence capitalization and
+commas were present, and an English common noun survived inside the Russian
+speech. One proper noun did not: the multiplexer's own name came back as a
+similar-sounding ordinary English word, twice in the same phrase.
+
+Why it happened is **not diagnosed here, by the owner's decision**: one take
+cannot tell a systematic failure from a bad take, and the plugin needs more real
+use before that question can be answered. If it recurs in ordinary use it gets
+an issue of its own then. Recorded as an observation, not as an open finding.
+
+**The invocation.** Two `dictate` invocations about 21 seconds apart. The first
+printed `recording for wJ:pA`, the second `delivered to wJ:pA [-34.1 dB]` — the
+target pinned at the start and the delivery going to that same pane. Verified on
+macOS 26.6.2, Apple silicon, herdr 0.9.0, release build.
+
+**Speed, warm, on this machine.** Measured through the real engine over a WAV
+file, three runs each, after the model was loaded and the first pass had warmed
+the kernels.
+
+| model | 11-second take | 66-second take |
+|---|---|---|
+| `tiny` | 0.15 s | 0.9–1.3 s |
+| `large-v3-turbo` | 2.3–3.3 s | 12–14 s |
+
+Against the 1.65 s that `whisper-cli` took for a 70-second take with the same
+`large-v3-turbo` on Metal, recorded above, the built-in engine is roughly eight
+times slower with the same model. Two causes, both upstream and neither fixable
+here: `candle-transformers` 0.11 mixes F32 constants into the Whisper graph, so
+the weights cannot be loaded as F16 — trying it fails with `dtype mismatch in
+add, lhs: F16, rhs: F32` — and its decoder derives positional embeddings from
+the whole prefix on every step, so the prefix must be re-fed each step and
+decoding is quadratic in the tokens generated. Feeding only the new token, the
+obvious fix, returns an empty transcript. The model chosen matters more than
+either: `tiny` transcribes the 66-second take in about a second, which is faster
+than `whisper-cli` with the large model. Issue #2 is where the comparison is
+made properly; these are its first numbers.
+
+**On the CPU.** Forced, on the same machine and the same 66-second take:
+`tiny` 7.8 s, `large-v3-turbo` 71 s — roughly six times slower than Metal, and
+for the default model about as long as the speech itself. Every Linux and
+Windows build takes this path today.
+
+**Found by running it: a window of padding is transcribed as speech.**
+`pcm_to_mel` rounds the frame count up to a multiple of 1 500 and then adds
+1 500 more, so a spectrogram is always 15 to 30 seconds longer than its audio.
+Planning windows against that length instead of the audio's put a window of two
+real frames and 1 500 of silence through the model, and a take of exactly 30
+seconds came back with a trailing `[BLANK_AUDIO]`. Fixed before this entry was
+written; windows are planned against the real frame count and a test pins the
+difference.
+
+**What is not measured here.** Accuracy against whisper.cpp on the same
+recordings, which is issue #2. The engine on any platform but macOS. And the
+take above went through the `dictate` action with a hand-built invocation
+context, not through a bound key, because no key on this machine is bound to
+this plugin — the keys that exist run the shell prototype.
+
+=======
 ## The http recognition engine, against a real whisper.cpp server
 
 macOS 26.6.2, Rust 1.97.1, `ureq` 2.12.1. Verified two ways: 267 tests
@@ -655,3 +737,4 @@ the OpenAI Whisper transcription API's shape (`multipart/form-data`, JSON
 `{"text": ...}` back), and this one server's compatibility with it is what
 was actually exercised, not every server that might call itself
 "Whisper-compatible."
+>>>>>>> origin/main
