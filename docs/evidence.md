@@ -605,6 +605,7 @@ produces the same result on a spoken take — this measurement drove the
 engines directly, not through `dictate`/`transcribe`. That is the same class
 of gap #21's and #26's manual steps named, and it is still open here.
 
+<<<<<<< HEAD
 ## The built-in engine, by hand on macOS
 
 macOS 26.6.2, Apple silicon, herdr 0.9.0, release build, `candle` 0.11.0 on
@@ -696,3 +697,55 @@ take above went through the `dictate` action with a hand-built invocation
 context, not through a bound key, because no key on this machine is bound to
 this plugin — the keys that exist run the shell prototype.
 
+=======
+## The http recognition engine, against a real whisper.cpp server
+
+macOS 26.6.2, Rust 1.97.1, `ureq` 2.12.1. Verified two ways: 267 tests
+passing (`cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo
+fmt --check`, `scripts/check_manifest.py` all clean, on
+`feat/16-http-recognition` at `9b5e0ed`), and then by hand, against a
+Whisper-compatible server already running on this machine for an unrelated
+purpose (OpenWhispr's own `whisper-server-darwin-arm64`, `large-v3-turbo`,
+serving its native `/inference` endpoint on `127.0.0.1:8178`) — nothing was
+started for this measurement that was not already there.
+
+**What the test suite establishes.** The engine runs against a scratch
+`TcpListener`, never a real network call: every request-field presence rule
+(`model` sent only when `[stt] http_model` is non-empty, `language` omitted
+when `[stt] language` is `"auto"` — the opposite of `command::render`'s
+literal substitution of the same value — `prompt` sent only when the bias
+string is non-empty, the `Authorization` header sent only when `[stt]
+token` is non-empty), all three `HttpError` variants with the real HTTP
+status carried through rather than a fixture-shaped accident, the
+multipart body checked byte-for-byte and not only by substring, and a
+missing WAV file returning an error rather than panicking.
+
+**What only a live run establishes, and was run for this entry.** A short
+phrase — "Please open the pull request and merge it" — synthesized with
+`say` and resampled to 16 kHz mono, was transcribed through the real,
+compiled `stt::http::HttpEngine`, `[stt] url` pointed at the running
+server's `/inference` path, by a temporary, uncommitted test:
+
+| transcript spoken | result |
+|---|---|
+| "Please open the pull request and merge it" | "Please open the pull request and merge it." |
+
+Exact match — clean synthetic speech, no garbled term to recover, so this
+confirms the wire contract works end to end against a real server (the
+request reaches it, the response parses, the transcript comes back) rather
+than repeating issue #21's/#26's context-restoration measurement. The
+temporary test was reverted before commit (`git checkout -- src/stt/
+http.rs`); nothing live-server-dependent is part of the permanent suite,
+the same way issue #36's equivalent entry records its own reverted checks.
+
+**What this does not establish.** Whether the daemon's own take path
+produces the same result through a live herdr pane on a real spoken take —
+this measurement drove the engine directly, the same gap already open for
+#21, #26 and #36. Also open: this server speaks whisper.cpp's own
+`/inference` route, not necessarily the exact response shape every
+Whisper-compatible server uses; the wire contract this engine implements is
+the OpenAI Whisper transcription API's shape (`multipart/form-data`, JSON
+`{"text": ...}` back), and this one server's compatibility with it is what
+was actually exercised, not every server that might call itself
+"Whisper-compatible."
+>>>>>>> origin/main

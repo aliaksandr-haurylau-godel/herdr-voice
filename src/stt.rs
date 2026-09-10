@@ -10,6 +10,7 @@ pub mod candle;
 pub mod catalogue;
 pub mod command;
 pub mod fetch;
+pub mod http;
 pub mod model;
 
 use std::fmt;
@@ -23,41 +24,36 @@ pub trait Engine: Send + Sync {
 
 #[derive(Debug)]
 pub enum EngineError {
-    /// Named in the manifest and in the design, and not built in this version.
-    NotBuilt {
-        engine: String,
-        issue: &'static str,
-    },
     /// A name that is none of the three.
     Unknown(String),
-    /// `command` with nothing to run.
-    NotConfigured,
+    /// An engine with nothing to run: `command` with an empty argument list,
+    /// or `http` with an empty `url`.
+    NotConfigured {
+        engine: &'static str,
+        key: &'static str,
+        example: &'static str,
+    },
     /// Anything the built-in engine could not do: a model that is not there or
     /// not right, a device, a take of the wrong shape, a decode that failed. The
     /// message is carried whole because each of those already names what to do.
-    // Constructed from Task 10 onward, when `check_with` builds the engine.
     Candle(String),
     Model(model::ModelError),
     Command(command::CommandError),
+    Http(http::HttpError),
 }
 
 /// The engines this build can be asked for.
 const ENGINES: &[&str] = &["candle", "http", "command"];
 
 /// What `[stt] command` might look like, taken from what the prototype ran.
-const EXAMPLE: &str = r#"command = ["whisper-cli", "-m", "{model}", "-f", "{audio}", "-l", "{language}", "-np", "-nt"]"#;
+const COMMAND_EXAMPLE: &str = r#"command = ["whisper-cli", "-m", "{model}", "-f", "{audio}", "-l", "{language}", "-np", "-nt"]"#;
+
+/// What `[stt] url` might look like for `engine = "http"`.
+const HTTP_EXAMPLE: &str = r#"url = "http://127.0.0.1:8080/v1/audio/transcriptions""#;
 
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // No silent substitution: an engine that is not built does not quietly
-            // become one that is. Somebody who believes the built-in engine is
-            // running while an external one is finds out at the worst moment.
-            EngineError::NotBuilt { engine, issue } => write!(
-                f,
-                "the {engine:?} engine is not built in this version ({issue}); set \
-                 [stt] engine = \"command\" and give [stt] command a transcriber, for example:\n  {EXAMPLE}"
-            ),
             EngineError::Unknown(name) => write!(
                 f,
                 "unknown [stt] engine {name:?}; it is one of {}",
@@ -67,14 +63,19 @@ impl fmt::Display for EngineError {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            EngineError::NotConfigured => write!(
+            EngineError::NotConfigured {
+                engine,
+                key,
+                example,
+            } => write!(
                 f,
-                "[stt] engine is \"command\" but [stt] command is empty, so there is nothing \
-                 to run. For example:\n  {EXAMPLE}"
+                "[stt] engine is {engine:?} but [stt] {key} is empty, so there is nothing \
+                 to run. For example:\n  {example}"
             ),
             EngineError::Candle(why) => write!(f, "{why}"),
             EngineError::Model(e) => write!(f, "{e}"),
             EngineError::Command(e) => write!(f, "{e}"),
+            EngineError::Http(e) => write!(f, "{e}"),
         }
     }
 }
@@ -113,6 +114,9 @@ pub enum Ready {
     /// to print would change the `command` engine's report, which is not this
     /// issue's to change.
     Command { model: Option<PathBuf> },
+    /// The endpoint engine. Its address is validated here; nothing else about
+    /// it can be judged without a request, which `check_with` does not make.
+    Http,
     Candle {
         device: candle::device::Selection,
         model: candle::store::Found,
@@ -163,13 +167,19 @@ pub fn check_with(stt: &Stt, state: &ModelState) -> Result<Ready, EngineError> {
                  a defect in the plugin, not in your configuration"
             ))),
         },
-        "http" => Err(EngineError::NotBuilt {
-            engine: "http".to_string(),
-            issue: "issue #16",
+        "http" if stt.url.is_empty() => Err(EngineError::NotConfigured {
+            engine: "http",
+            key: "url",
+            example: HTTP_EXAMPLE,
         }),
+        "http" => Ok(Ready::Http),
         "command" => {
             if stt.command.is_empty() {
-                return Err(EngineError::NotConfigured);
+                return Err(EngineError::NotConfigured {
+                    engine: "command",
+                    key: "command",
+                    example: COMMAND_EXAMPLE,
+                });
             }
             let model = match state {
                 ModelState::Ggml(Ok(path)) => Some(path.clone()),
@@ -193,6 +203,12 @@ pub fn resolve_with(
         Ready::Command { model } => Ok(Box::new(command::CommandEngine::new(
             stt.command.clone(),
             model,
+            stt.language.clone(),
+        ))),
+        Ready::Http => Ok(Box::new(http::HttpEngine::new(
+            stt.url.clone(),
+            stt.token.clone(),
+            stt.http_model.clone(),
             stt.language.clone(),
         ))),
         Ready::Candle { device, model } => Ok(Box::new(candle::CandleEngine::new(
@@ -277,19 +293,33 @@ mod tests {
     }
 
     #[test]
-    fn http_is_the_only_engine_still_unbuilt_here() {
-        // candle was in this list until this issue. http leaves it in #16.
+    fn http_with_an_empty_url_names_the_key() {
         let error = match resolve(&stt("http", &[]), &nowhere()) {
             Err(error) => error,
-            Ok(_) => panic!("http must not resolve: it is not built"),
+            Ok(_) => panic!("an empty url must not resolve"),
         };
         let message = error.to_string();
-        assert!(message.contains("http"), "got {message}");
-        assert!(message.contains("#16"), "got {message}");
-        assert!(
-            message.contains("command"),
-            "it must name what works: {message}"
-        );
+        assert!(message.contains("[stt] url"), "got {message}");
+    }
+
+    #[test]
+    fn http_with_a_url_resolves() {
+        let mut config = stt("http", &[]);
+        config.url = "http://127.0.0.1:1234/v1/audio/transcriptions".to_string();
+        assert!(resolve(&config, &nowhere()).is_ok());
+    }
+
+    #[test]
+    fn no_engine_reports_itself_unbuilt_any_more() {
+        // #16 built http and #15 built candle, so nothing is left to be
+        // "not built". Every engine now fails for a reason about this machine
+        // rather than a reason about this build.
+        for name in ["candle", "http", "command"] {
+            if let Err(error) = resolve(&stt(name, &[]), &nowhere()) {
+                let message = error.to_string();
+                assert!(!message.contains("not built"), "{name}: {message}");
+            }
+        }
     }
 
     #[test]
@@ -298,11 +328,9 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("with no model at all it cannot resolve"),
         };
-        assert!(
-            !matches!(error, EngineError::NotBuilt { .. }),
-            "candle is built; it fails for want of a model, not for want of code: {error:?}"
-        );
+        // candle is built; it fails for want of a model, not for want of code.
         let message = error.to_string();
+        assert!(!message.contains("not built"), "got {message}");
         assert!(
             message.contains("large-v3-turbo"),
             "it must name the model: {message}"
@@ -359,7 +387,7 @@ mod tests {
     fn check_with_refuses_an_empty_command_and_an_unknown_engine_as_before() {
         assert!(matches!(
             check_with(&stt("command", &[]), &ModelState::NotUsed),
-            Err(EngineError::NotConfigured)
+            Err(EngineError::NotConfigured { .. })
         ));
         assert!(matches!(
             check_with(&stt("vosk", &[]), &ModelState::NotUsed),

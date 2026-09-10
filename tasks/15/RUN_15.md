@@ -787,3 +787,33 @@ these are the places a reader must not take at face value.
 | `DESIGN_15.md` §0 | "The model list and the download source were settled by the owner" | still true, and the engine they belong to is no longer the default |
 | `DESIGN_15.md` §3 | "`large-v3-turbo` stays the default of `[stt] model`" | still true: `[stt] model` is unchanged, it is `[stt] engine` that moved |
 | `DESIGN_15.md` §8 | the device report at daemon start | only printed when the configured engine is candle, so a default install never sees it |
+
+## Merged with `origin/main` (#16, pull request #38)
+
+Rebase was attempted first and abandoned: eighteen commits each touch
+`src/stt.rs`, so every one of them conflicted in turn and the intermediate
+commits could not be left green. Merged instead — one resolution, and the pull
+request lands as a single squashed commit anyway (`docs/decisions.md`,
+2026-08-24, #3).
+
+Two files conflicted, both where the design's sequencing note said they would:
+
+- `src/config.rs`: one doc comment, both sides describing which engines exist.
+- `src/stt.rs`: the module list, `EngineError`, the engine match and the tests.
+
+The substantive part was `EngineError::NotConfigured`, which #16 widened from a
+unit variant to `{ engine, key, example }`. Kept #16's shape and added this
+issue's `Candle(String)` beside it; `check_with` gained a `Ready::Http` arm so
+the endpoint engine is approved there and constructed in `resolve_with`, the
+same split every other engine now follows.
+
+**`EngineError::NotBuilt` was deleted.** With #16 building `http` and this issue
+building `candle`, nothing constructs it any more — clippy said so. Every engine
+now fails for a reason about the machine rather than a reason about the build,
+and a test asserts exactly that for all three. The variant existed to stop a
+silent substitution; there is nothing left to substitute.
+
+Verified after the merge: 349 tests (this issue's plus #16's), all four gates
+green, `stt::http`'s own 15 tests untouched, the built-in engine still
+transcribing a real take correctly, and the bare-machine `doctor` naming the
+empty `[stt] command` with an example.
