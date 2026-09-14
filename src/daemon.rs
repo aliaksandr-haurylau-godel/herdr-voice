@@ -3177,6 +3177,87 @@ mod tests {
     }
 
     #[test]
+    fn repeats_spread_over_time_keep_the_hold_alive_past_the_release_gap() {
+        // The pure test in `src/ptt.rs` proves the arithmetic. This one proves
+        // the daemon: a watcher on its own thread, repeats arriving four
+        // hundred milliseconds apart, and a hold that survives a total span
+        // twice the release gap because no single silence reached it.
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("ptt-long-hold"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        // Five gaps of 400 ms: two seconds in all, twice the one-second
+        // release gap, and not one of them long enough to be a release.
+        for round in 1..=5 {
+            clock.advance(400);
+            answer(&request("ptt", PANE_1), &recorder, &runtime);
+            assert!(
+                matches!(
+                    &*runtime.hold.lock().unwrap(),
+                    crate::ptt::HoldState::Live(_)
+                ),
+                "the key is still down after {round} gaps of 400 ms"
+            );
+            assert_eq!(
+                runtime.hold.lock().unwrap().hold().unwrap().pokes,
+                round + 1,
+                "and it is the same hold, counting every repeat, not a new one"
+            );
+            assert!(
+                fake.calls().is_empty(),
+                "and nothing has been delivered yet: {:?}",
+                fake.calls()
+            );
+        }
+
+        // Now the repeats stop.
+        clock.advance(1_000);
+        let calls = wait_for_calls(&fake, WITHIN);
+        assert!(
+            matches!(
+                calls.first(),
+                Some(crate::delivery::tests_support::Call::Insert(pane, _)) if pane == "w1:p1"
+            ),
+            "one take, delivered once the repeats stopped: {calls:?}"
+        );
+        let lines = wait_for_journal(&journal, "released", WITHIN);
+        let released = lines
+            .iter()
+            .find(|line| line.contains("released"))
+            .expect("checked above");
+        assert!(
+            released.contains("2000 ms") && released.contains("6 repeats"),
+            "the hold lasted the whole span and counted every repeat: {released}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("too short")),
+            "and no gap inside it was ever taken for a release: {lines:?}"
+        );
+        assert_eq!(
+            calls.len(),
+            1,
+            "one hold, one take, one delivery: {calls:?}"
+        );
+        wait_for_idle(&runtime);
+
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+    }
+
+    #[test]
     fn every_ptt_line_names_what_happened_and_what_to_do() {
         let lines = vec![
             too_short_line("w1:p1", 120, 300),
