@@ -199,6 +199,13 @@ mod tests {
     fn the_command_that_waits_on_work_gets_the_long_bound() {
         assert_eq!(timeout_for("dictate"), WORKING_TIMEOUT);
         assert_eq!(timeout_for("cancel"), REPLY_TIMEOUT);
+    }
+
+    #[test]
+    fn ptt_keeps_the_short_reply_bound() {
+        // Every repeat answers at once: a hold does not wait for recognition,
+        // so the long bound `dictate` needs would only hide a wedged daemon
+        // here.
         assert_eq!(timeout_for("ptt"), REPLY_TIMEOUT);
     }
 

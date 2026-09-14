@@ -236,6 +236,22 @@ pub mod tests_support {
         }
     }
 
+    /// An engine that stops inside `transcribe` until the test lets it
+    /// through, so the seconds a take spends in the pipeline become a window a
+    /// test can act in. What arrives at the daemon while a take is being
+    /// transcribed is the whole subject of several of them.
+    pub struct BlockingFake {
+        pub gate: std::sync::Arc<crate::gate::Gate>,
+        pub text: String,
+    }
+
+    impl Engine for BlockingFake {
+        fn transcribe(&self, _audio: &Path, _bias: &str) -> Result<String, EngineError> {
+            self.gate.enter();
+            Ok(self.text.clone())
+        }
+    }
+
     /// An engine that records the bias string it was called with, so a test can
     /// assert on it, alongside a canned result it returns the way `Fake` does.
     pub struct CapturingFake {
