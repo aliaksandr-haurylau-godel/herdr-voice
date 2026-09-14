@@ -1617,9 +1617,13 @@ At the top of `fn dictate`, before it asks the recorder anything:
     // issue #55; doing it here would be that feature under another name.
     if let Ok(held) = runtime.hold.lock() {
         if let Some(hold) = held.as_ref() {
+            // The test asserts this message contains "holding", and the word
+            // is not decoration: it is the same word the `ptt` success reply
+            // uses ("holding for {pane}"), so the two say the same thing about
+            // the same state.
             return Reply::Error(format!(
-                "a key is being held for {}; the recording ends on its own \
-                 when the key comes up",
+                "holding for {}: a key is being held, and the recording ends \
+                 on its own when the key comes up",
                 hold.target
             ));
         }
@@ -1641,7 +1645,8 @@ git commit -m "Neither ptt nor dictate takes the other's recording; both refuse 
 
 **Files:**
 - Modify: `src/main.rs:112-124` (`IMPLEMENTED`, `USAGE`), `:150-168` (the dispatch arms)
-- Modify: `src/client.rs` (a test only)
+- Modify: `src/main.rs`, the test `the_commands_this_issue_implements_are_not_in_the_unimplemented_arm` — it lists `"ptt"` among the commands that must **not** be implemented, so the suite is red until `ptt` moves to the other list. Moving it is what makes this task's red state
+- Modify: `src/client.rs` — the assertion `assert_eq!(timeout_for("ptt"), REPLY_TIMEOUT)` already exists **inside** `the_command_that_waits_on_work_gets_the_long_bound`. Move it out into its own test under the name below rather than writing a second copy of it
 - Check: `herdr-plugin.toml` needs no change — `ptt` is already declared
 
 **Interfaces:**
@@ -1650,14 +1655,14 @@ git commit -m "Neither ptt nor dictate takes the other's recording; both refuse 
 
 - [ ] **Step 1: Write the failing tests**
 
-```rust
-// src/main.rs
-#[test]
-fn ptt_is_implemented_and_named_in_the_usage() {
-    assert!(IMPLEMENTED.contains(&"ptt"));
-    assert!(USAGE.contains("ptt"), "a command that works is listed");
-}
+Note which of these is worth writing. Once `ptt` moves between the two lists in
+`IMPLEMENTED`, both halves of a `ptt`-specific test are already asserted
+generically — membership by `the_commands_this_issue_implements_are_not_in_the_unimplemented_arm`,
+and the usage line by `the_usage_text_names_every_implemented_command`, which
+loops over `IMPLEMENTED`. So do not add a third test that repeats them; the
+generic pair is what keeps the next command honest too.
 
+```rust
 // src/client.rs — this one should already pass; it pins what must not change.
 #[test]
 fn ptt_keeps_the_short_reply_bound() {
