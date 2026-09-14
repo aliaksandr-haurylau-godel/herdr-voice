@@ -2628,4 +2628,106 @@ mod tests {
         }
         assert!(runtime.hold.lock().unwrap().is_none(), "no hold was begun");
     }
+
+    #[test]
+    fn every_ptt_line_names_what_happened_and_what_to_do() {
+        let lines = vec![
+            too_short_line("w1:p1", 120, 300),
+            kept_on_shutdown_line("w1:p1", "/takes/1789-1-2.wav"),
+            shutdown_lost_line("w1:p1", "the device went away"),
+        ];
+        for line in lines {
+            assert!(!line.is_empty());
+            assert!(line.contains("w1:p1"), "names the pane: {line}");
+        }
+        assert!(
+            too_short_line("w1:p1", 120, 300).contains("120"),
+            "a tap names its own length, so the minimum can be judged"
+        );
+        assert!(
+            kept_on_shutdown_line("w1:p1", "/takes/1789-1-2.wav").contains("/takes/1789-1-2.wav"),
+            "a kept take names where it is, or it is lost in practice"
+        );
+    }
+
+    #[test]
+    fn a_tap_raises_a_toast_so_it_is_not_mistaken_for_a_broken_plugin() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        // `runtime_with` builds with toasts off; this case is about them being on.
+        runtime.delivery_settings.toasts = true;
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("ptt-tap-toast"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(1_000);
+        let calls = wait_for_calls(&fake, std::time::Duration::from_secs(5));
+
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call, crate::delivery::tests_support::Call::Notify(_, _))),
+            "a tap is announced, or it is indistinguishable from a broken plugin: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, crate::delivery::tests_support::Call::Insert(_, _))),
+            "and it delivers nothing: {calls:?}"
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+    }
+
+    #[test]
+    fn a_tap_with_toasts_off_still_writes_the_journal_line() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        // Toasts off is the default this helper builds; stated rather than
+        // implied, because the whole point of the test is that key's value.
+        runtime.delivery_settings.toasts = false;
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("ptt-tap-quiet"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(1_000);
+        wait_for_the_hold_to_clear(&runtime);
+
+        assert!(
+            fake.calls().is_empty(),
+            "no toast when toasts are off: {:?}",
+            fake.calls()
+        );
+        let lines = journal.0.lock().unwrap();
+        assert!(
+            lines.iter().any(|line| line.contains("too short")),
+            "`[ui] toasts` decides interruption, never whether a failure is \
+             recorded at all: got {lines:?}"
+        );
+
+        drop(lines);
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+    }
 }
