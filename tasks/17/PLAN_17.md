@@ -517,7 +517,24 @@ Then pin the contract itself, so that neither implementation can drift from it:
 
 - [ ] **Step 7: Declare the module and run the gates**
 
-Add `mod ptt;` beside the other module declarations.
+Add `mod ptt;` beside the other module declarations (they are in `src/main.rs`).
+
+Clippy will fail here, and it is expected: nothing outside this module's own
+tests uses any of it yet. The daemon takes `Hold`, `Settings` and `Clock` in
+Task 3, and `decide` is called only by the watcher in Task 4, so
+`cargo clippy --all-targets -- -D warnings` reports eight dead-code errors. A
+commit must never be red, so add a module-level allowance at the top of
+`src/ptt.rs`, with the comment that says when it goes:
+
+```rust
+// Nothing outside this module's own tests calls any of it yet: the daemon takes
+// the hold, the settings and the clock in Task 3, and the watcher is what calls
+// `decide`, in Task 4. Task 4 removes this line.
+#![allow(dead_code)]
+```
+
+Task 4 Step 5 deletes it. An allowance nobody is told to remove is how dead code
+starts being permitted by accident.
 
 Run: `cargo test ptt` then `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`
 Expected: PASS, no warnings.
@@ -1397,10 +1414,22 @@ and, after the accept loop breaks and before `serve` returns:
     }
 ```
 
-- [ ] **Step 5: Run the tests and the gates**
+- [ ] **Step 5: Remove the dead-code allowance, then run the tests and the gates**
 
-Run: `cargo test` then clippy and fmt.
-Expected: PASS, no warnings. If a test hangs, the watcher is waiting on a clock nobody advances — check the `Idle` branch is woken by `wake()`.
+Every item in `src/ptt.rs` now has a caller outside its own tests: the daemon
+took the hold, the settings and the clock in Task 3, and this task added the
+watcher, which calls `decide`. Delete the `#![allow(dead_code)]` line and its
+comment from the top of `src/ptt.rs`, added in Task 2 Step 7.
+
+Run: `cargo test` then `cargo clippy --all-targets -- -D warnings` and
+`cargo fmt --check`.
+Expected: PASS, no warnings — including with the allowance gone. If clippy names
+something still unused, that item has no caller and the task is not finished;
+find out which of the plan's pieces was not written rather than putting the
+allowance back.
+If a test hangs, the watcher is waiting on a clock nobody advances — check the
+`Idle` branch is woken by `wake()`, and that both `Clock` implementations
+consume the `woken` flag as the contract in Task 2 requires.
 
 - [ ] **Step 6: Commit**
 
