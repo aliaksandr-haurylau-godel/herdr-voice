@@ -821,3 +821,64 @@ same endpoint behaves differently; only `google/gemma-4-e4b` was measured, and a
 larger model on the same runner was not, because it did not finish loading inside
 the bound. And why `herdr` resists repair while three other terms do not — that
 question is open, and is not being chased until more real use accumulates.
+
+## Push-to-talk, by hand on macOS
+
+Run on 2026-09-14 on macOS 25.6, Apple silicon, herdr 0.9.0, with the release
+build of the plugin linked from a checkout of `main` at `786754f`. One hold, one
+key, one person speaking into a live herdr pane. This is the first time anything
+in this repository has been driven by a real key rather than by a command typed
+by hand.
+
+| what | value |
+|---|---|
+| hold | 15 323 ms, 180 repeats |
+| repeat rate | 11.75 a second |
+| take on disk | 515 798 bytes, 16 kHz mono 16-bit — 16.12 s |
+| tail | 16.12 s recorded against a 15.32 s hold: the release gap, as configured |
+| bias | transcript hit, 40 file names over 426 characters, 1 526 characters of conversation, capped at 600 |
+| delivery | inserted into the pinned pane, not submitted |
+| result | one take, one transcript, no split |
+
+**The repeat rate through a plugin action matches the one measured through a
+shell binding.** The auto-repeat table at the top of this file recorded roughly
+twelve invocations a second against a `type = "shell"` binding. This hold
+produced 11.75 a second against a `type = "plugin_action"` one, where every
+repeat is a separate process that connects to the daemon's socket and waits for
+a reply. herdr recorded fifty of those invocations, every one `succeeded` with
+exit code 0. The path is different and the rate is the same.
+
+**The one-second release gap survived 180 consecutive repeats.** No gap inside
+the hold reached a second, so the take did not split — the failure the gap was
+widened to prevent, and the reason issue #56 exists, did not occur here. That is
+one hold on an idle machine and does not settle #56, which asks for the worst
+gap under load.
+
+**The tail is exactly the gap.** The recording is 16.12 seconds against a
+15.32-second hold. Nothing on screen says so: the indicator is issue #40, and
+for those 800 milliseconds after the key came up a working recording and a hung
+one look alike.
+
+**A technical term was lost, and the stage that repairs it did not run.** The
+phrase was Russian and carried one English technical term. Recognition returned
+a similar-sounding Russian word in its place. `[rewrite] engine` was left at its
+default, `agent`, which this build does not invoke, so the transcript was
+delivered unrewritten and said so once — the notice arrived as designed. This is
+the second observation of the same shape, after the one recorded above for a
+toggle take, and both are a single English term inside Russian speech.
+
+**What this does not establish.** The level of the take is not reported
+anywhere for a hold. A toggle take carries it in the reply to the keypress that
+ends it; a hold has no such keypress, and neither the journal nor a toast names
+it, so a marginal input is invisible until it becomes a bad transcript. Also
+untouched here: any platform but macOS, and any take that fails — this one
+succeeded, so the failure paths were exercised by tests and not by a person.
+
+**Setting it up took three keys, and that is worth recording.** `alt+v` did
+nothing; `alt+g` typed `©`. herdr's own default configuration says it plainly —
+"Most reliable direct bindings are ctrl+letter, function keys, and explicit
+modified chords. alt+... may depend on your terminal/tmux setup" — and on this
+terminal Option composes a character instead of reaching the binding. `ctrl+g`
+worked first time. The action that is meant to print a working snippet and know
+this, `setup`, is still a stub: issue #41. A person installing the plugin meets
+the same three attempts with nothing to guide them.
