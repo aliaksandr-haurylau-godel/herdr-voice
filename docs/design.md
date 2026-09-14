@@ -188,15 +188,30 @@ Hold-to-talk needs to know when the key was released.
 
 Release is inferred from the absence of auto-repeat. Each repeat stamps the
 current time; the daemon records while stamps keep arriving and stops when none
-has arrived for `release_ms` (default 250 milliseconds, three times the measured
-85 millisecond repeat interval). A hold shorter than `min_hold_ms` (default 300
-milliseconds) is a stray tap: its recording is discarded without transcription.
+has arrived for `release_ms`, one second by default. A hold shorter than
+`min_hold_ms` (default 300 milliseconds) is a stray tap: its recording is
+discarded without transcription.
 
 ### Why
 
 Auto-repeat is produced by the operating system on all three platforms and reaches
 the plugin through herdr's ordinary keybindings. It needs no accessibility
 permission, no additional program and no terminal-specific protocol.
+
+A gap in the stream of repeats is not proof that the key came up. It is equally
+what a busy machine produces while the key is still down, and the daemon cannot
+tell the two apart. One second is about twelve times the 85 millisecond median
+repeat interval recorded in `docs/evidence.md`, and about ten times the largest
+gap observed there at the start of a hold, 99 milliseconds. It therefore absorbs
+a stall an order of magnitude worse than anything that has been measured.
+
+The price is a tail on every hold: recording runs for a second after the key
+comes up, and the text arrives that much later. A shorter gap buys that second
+back and risks the opposite failure — one hold split into two takes, the second
+of which can fall below `min_hold_ms` and be discarded without transcription, so
+the end of what was said disappears. The value is a configuration key rather
+than a constant because the measurement that would settle it, the worst gap
+inside a hold on a loaded machine, is issue #56 and has not been made.
 
 A toggle action remains for long dictation, where holding a key for a minute is
 worse than pressing it twice.
@@ -250,7 +265,7 @@ file_names = 40
 prompt_chars = 600
 
 [ptt]
-release_ms = 250
+release_ms = 1000
 min_hold_ms = 300
 
 [ui]
