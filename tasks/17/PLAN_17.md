@@ -662,6 +662,13 @@ Expected: FAIL — no field `hold` on `Runtime`, and `ptt` still answers `not im
     pub clock: std::sync::Arc<dyn crate::ptt::Clock>,
 ```
 
+Four places build a `Runtime`, not three. Besides `start()`, `fake_runtime` and
+`runtime_with`, one test builds a literal inline —
+`the_failure_reply_survives_one_read_line_when_the_transcript_and_the_reason_carry_newlines`
+at roughly `src/daemon.rs:1015` — and it stops compiling without the three new
+fields. It never holds a key, so give it an empty hold, the same 1000/300
+settings, and `SystemClock::default()`; it needs no handle on the clock.
+
 In `start()` (`src/daemon.rs:551`), build them from the loaded configuration:
 
 ```rust
@@ -884,10 +891,13 @@ fn ptt(
     match recorder.start(pane, cwd, agent) {
         Started::CouldNotStart(why) => Reply::Error(why),
         Started::PreviousFailure(why) => Reply::Error(why),
-        Started::AlreadyRunning => Reply::Error(format!(
+        // `.to_string()`, not `format!`: the string interpolates nothing, and
+        // `clippy::useless_format` is an error under `-D warnings`.
+        Started::AlreadyRunning => Reply::Error(
             "a take is already recording for another action; \
              end it with `herdr-voice dictate` before holding the key"
-        )),
+                .to_string(),
+        ),
         Started::Began => {
             let now = runtime.clock.now();
             if let Ok(mut held) = runtime.hold.lock() {
@@ -1416,10 +1426,19 @@ and, after the accept loop breaks and before `serve` returns:
 
 - [ ] **Step 5: Remove the dead-code allowance, then run the tests and the gates**
 
-Every item in `src/ptt.rs` now has a caller outside its own tests: the daemon
-took the hold, the settings and the clock in Task 3, and this task added the
-watcher, which calls `decide`. Delete the `#![allow(dead_code)]` line and its
-comment from the top of `src/ptt.rs`, added in Task 2 Step 7.
+Every item in `src/ptt.rs` now has a caller outside its own tests, and so does
+every field the daemon gained: the hold and the clock were read from Task 3, and
+this task adds the watcher, which is what reads `Runtime.ptt` and calls `decide`.
+
+**There are two allowances to delete, in two files.** Both were added because a
+commit must never be red, and both name this step as where they go:
+
+- `#![allow(dead_code)]` with its comment at the top of `src/ptt.rs`, from Task 2
+  Step 7. It is module-level and covers only that file.
+- `#[allow(dead_code)]` with its comment on the `ptt` field of `Runtime`, at
+  roughly `src/daemon.rs:84`, added in Task 3. A module-level allowance in
+  `src/ptt.rs` does not reach a field declared in `src/daemon.rs`, which is why
+  it needed its own.
 
 Run: `cargo test` then `cargo clippy --all-targets -- -D warnings` and
 `cargo fmt --check`.
