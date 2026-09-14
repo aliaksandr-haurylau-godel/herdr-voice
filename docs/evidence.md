@@ -735,3 +735,66 @@ the OpenAI Whisper transcription API's shape (`multipart/form-data`, JSON
 `{"text": ...}` back), and this one server's compatibility with it is what
 was actually exercised, not every server that might call itself
 "Whisper-compatible."
+
+## The rewrite stage, measured against a local model runner
+
+Run on 2026-09-14 on macOS, Apple silicon, against LM Studio serving
+`google/gemma-4-e4b` on a loopback port, through the OpenAI-compatible chat
+route. The shipped `HttpEngine` and the shipped prompt were exercised
+byte-for-byte — the harness included `src/rewrite/http.rs` by path rather than
+reimplementing the request — so what is measured here is the engine as it is
+delivered, not an approximation of it. No live-endpoint test was left in the
+suite, the same way issue #36's entry records its own reverted checks.
+
+Every case was run twice. The two runs agreed on every case, word for word.
+
+| case | bias | time | outcome |
+|---|---|---|---|
+| a Russian sentence with one English term, repeated subject | full | 28.7 s, then 8.0 s | term unrepaired; **text returned shorter than the transcript** |
+| the same sentence | empty | 11.2 s, 12.0 s | term unrepaired; clause structure and trailing fragment kept |
+| a rambling sentence with three mangled technical terms | full | 13.7 s, 14.1 s | all three repaired; meaning, length and filler intact; **terms wrapped in backticks** |
+| an ordinary sentence with no technical terms | full | 6.2 s, 6.2 s | unchanged apart from a capital and a final period |
+
+**Terms in the bias are repaired, and the repair is real.** In the third case a
+phonetic rendering of `cargo clippy` came back as `cargo clippy`, a mangled
+`large-v3-turbo` came back correct, and a two-word rendering of `pre-commit`
+came back hyphenated. All three were present in the bias string. This is the
+stage doing the job section 4 of `docs/design.md` gives it.
+
+**One term was not repaired, with the term in the bias and without it.** The
+name `herdr` came back as `Herder` — the English word, capitalized — in the
+first case, where the bias carried both `herdr` and `herdr-voice`, and again in
+the second case with no bias at all. Four runs, the same result every time. The
+first observation of this was a single live take on 2026-09-10 and could have
+been one bad take; it reproduces on a bench with no microphone, in two
+configurations. What it is not is the absence of the stage: the stage ran.
+
+**The bias makes the model compress.** The same transcript kept its two relative
+clauses and its trailing fragment when sent with an empty bias, and lost both
+when sent with the bias. That inverts the rule the prompt and `docs/design.md`
+section 4 both state — form only, never meaning, length or intent — and it
+inverts it on the path every non-plain take takes. Recorded as issue #50.
+
+**Repaired terms arrive wrapped in backticks**, which the delivery stage inserts
+verbatim into the pane. Issue #51.
+
+**Two failures of the engine misname their cause.** The 30-second bound fired
+while the endpoint was loading a model and reported `check the server is running
+and the address is correct`; both were true. A 400 response was reported the
+same way, as an unreachable server, and `ureq::Error::Status(code, _)` discards
+the body, so the server's own account of what it refused never reaches the
+person. Issue #52.
+
+**Against the numbers already in this file**: an agent command-line tool with its
+tool servers disabled corrected the same class of phrase in 4.6 seconds. This
+model ran 6.2 to 28.7 seconds per call, against a 30-second bound — one case
+came within 1.3 seconds of failing — and did not repair the term the earlier
+measurement was built around.
+
+**What this does not establish.** Whether a take through the daemon and a live
+herdr pane behaves the same; this drove the engine directly, the gap already open
+for #21, #26, #36 and the http recognition engine. Whether another model on the
+same endpoint behaves differently; only `google/gemma-4-e4b` was measured, and a
+larger model on the same runner was not, because it did not finish loading inside
+the bound. And why `herdr` resists repair while three other terms do not — that
+question is open, and is not being chased until more real use accumulates.
