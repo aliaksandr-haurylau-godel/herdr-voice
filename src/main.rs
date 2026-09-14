@@ -18,6 +18,10 @@ mod context;
 mod daemon;
 mod delivery;
 mod doctor;
+/// A test-only rendezvous, used by the fakes that stand in for a slow device
+/// and a slow recogniser.
+#[cfg(test)]
+mod gate;
 mod proto;
 mod ptt;
 mod rewrite;

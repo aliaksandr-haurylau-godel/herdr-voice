@@ -80,9 +80,12 @@ pub struct Runtime {
     /// concurrent takes is two notices instead of one, not a correctness
     /// failure (`tasks/36/DESIGN_36.md`, section 3).
     pub told: std::sync::atomic::AtomicBool,
-    /// The hold in progress, if a key is down. In memory on purpose: a file
-    /// would bring back the truncated read the prototype lost recordings to.
-    pub hold: std::sync::Mutex<Option<crate::ptt::Hold>>,
+    /// Where this mechanism's take is in its life — nothing, a device being
+    /// opened, a key down, or a take in the pipeline. In memory on purpose: a
+    /// file would bring back the truncated read the prototype lost recordings
+    /// to. Four states rather than two because a recording exists for longer
+    /// than a key is down (`crate::ptt::HoldState`).
+    pub hold: std::sync::Mutex<crate::ptt::HoldState>,
     /// `[ptt]`, read once with the rest of the configuration. The watcher is
     /// what compares a hold against these two durations.
     pub ptt: crate::ptt::Settings,
@@ -200,13 +203,28 @@ fn dictate(
 ) -> Reply {
     // A hold is not ended by the toggle. An action that ends a hold at once is
     // issue #55; doing it here would be that feature under another name.
-    if let Ok(held) = runtime.hold.lock() {
-        if let Some(hold) = held.as_ref() {
+    //
+    // Refused for the whole life of the hold, the pipeline included. A
+    // `dictate` accepted between the recorder being stopped and the take being
+    // delivered finds the recorder idle, is told `AlreadyRunning` by nothing
+    // and `Began` by the device, or — worse — takes the toggle's second half
+    // and stops, transcribes and delivers the hold's own take, leaving the
+    // watcher to report as failed a take that was in fact delivered.
+    match &*hold_of(runtime) {
+        crate::ptt::HoldState::Idle => {}
+        crate::ptt::HoldState::Opening(hold) | crate::ptt::HoldState::Live(hold) => {
             return Reply::Error(format!(
                 "holding for {}: a key is being held, and the recording ends \
                  on its own when the key comes up",
                 hold.target
-            ));
+            ))
+        }
+        crate::ptt::HoldState::Ending(hold) => {
+            return Reply::Error(format!(
+                "holding for {}: the take that key produced is being \
+                 transcribed, and lands in that pane on its own",
+                hold.target
+            ))
         }
     }
     match recorder.start(pane, cwd, agent) {
@@ -242,11 +260,39 @@ fn dictate(
 /// The returned target is what lets the refusal that follows be journalled
 /// against the hold it did not end.
 fn refresh_hold(runtime: &Runtime) -> Option<String> {
-    let mut held = runtime.hold.lock().ok()?;
-    let hold = held.as_mut()?;
-    hold.last_poke = runtime.clock.now();
-    hold.pokes = hold.pokes.saturating_add(1);
-    Some(hold.target.clone())
+    // Read before the guard is taken: the clock is nothing the hold's lock has
+    // to cover, and this path runs twelve times a second.
+    let now = runtime.clock.now();
+    let mut state = hold_of(runtime);
+    match &mut *state {
+        // A device still being opened is as much a hold as a live one. The
+        // repeats that arrive during the open are this hold's repeats, and the
+        // stamp they leave is the one the deadline is measured from.
+        crate::ptt::HoldState::Opening(hold) | crate::ptt::HoldState::Live(hold) => {
+            hold.last_poke = now;
+            hold.pokes = hold.pokes.saturating_add(1);
+            Some(hold.target.clone())
+        }
+        // A hold whose take is already in the pipeline is not continued by a
+        // repeat: its stamp decides nothing any more, and there is no hold for
+        // a refusal to be journalled against.
+        crate::ptt::HoldState::Idle | crate::ptt::HoldState::Ending(_) => None,
+    }
+}
+
+/// The one way this file reads the hold, so that the four call sites cannot
+/// drift apart. A poisoned lock is recovered with `into_inner()` everywhere: a
+/// site that gave up instead would leave the recorder running with nothing left
+/// to stop it and the watcher waiting an hour for a hold it can never see.
+///
+/// Poison is not reachable today — nothing fallible runs under this mutex, and
+/// nothing may be added that does. Uniformity is what keeps that unreachability
+/// from being the only thing standing between a lock and a stranded recording.
+fn hold_of(runtime: &Runtime) -> std::sync::MutexGuard<'_, crate::ptt::HoldState> {
+    runtime
+        .hold
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// One repeat of a held key.
@@ -254,6 +300,17 @@ fn refresh_hold(runtime: &Runtime) -> Option<String> {
 /// The stamp has already been moved by `refresh_hold`, before this request's
 /// context was read. What is left to decide is whether this repeat begins a
 /// hold — and beginning one is the only thing here that does real work.
+///
+/// The hold's state is claimed *before* the device is opened, not after. A real
+/// input takes hundreds of milliseconds to open and the key repeats twelve
+/// times a second, so a dozen repeats arrive while the first one is still
+/// inside `recorder.start`. Claiming the state afterwards left every one of
+/// them looking at no hold at all: each asked the recorder to start, was told
+/// `AlreadyRunning`, and was answered that a take was recording for another
+/// action — naming a cause that did not exist.
+///
+/// The guard is never held across `recorder.start`: it decides what this
+/// request is, and the work happens after it is dropped.
 fn ptt(
     recorder: &Recorder,
     runtime: &Runtime,
@@ -261,26 +318,31 @@ fn ptt(
     cwd: Option<&str>,
     agent: Option<&str>,
 ) -> Reply {
-    if let Ok(held) = runtime.hold.lock() {
-        if let Some(hold) = held.as_ref() {
+    let now = runtime.clock.now();
+    {
+        let mut state = hold_of(runtime);
+        match &*state {
             // A repeat. The target stays what it was: the pane is pinned when
             // the hold begins, so that text does not follow the focus while
             // somebody is still speaking.
-            return Reply::Ok(format!("holding for {}", hold.target));
-        }
-    }
-    match recorder.start(pane, cwd, agent) {
-        Started::CouldNotStart(why) => Reply::Error(why),
-        Started::PreviousFailure(why) => Reply::Error(why),
-        Started::AlreadyRunning => Reply::Error(
-            "a take is already recording for another action; \
-             end it with `herdr-voice dictate` before holding the key"
-                .to_string(),
-        ),
-        Started::Began => {
-            let now = runtime.clock.now();
-            if let Ok(mut held) = runtime.hold.lock() {
-                *held = Some(crate::ptt::Hold {
+            crate::ptt::HoldState::Opening(hold) | crate::ptt::HoldState::Live(hold) => {
+                return Reply::Ok(format!("holding for {}", hold.target))
+            }
+            // The key came up a release gap ago and that take is being
+            // transcribed. Refused rather than queued, for the reason section 7
+            // of the design refuses the other collision: starting a recording
+            // now would start it at a moment nobody is pressing anything, and
+            // holding the request would make `ptt` a request that waits for a
+            // transcription.
+            crate::ptt::HoldState::Ending(hold) => {
+                return Reply::Error(format!(
+                    "the take held for {} is still being transcribed; \
+                     hold the key again once it lands",
+                    hold.target
+                ))
+            }
+            crate::ptt::HoldState::Idle => {
+                *state = crate::ptt::HoldState::Opening(crate::ptt::Hold {
                     target: pane.to_string(),
                     cwd: cwd.map(|c| c.to_string()),
                     agent: agent.map(|a| a.to_string()),
@@ -289,8 +351,47 @@ fn ptt(
                     pokes: 1,
                 });
             }
+        }
+    }
+    match recorder.start(pane, cwd, agent) {
+        Started::Began => {
+            {
+                let mut state = hold_of(runtime);
+                // Promoted, not rebuilt: the stamps the repeats that arrived
+                // while the device was opening left behind are this hold's, and
+                // the deadline is measured from them.
+                let claimed = std::mem::take(&mut *state);
+                *state = match claimed {
+                    crate::ptt::HoldState::Opening(hold) => crate::ptt::HoldState::Live(hold),
+                    // The daemon stopped while the device was opening and took
+                    // the hold; there is nothing left to promote.
+                    other => other,
+                };
+            }
             runtime.clock.wake();
             Reply::Ok(format!("holding for {pane}"))
+        }
+        refused => {
+            {
+                // No device opened, so nothing is recording. The claim this
+                // request made has to go, or the watcher waits on a take that
+                // does not exist and every repeat is answered as a hold.
+                let mut state = hold_of(runtime);
+                if matches!(&*state, crate::ptt::HoldState::Opening(_)) {
+                    *state = crate::ptt::HoldState::Idle;
+                }
+            }
+            runtime.clock.wake();
+            match refused {
+                Started::CouldNotStart(why) | Started::PreviousFailure(why) => Reply::Error(why),
+                Started::AlreadyRunning => Reply::Error(
+                    "a take is already recording for another action; \
+                     end it with `herdr-voice dictate` before holding the key"
+                        .to_string(),
+                ),
+                // The arm above is the only one that reaches here.
+                Started::Began => Reply::Ok(format!("holding for {pane}")),
+            }
         }
     }
 }
@@ -298,9 +399,11 @@ fn ptt(
 /// Ends a hold when the repeats stop.
 ///
 /// One thread for the daemon's life: a hold is a singleton, because the
-/// recorder serves one take at a time. The pipeline runs here too — it takes
-/// seconds, and no hold can exist during them, because a `ptt` arriving while
-/// the recorder is busy is refused rather than queued.
+/// recorder serves one take at a time. The pipeline runs here too, and it takes
+/// seconds. Those seconds are not a gap in which the mechanism holds nothing:
+/// the hold moves to `Ending` before the recorder is stopped and back to `Idle`
+/// only after delivery, so a `ptt` or a `dictate` arriving inside them is
+/// refused instead of finding an idle recorder and starting a second take.
 fn watch(recorder: Arc<Recorder>, runtime: Arc<Runtime>, stop: Arc<AtomicBool>) {
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -308,28 +411,22 @@ fn watch(recorder: Arc<Recorder>, runtime: Arc<Runtime>, stop: Arc<AtomicBool>) 
             return;
         }
         let now = runtime.clock.now();
-        let decision = {
-            let held = match runtime.hold.lock() {
-                Ok(held) => held,
-                // A poisoned lock would otherwise spin this thread forever.
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            crate::ptt::decide(now, held.as_ref(), &runtime.ptt)
-        };
+        let decision = crate::ptt::decide(now, &hold_of(&runtime), &runtime.ptt);
         match decision {
             crate::ptt::Decision::Idle => runtime.clock.wait_until(now.saturating_add(3_600_000)),
             crate::ptt::Decision::KeepWaiting { until } => runtime.clock.wait_until(until),
             crate::ptt::Decision::Release { held_ms } => {
-                let Some(hold) = take_hold(&runtime) else {
+                let Some(hold) = begin_ending(&runtime) else {
                     continue;
                 };
                 runtime
                     .journal
                     .write(&released_line(&hold.target, held_ms, hold.pokes));
                 end_take(&recorder, &runtime, &hold);
+                finish_ending(&runtime);
             }
             crate::ptt::Decision::TooShort { held_ms } => {
-                let Some(hold) = take_hold(&runtime) else {
+                let Some(hold) = begin_ending(&runtime) else {
                     continue;
                 };
                 runtime.journal.write(&too_short_line(
@@ -338,6 +435,7 @@ fn watch(recorder: Arc<Recorder>, runtime: Arc<Runtime>, stop: Arc<AtomicBool>) 
                     runtime.ptt.min_hold_ms,
                 ));
                 discard_take(&recorder, &runtime, &hold, held_ms);
+                finish_ending(&runtime);
             }
         }
     }
@@ -346,6 +444,11 @@ fn watch(recorder: Arc<Recorder>, runtime: Arc<Runtime>, stop: Arc<AtomicBool>) 
 /// The daemon is going away with a key still down. This is not a release: no
 /// repeat stopped arriving, so nothing here says the key came up. The recording
 /// is stopped and kept, and the journal names where it is.
+///
+/// A hold whose device was still being opened is taken too. The `ptt` request
+/// that claimed it finds nothing left to promote and answers as it would have,
+/// and the recording it opened, if it opened one, outlives nothing: the process
+/// is on its way out.
 fn finish_on_shutdown(recorder: &Recorder, runtime: &Runtime) {
     let Some(hold) = take_hold(runtime) else {
         return;
@@ -361,11 +464,49 @@ fn finish_on_shutdown(recorder: &Recorder, runtime: &Runtime) {
     }
 }
 
-/// Clear the hold and return it, so no second path can act on the same one.
+/// Clear the hold and return it, at whatever stage it had reached, so no second
+/// path can act on the same one.
+///
+/// Only shutdown uses this. A release goes through `begin_ending`, which keeps
+/// the state saying a take of this mechanism exists for as long as the pipeline
+/// runs.
 fn take_hold(runtime: &Runtime) -> Option<crate::ptt::Hold> {
-    match runtime.hold.lock() {
-        Ok(mut held) => held.take(),
-        Err(poisoned) => poisoned.into_inner().take(),
+    let mut state = hold_of(runtime);
+    match std::mem::take(&mut *state) {
+        crate::ptt::HoldState::Idle => None,
+        crate::ptt::HoldState::Opening(hold)
+        | crate::ptt::HoldState::Live(hold)
+        | crate::ptt::HoldState::Ending(hold) => Some(hold),
+    }
+}
+
+/// Move a live hold into the pipeline and hand back a copy of it.
+///
+/// The state stays non-idle for the whole of the stopping, the transcription
+/// and the delivery. That is the window a `dictate` used to land in and take the
+/// hold's own take for itself, and the one a `ptt` used to land in and start a
+/// second recording that nothing could time.
+fn begin_ending(runtime: &Runtime) -> Option<crate::ptt::Hold> {
+    let mut state = hold_of(runtime);
+    match std::mem::take(&mut *state) {
+        crate::ptt::HoldState::Live(hold) => {
+            *state = crate::ptt::HoldState::Ending(hold.clone());
+            Some(hold)
+        }
+        other => {
+            *state = other;
+            None
+        }
+    }
+}
+
+/// The pipeline is done and this mechanism holds nothing again. Anything but
+/// `Ending` is left alone: it was put there by something that is not this
+/// take, and is not this call's to clear.
+fn finish_ending(runtime: &Runtime) {
+    let mut state = hold_of(runtime);
+    if matches!(&*state, crate::ptt::HoldState::Ending(_)) {
+        *state = crate::ptt::HoldState::Idle;
     }
 }
 
@@ -916,7 +1057,7 @@ pub fn start() -> Result<Outcome, TransportError> {
         rewrite,
         skip_if_plain: loaded.config.rewrite.skip_if_plain,
         told: std::sync::atomic::AtomicBool::new(false),
-        hold: std::sync::Mutex::new(None),
+        hold: std::sync::Mutex::new(crate::ptt::HoldState::Idle),
         ptt: crate::ptt::Settings {
             release_ms: loaded.config.ptt.release_ms,
             min_hold_ms: loaded.config.ptt.min_hold_ms,
@@ -1044,7 +1185,7 @@ mod tests {
             rewrite: crate::rewrite::Resolution::Off,
             skip_if_plain: true,
             told: std::sync::atomic::AtomicBool::new(false),
-            hold: std::sync::Mutex::new(None),
+            hold: std::sync::Mutex::new(crate::ptt::HoldState::Idle),
             ptt: crate::ptt::Settings {
                 release_ms: 1000,
                 min_hold_ms: 300,
@@ -1163,7 +1304,7 @@ mod tests {
             rewrite: crate::rewrite::Resolution::Off,
             skip_if_plain: true,
             told: std::sync::atomic::AtomicBool::new(false),
-            hold: std::sync::Mutex::new(None),
+            hold: std::sync::Mutex::new(crate::ptt::HoldState::Idle),
             ptt: crate::ptt::Settings {
                 release_ms: 1000,
                 min_hold_ms: 300,
@@ -1302,7 +1443,7 @@ mod tests {
             rewrite: crate::rewrite::Resolution::Off,
             skip_if_plain: true,
             told: std::sync::atomic::AtomicBool::new(false),
-            hold: std::sync::Mutex::new(None),
+            hold: std::sync::Mutex::new(crate::ptt::HoldState::Idle),
             ptt: crate::ptt::Settings {
                 release_ms: 1000,
                 min_hold_ms: 300,
@@ -2244,7 +2385,7 @@ mod tests {
         let (reply, _) = answer(&request("ptt", PANE_1), &recorder, &runtime);
         assert_eq!(reply, Reply::Ok("holding for w1:p1".to_string()));
         let held = runtime.hold.lock().unwrap();
-        let hold = held.as_ref().expect("a hold");
+        let hold = held.hold().expect("a hold");
         assert_eq!(hold.target, "w1:p1");
         assert_eq!(hold.pokes, 1);
     }
@@ -2254,11 +2395,11 @@ mod tests {
         let (runtime, clock) = fake_runtime_with_clock("a transcript");
         let recorder = tone_recorder("ptt-repeat");
         answer(&request("ptt", PANE_1), &recorder, &runtime);
-        let first = runtime.hold.lock().unwrap().as_ref().unwrap().last_poke;
+        let first = runtime.hold.lock().unwrap().hold().unwrap().last_poke;
         clock.advance(90);
         answer(&request("ptt", PANE_1), &recorder, &runtime);
         let held = runtime.hold.lock().unwrap();
-        let hold = held.as_ref().expect("still one hold");
+        let hold = held.hold().expect("still one hold");
         assert!(hold.last_poke > first, "the repeat must move the stamp");
         assert_eq!(hold.pokes, 2);
         assert_eq!(hold.target, "w1:p1");
@@ -2276,10 +2417,7 @@ mod tests {
             &runtime,
         );
         assert_eq!(reply, Reply::Ok("holding for w1:p1".to_string()));
-        assert_eq!(
-            runtime.hold.lock().unwrap().as_ref().unwrap().target,
-            "w1:p1"
-        );
+        assert_eq!(runtime.hold.lock().unwrap().hold().unwrap().target, "w1:p1");
     }
 
     #[test]
@@ -2287,7 +2425,7 @@ mod tests {
         let (runtime, clock) = fake_runtime_with_clock("a transcript");
         let recorder = tone_recorder("ptt-unreadable");
         answer(&request("ptt", PANE_1), &recorder, &runtime);
-        let first = runtime.hold.lock().unwrap().as_ref().unwrap().last_poke;
+        let first = runtime.hold.lock().unwrap().hold().unwrap().last_poke;
         clock.advance(90);
         // Not JSON at all: `context::parse` refuses it.
         let (reply, _) = answer(&request("ptt", b"not json"), &recorder, &runtime);
@@ -2296,9 +2434,7 @@ mod tests {
             "the keypress itself failed"
         );
         let held = runtime.hold.lock().unwrap();
-        let hold = held
-            .as_ref()
-            .expect("the hold survives an unreadable repeat");
+        let hold = held.hold().expect("the hold survives an unreadable repeat");
         assert!(
             hold.last_poke > first,
             "a signal the daemon could not read is not evidence the key came up"
@@ -2312,7 +2448,7 @@ mod tests {
         let (reply, _) = answer(&request("ptt", b"not json"), &recorder, &runtime);
         assert!(matches!(reply, Reply::Error(_)));
         assert!(
-            runtime.hold.lock().unwrap().is_none(),
+            runtime.hold.lock().unwrap().is_idle(),
             "nothing to pin a hold to"
         );
     }
@@ -2369,7 +2505,8 @@ mod tests {
     /// Wait for the watcher to clear the hold, rather than for a duration.
     fn wait_for_the_hold_to_clear(runtime: &Runtime) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while runtime.hold.lock().unwrap().is_some() && std::time::Instant::now() < deadline {
+        while runtime.hold.lock().unwrap().hold().is_some() && std::time::Instant::now() < deadline
+        {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
@@ -2406,7 +2543,7 @@ mod tests {
             "the take is inserted into the pinned pane: got {calls:?}"
         );
         assert!(
-            runtime.hold.lock().unwrap().is_none(),
+            runtime.hold.lock().unwrap().is_idle(),
             "the hold is cleared"
         );
 
@@ -2586,7 +2723,7 @@ mod tests {
             fake.calls()
         );
         assert!(
-            runtime.hold.lock().unwrap().is_none(),
+            runtime.hold.lock().unwrap().is_idle(),
             "the hold is cleared rather than left for nobody"
         );
         let lines = journal.0.lock().unwrap();
@@ -2613,7 +2750,10 @@ mod tests {
             }
             other => panic!("a hold must not be ended by dictate: {other:?}"),
         }
-        assert!(runtime.hold.lock().unwrap().is_some(), "the hold survives");
+        assert!(
+            runtime.hold.lock().unwrap().hold().is_some(),
+            "the hold survives"
+        );
     }
 
     #[test]
@@ -2626,7 +2766,241 @@ mod tests {
             Reply::Error(why) => assert!(why.contains("dictate"), "names how it ends: {why}"),
             other => panic!("a toggle take must not be taken over by a hold: {other:?}"),
         }
-        assert!(runtime.hold.lock().unwrap().is_none(), "no hold was begun");
+        assert!(runtime.hold.lock().unwrap().is_idle(), "no hold was begun");
+    }
+
+    /// A recorder whose device takes a while to open, with the gate that says
+    /// when it is inside `start` and when it may finish.
+    fn opening_recorder(tag: &str, gate: &std::sync::Arc<crate::gate::Gate>) -> Recorder {
+        let gate = std::sync::Arc::clone(gate);
+        Recorder::spawn(
+            move || Box::new(crate::capture::tests_support::OpeningSource(gate)),
+            crate::config::Audio::default(),
+            std::env::temp_dir().join(format!("daemon-takes-{tag}-{}", std::process::id())),
+        )
+    }
+
+    /// Wait for the watcher to be done with the hold — the state idle again —
+    /// rather than for a duration.
+    ///
+    /// Never the only thing a test waits on. What a test asserts is a journal
+    /// line, a delivery call or a file, and it waits for that; this is for the
+    /// end of the test, where the watcher has to be finished before it is
+    /// stopped and joined.
+    fn wait_for_idle(runtime: &Runtime) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !runtime.hold.lock().unwrap().is_idle() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// A hold whose take has been released and is inside the recogniser, with
+    /// everything the caller needs to act in that window and to close it.
+    struct InThePipeline {
+        runtime: std::sync::Arc<Runtime>,
+        recorder: std::sync::Arc<Recorder>,
+        clock: std::sync::Arc<crate::ptt::tests_support::TestClock>,
+        gate: std::sync::Arc<crate::gate::Gate>,
+        journal: std::sync::Arc<RecordingJournal>,
+        stop: std::sync::Arc<AtomicBool>,
+        watcher: thread::JoinHandle<()>,
+    }
+
+    /// Drive a hold to the point where the deadline has passed, the recorder
+    /// has been stopped and the take is inside recognition — and stop it there.
+    ///
+    /// The window this opens is the one two defects lived in: a `dictate`
+    /// landing in it took the hold's own take for itself, and a `ptt` landing
+    /// in it started a second recording nothing could time. It is held open by
+    /// a gate rather than by a sleep, so the tests that use it are the same on
+    /// every machine.
+    fn a_take_in_the_pipeline(
+        tag: &str,
+        fake: &crate::delivery::tests_support::FakeDeliverer,
+    ) -> InThePipeline {
+        let gate = std::sync::Arc::new(crate::gate::Gate::default());
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        runtime.recognition = Ok(Box::new(crate::stt::tests_support::BlockingFake {
+            gate: std::sync::Arc::clone(&gate),
+            text: "fix the worklog entry".to_string(),
+        }));
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder(tag));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(400);
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(1_000);
+        // The watcher has taken the hold, stopped the recorder and reached the
+        // recogniser. It stays there until `gate.open()`.
+        gate.wait_until_entered();
+
+        InThePipeline {
+            runtime,
+            recorder,
+            clock,
+            gate,
+            journal,
+            stop,
+            watcher,
+        }
+    }
+
+    impl InThePipeline {
+        /// Let the take finish, wait for the watcher to be done with it, and
+        /// stop the watcher.
+        fn finish(self) {
+            self.gate.open();
+            wait_for_idle(&self.runtime);
+            self.stop.store(true, Ordering::SeqCst);
+            self.runtime.clock.wake();
+            self.clock.advance(1);
+            self.watcher.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn repeats_arriving_while_the_device_opens_are_repeats_and_not_errors() {
+        let gate = std::sync::Arc::new(crate::gate::Gate::default());
+        let (runtime, _clock) = fake_runtime_with_clock("a transcript");
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(opening_recorder("ptt-opening", &gate));
+
+        // The first keypress: it is inside `recorder.start` for as long as the
+        // gate is shut, which is what a real input device does for hundreds of
+        // milliseconds.
+        let first = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            thread::spawn(move || answer(&request("ptt", PANE_1), &recorder, &runtime).0)
+        };
+        gate.wait_until_entered();
+
+        // Twelve a second means a dozen of these arrive while the device is
+        // still opening. Each is a repeat of the hold that is being opened, not
+        // a collision with some other action.
+        for _ in 0..3 {
+            let (reply, _) = answer(&request("ptt", PANE_1), &recorder, &runtime);
+            assert_eq!(
+                reply,
+                Reply::Ok("holding for w1:p1".to_string()),
+                "a repeat arriving while the device opens is a repeat"
+            );
+        }
+        assert_eq!(
+            runtime.hold.lock().unwrap().hold().unwrap().pokes,
+            4,
+            "and each of them counts against the hold it belongs to"
+        );
+
+        gate.open();
+        assert_eq!(
+            first.join().unwrap(),
+            Reply::Ok("holding for w1:p1".to_string())
+        );
+        assert!(
+            matches!(
+                &*runtime.hold.lock().unwrap(),
+                crate::ptt::HoldState::Live(_)
+            ),
+            "the device opened, so the hold is live"
+        );
+    }
+
+    #[test]
+    fn a_hold_that_could_not_open_its_device_leaves_nothing_behind() {
+        let (runtime, _clock) = fake_runtime_with_clock("a transcript");
+        // A recorder whose thread is gone refuses every start, which is the
+        // shape of any device that will not open.
+        let recorder = tone_recorder("ptt-refused");
+        answer(&request("dictate", PANE_1), &recorder, &runtime);
+        // A take is running for the toggle, so the hold's start is refused.
+        let (reply, _) = answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert!(matches!(reply, Reply::Error(_)), "got {reply:?}");
+        assert!(
+            runtime.hold.lock().unwrap().is_idle(),
+            "a hold whose device never opened must not be left for the watcher"
+        );
+    }
+
+    #[test]
+    fn a_dictate_arriving_while_the_take_is_in_the_pipeline_is_refused() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let held = a_take_in_the_pipeline("ptt-pipeline-dictate", &fake);
+
+        let (reply, _) = answer(&request("dictate", PANE_1), &held.recorder, &held.runtime);
+        match reply {
+            Reply::Error(why) => assert!(
+                why.contains("w1:p1"),
+                "the refusal names the take that is still being finished: {why}"
+            ),
+            // Accepted, it would find the recorder idle and take the hold's own
+            // take for itself: the transcript would be delivered by this
+            // keypress and the watcher would report the take as failed.
+            other => panic!("a take in the pipeline must not be taken over: {other:?}"),
+        }
+
+        held.gate.open();
+        let calls = wait_for_calls(&fake, std::time::Duration::from_secs(5));
+        assert_eq!(
+            calls.len(),
+            1,
+            "one take, one delivery, and no second recording: {calls:?}"
+        );
+        let lines = held.journal.0.lock().unwrap();
+        assert!(
+            !lines.iter().any(|line| line.contains("the take failed")),
+            "a take that was delivered is not also reported as failed: {lines:?}"
+        );
+        drop(lines);
+        held.finish();
+    }
+
+    #[test]
+    fn a_ptt_arriving_while_the_take_is_in_the_pipeline_starts_no_second_recording() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let held = a_take_in_the_pipeline("ptt-pipeline-ptt", &fake);
+
+        // Answered while the recogniser is still blocked: a keypress never
+        // waits for a transcription, which is why the guard is not held across
+        // the pipeline.
+        let (reply, _) = answer(&request("ptt", PANE_1), &held.recorder, &held.runtime);
+        match reply {
+            Reply::Error(why) => assert!(
+                why.contains("w1:p1") && why.contains("transcribed"),
+                "the refusal says what is still running: {why}"
+            ),
+            // Accepted, it would start a recording the watcher cannot time
+            // until the first take's pipeline returns — so the second take
+            // keeps recording for the length of the first transcription.
+            other => panic!("a second recording must not begin here: {other:?}"),
+        }
+        assert!(
+            matches!(
+                &*held.runtime.hold.lock().unwrap(),
+                crate::ptt::HoldState::Ending(_)
+            ),
+            "the refused keypress left the take that is finishing alone"
+        );
+
+        held.gate.open();
+        let calls = wait_for_calls(&fake, std::time::Duration::from_secs(5));
+        assert_eq!(calls.len(), 1, "one take, one delivery: {calls:?}");
+        wait_for_idle(&held.runtime);
+        assert!(
+            held.runtime.hold.lock().unwrap().is_idle(),
+            "and the mechanism holds nothing once the take has landed"
+        );
+        held.finish();
     }
 
     #[test]

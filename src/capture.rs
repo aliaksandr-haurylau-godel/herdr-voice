@@ -430,6 +430,32 @@ pub mod tests_support {
         fn stop(&mut self) {}
     }
 
+    /// A device that takes a while to open: `start` blocks in the gate until
+    /// the test lets it through.
+    ///
+    /// Opening a real input takes hundreds of milliseconds, and the key repeats
+    /// about twelve times a second, so a dozen requests arrive while the first
+    /// one is still inside `start`. This makes that window an event the test
+    /// controls rather than a duration it has to sleep through.
+    pub struct OpeningSource(pub std::sync::Arc<crate::gate::Gate>);
+
+    impl Source for OpeningSource {
+        fn start(&mut self, _device: Option<&str>, sink: Sink) -> Result<Format, String> {
+            self.0.enter();
+            // Loud enough to clear the silence floor, so a take that began here
+            // can reach recognition and delivery.
+            let samples: Vec<f32> = (0..4_800)
+                .map(|i| 0.3 * (i as f32 * std::f32::consts::TAU * 440.0 / 48_000.0).sin())
+                .collect();
+            sink.push(Event::Samples(samples));
+            Ok(Format {
+                rate: 48_000,
+                channels: 1,
+            })
+        }
+        fn stop(&mut self) {}
+    }
+
     /// Hears one moment and then reports the device gone, so a test can drive
     /// the mid-take failure without hardware.
     pub struct LosingSource;
