@@ -198,6 +198,17 @@ fn dictate(
     cwd: Option<&str>,
     agent: Option<&str>,
 ) -> Reply {
+    // A hold is not ended by the toggle. An action that ends a hold at once is
+    // issue #55; doing it here would be that feature under another name.
+    if let Ok(held) = runtime.hold.lock() {
+        if let Some(hold) = held.as_ref() {
+            return Reply::Error(format!(
+                "holding for {}: a key is being held, and the recording ends \
+                 on its own when the key comes up",
+                hold.target
+            ));
+        }
+    }
     match recorder.start(pane, cwd, agent) {
         Started::Began => Reply::Ok(format!("recording for {pane}")),
         Started::CouldNotStart(why) => Reply::Error(why),
@@ -2587,5 +2598,34 @@ mod tests {
             !kept.contains("released"),
             "stopping is not a release: nothing here says the key came up: {kept}"
         );
+    }
+
+    #[test]
+    fn a_dictate_during_a_hold_is_refused_and_says_what_is_running() {
+        let runtime = fake_runtime("a transcript");
+        let recorder = tone_recorder("collide-dictate");
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        let (reply, _) = answer(&request("dictate", PANE_1), &recorder, &runtime);
+        match reply {
+            Reply::Error(why) => {
+                assert!(why.contains("holding"), "names what is running: {why}");
+                assert!(why.contains("w1:p1"), "names the pane: {why}");
+            }
+            other => panic!("a hold must not be ended by dictate: {other:?}"),
+        }
+        assert!(runtime.hold.lock().unwrap().is_some(), "the hold survives");
+    }
+
+    #[test]
+    fn a_ptt_while_a_toggle_take_runs_is_refused_and_says_how_it_ends() {
+        let runtime = fake_runtime("a transcript");
+        let recorder = tone_recorder("collide-ptt");
+        answer(&request("dictate", PANE_1), &recorder, &runtime);
+        let (reply, _) = answer(&request("ptt", PANE_1), &recorder, &runtime);
+        match reply {
+            Reply::Error(why) => assert!(why.contains("dictate"), "names how it ends: {why}"),
+            other => panic!("a toggle take must not be taken over by a hold: {other:?}"),
+        }
+        assert!(runtime.hold.lock().unwrap().is_none(), "no hold was begun");
     }
 }
