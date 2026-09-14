@@ -1249,13 +1249,32 @@ mod tests {
         }
     }
 
+    /// Where a recorder built with `tag` writes its takes. A test that has to
+    /// look at the files needs the same path the recorder was given, and one
+    /// per tag keeps two tests from reading each other's takes.
+    fn takes_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("daemon-takes-{tag}-{}", std::process::id()))
+    }
+
+    /// The wav files a take left behind in `dir`. An absent directory is no
+    /// files, which is what it means.
+    fn wavs_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "wav"))
+            .collect()
+    }
+
     /// A recorder that hears one loud moment and stops — clears the silence
     /// floor, so a test can reach transcription and delivery.
     fn tone_recorder(tag: &str) -> Recorder {
         Recorder::spawn(
             || Box::new(crate::capture::tests_support::ToneSource),
             crate::config::Audio::default(),
-            std::env::temp_dir().join(format!("daemon-takes-{tag}-{}", std::process::id())),
+            takes_dir(tag),
         )
     }
 
@@ -2587,6 +2606,8 @@ mod tests {
         let journal = std::sync::Arc::new(RecordingJournal::default());
         runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
         let runtime = std::sync::Arc::new(runtime);
+        let takes = takes_dir("ptt-tap");
+        let _ = std::fs::remove_dir_all(&takes);
         let recorder = std::sync::Arc::new(tone_recorder("ptt-tap"));
         let stop = std::sync::Arc::new(AtomicBool::new(false));
 
@@ -2610,6 +2631,14 @@ mod tests {
             fake.calls().is_empty(),
             "a tap delivers nothing: got {:?}",
             fake.calls()
+        );
+        // The recording itself, not only the line about it. A tap that left its
+        // wav behind would leave one for every accidental tap, forever — and
+        // the journal line saying it was discarded would be false.
+        assert_eq!(
+            wavs_in(&takes),
+            Vec::<std::path::PathBuf>::new(),
+            "a tap's recording is removed, not merely reported as discarded"
         );
 
         stop.store(true, Ordering::SeqCst);
@@ -2762,6 +2791,17 @@ mod tests {
         assert!(
             !kept.contains("released"),
             "stopping is not a release: nothing here says the key came up: {kept}"
+        );
+        // The path the line names, on disk. A line pointing at a file that is
+        // not there is worse than no line: it sends somebody looking for a
+        // recording that was never kept.
+        let path = kept
+            .split_once("kept at ")
+            .map(|(_, path)| path.trim())
+            .unwrap_or_else(|| panic!("the line names where the take is: {kept}"));
+        assert!(
+            std::path::Path::new(path).exists(),
+            "the take named by the journal line is on disk: {path}"
         );
     }
 
