@@ -2378,6 +2378,12 @@ mod tests {
 
     const PANE_1: &[u8] = br#"{"focused_pane_id":"w1:p1"}"#;
 
+    /// How long a test waits for something the watcher thread produces before
+    /// failing. Generous, because it is a bound on a broken run rather than a
+    /// duration any healthy run pays: every wait returns as soon as the thing
+    /// it waits for appears.
+    const WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
     #[test]
     fn a_first_ptt_begins_a_hold_and_names_the_pane() {
         let (runtime, _clock) = fake_runtime_with_clock("a transcript");
@@ -2502,11 +2508,31 @@ mod tests {
         }
     }
 
-    /// Wait for the watcher to clear the hold, rather than for a duration.
-    fn wait_for_the_hold_to_clear(runtime: &Runtime) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while runtime.hold.lock().unwrap().hold().is_some() && std::time::Instant::now() < deadline
-        {
+    /// Poll the journal until a line contains `needle`, or the bound expires,
+    /// and hand back everything written by then.
+    ///
+    /// A test waits for the thing it asserts on. Waiting for the hold to clear
+    /// instead used to pass by luck: the hold was cleared before the journal
+    /// line, the toast and the delivery that four tests then read, so the
+    /// assertions raced the watcher and the suite went red about one run in
+    /// twelve. The state machine has since made "the hold is clear" a point
+    /// after all of them — but a test that waits on the observable stays honest
+    /// if the code moves again, and a test that waits on a proxy does not.
+    fn wait_for_journal(
+        journal: &RecordingJournal,
+        needle: &str,
+        within: std::time::Duration,
+    ) -> Vec<String> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let lines = journal.0.lock().unwrap().clone();
+            if lines.iter().any(|line| line.contains(needle)) {
+                return lines;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no line containing {needle:?} within {within:?}: got {lines:?}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
@@ -2542,6 +2568,7 @@ mod tests {
             ),
             "the take is inserted into the pinned pane: got {calls:?}"
         );
+        wait_for_idle(&runtime);
         assert!(
             runtime.hold.lock().unwrap().is_idle(),
             "the hold is cleared"
@@ -2574,20 +2601,17 @@ mod tests {
         answer(&request("ptt", PANE_1), &recorder, &runtime);
         clock.advance(1_000);
 
-        wait_for_the_hold_to_clear(&runtime);
+        // The line this test is about, not the hold: the hold is not what is
+        // asserted, and waiting on it is what made this test flake.
+        wait_for_journal(&journal, "too short", WITHIN);
+        wait_for_idle(&runtime);
 
         assert!(
             fake.calls().is_empty(),
             "a tap delivers nothing: got {:?}",
             fake.calls()
         );
-        let lines = journal.0.lock().unwrap();
-        assert!(
-            lines.iter().any(|line| line.contains("too short")),
-            "a tap says it was a tap: got {lines:?}"
-        );
 
-        drop(lines);
         stop.store(true, Ordering::SeqCst);
         runtime.clock.wake();
         clock.advance(1);
@@ -2615,14 +2639,16 @@ mod tests {
         answer(&request("ptt", PANE_1), &recorder, &runtime);
         clock.advance(1_000);
 
-        wait_for_the_hold_to_clear(&runtime);
+        // Both lines this test reads, waited for by name.
+        wait_for_journal(&journal, "released", WITHIN);
+        let lines = wait_for_journal(&journal, "the device went away", WITHIN);
+        wait_for_idle(&runtime);
 
         assert!(
             fake.calls().is_empty(),
             "a take whose device went away delivers nothing: {:?}",
             fake.calls()
         );
-        let lines = journal.0.lock().unwrap();
         let released = lines
             .iter()
             .find(|line| line.contains("released"))
@@ -2638,7 +2664,6 @@ mod tests {
             "and the failure is its own line: {lines:?}"
         );
 
-        drop(lines);
         stop.store(true, Ordering::SeqCst);
         runtime.clock.wake();
         clock.advance(1);
@@ -2669,7 +2694,11 @@ mod tests {
         answer(&request("ptt", PANE_1), &recorder, &runtime);
         clock.advance(1_000);
 
-        wait_for_the_hold_to_clear(&runtime);
+        // The failure this test counts, then the watcher being done with the
+        // take — so "once" is counted after everything that could report a
+        // second time has run, rather than at the first sighting of the first.
+        wait_for_journal(&journal, "pane_not_found", WITHIN);
+        wait_for_idle(&runtime);
 
         let notifies = fake
             .calls()
@@ -2677,14 +2706,13 @@ mod tests {
             .filter(|call| matches!(call, crate::delivery::tests_support::Call::Notify(_, _)))
             .count();
         assert_eq!(notifies, 1, "one failure, one toast: {:?}", fake.calls());
-        let lines = journal.0.lock().unwrap();
+        let lines = journal.0.lock().unwrap().clone();
         let failures = lines
             .iter()
             .filter(|line| line.contains("pane_not_found"))
             .count();
         assert_eq!(failures, 1, "one failure, one journal line: {lines:?}");
 
-        drop(lines);
         stop.store(true, Ordering::SeqCst);
         runtime.clock.wake();
         clock.advance(1);
@@ -3084,21 +3112,18 @@ mod tests {
 
         answer(&request("ptt", PANE_1), &recorder, &runtime);
         clock.advance(1_000);
-        wait_for_the_hold_to_clear(&runtime);
+        // The line is what this test is about: waiting for it is what proves
+        // `[ui] toasts` decides interruption and never whether a failure is
+        // recorded at all.
+        wait_for_journal(&journal, "too short", WITHIN);
+        wait_for_idle(&runtime);
 
         assert!(
             fake.calls().is_empty(),
             "no toast when toasts are off: {:?}",
             fake.calls()
         );
-        let lines = journal.0.lock().unwrap();
-        assert!(
-            lines.iter().any(|line| line.contains("too short")),
-            "`[ui] toasts` decides interruption, never whether a failure is \
-             recorded at all: got {lines:?}"
-        );
 
-        drop(lines);
         stop.store(true, Ordering::SeqCst);
         runtime.clock.wake();
         clock.advance(1);
