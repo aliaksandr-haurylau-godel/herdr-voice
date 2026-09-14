@@ -25,6 +25,7 @@ pub struct Config {
     pub ui: Ui,
     pub delivery: Delivery,
     pub context: Context,
+    pub ptt: Ptt,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -136,6 +137,32 @@ pub struct Ui {
 impl Default for Ui {
     fn default() -> Self {
         Ui { toasts: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Ptt {
+    /// How long after the last keypress a hold counts as released.
+    ///
+    /// One second, derived from the auto-repeat measurements in
+    /// `docs/evidence.md`: an 85 ms median repeat interval and a largest
+    /// observed start-of-hold gap of 99 ms, so this survives a stall an order
+    /// of magnitude worse than anything measured. It is a default rather than a
+    /// constant because the case it exists to survive — the worst gap inside a
+    /// hold on a loaded machine — has not been measured (issue #56).
+    pub release_ms: u64,
+    /// Shorter than this is a tap, not a hold: the recording is discarded
+    /// without transcription and the person is told it was a tap.
+    pub min_hold_ms: u64,
+}
+
+impl Default for Ptt {
+    fn default() -> Self {
+        Ptt {
+            release_ms: 1000,
+            min_hold_ms: 300,
+        }
     }
 }
 
@@ -362,9 +389,12 @@ mod tests {
     #[test]
     fn a_key_of_a_later_stage_is_ignored_rather_than_fatal() {
         let directory = scratch("future");
+        // The section has to be one no `Config` field claims, or this test
+        // silently stops testing anything. `[ptt]` was that section until
+        // issue #17 gave it fields; `[indicator]` is issue #40's, unbuilt.
         std::fs::write(
             directory.join("config.toml"),
-            "[ptt]\nrelease_ms = 250\n\n[stt]\nmodel = \"small\"\n",
+            "[indicator]\nblink_ms = 600\n\n[stt]\nmodel = \"small\"\n",
         )
         .unwrap();
         let loaded = load(Some(&directory));
@@ -521,5 +551,22 @@ mod tests {
             home: None,
         };
         assert_eq!(directory(&nothing), None);
+    }
+
+    #[test]
+    fn the_ptt_table_has_defaults_and_is_read() {
+        let directory = scratch("ptt");
+        std::fs::write(directory.join("config.toml"), "[ptt]\nrelease_ms = 2500\n").unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(loaded.config.ptt.release_ms, 2500);
+        // The key the file did not name keeps its default.
+        assert_eq!(loaded.config.ptt.min_hold_ms, 300);
+    }
+
+    #[test]
+    fn the_ptt_defaults_are_the_documented_ones() {
+        let config = Config::default();
+        assert_eq!(config.ptt.release_ms, 1000);
+        assert_eq!(config.ptt.min_hold_ms, 300);
     }
 }
