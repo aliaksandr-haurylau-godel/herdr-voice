@@ -200,3 +200,48 @@ accept loop breaks, so the plan decides both the signal and that `serve` does no
 return before the watcher has stopped and kept the take.
 
 ### S3 Plan
+
+Artifact: `tasks/17/PLAN_17.md`, 11 tasks.
+
+Six rounds. The verdicts, in order: QUESTIONS with five findings, then QUESTIONS
+with two, then one, one, one, then READY.
+
+```yaml
+gate: {stage: S3, artifact: PLAN_17.md, reviewer: implementer, verdict: QUESTIONS, round: 1, date: 2026-09-14,
+  findings: ["clock_for_tests given as a comment, with no field named to store the concrete clock",
+             "FakeDeliverer::new(calls) does not exist; runtime_with takes the fake unboxed, not boxed",
+             "RecordingJournal::new() does not exist; the helper derives Default",
+             "three tests left as comments describing assertions rather than as code",
+             "request_for is not the helper's name; it is request(command, &[u8])"]}
+gate: {stage: S3, artifact: PLAN_17.md, reviewer: implementer, verdict: QUESTIONS, round: 2, date: 2026-09-14,
+  findings: ["TestClock::wait_until could not be freed by wake(), so the watcher's hour-long idle wait would hang watcher.join() rather than fail",
+             "unreadable_repeat_line declared in Task 8 with no call site and no test"]}
+gate: {stage: S3, artifact: PLAN_17.md, reviewer: implementer, verdict: QUESTIONS, round: 3, date: 2026-09-14,
+  findings: ["end_take and discard_take given as prose; the Err branch of recorder.stop() — the device-lost case the design names — had no code, no line wording and no test"]}
+gate: {stage: S3, artifact: PLAN_17.md, reviewer: implementer, verdict: QUESTIONS, round: 4, date: 2026-09-14,
+  findings: ["end_take routed transcribe's Reply::Error through report_failure, double-reporting the delivery failure transcribe already journals and toasts"]}
+gate: {stage: S3, artifact: PLAN_17.md, reviewer: implementer, verdict: QUESTIONS, round: 5, date: 2026-09-14,
+  findings: ["the plan named dictate as transcribe's only other call site; an existing test at src/daemon.rs:935 calls it directly and the tuple return breaks compilation"]}
+gate: {stage: S3, artifact: PLAN_17.md, reviewer: implementer, verdict: READY, round: 6, date: 2026-09-14, blocker: null}
+```
+
+**The fix for round 4 is worth stating, because the obvious answer was wrong.**
+`transcribe` reports its own failure in exactly one of its four return paths —
+the delivery branch, which writes `delivery_failed_line` and raises a toast.
+Recognition being unavailable and recognition failing each return a
+`Reply::Error` and write nothing, which is right for the toggle, where the
+client prints the reply. A hold has no reply reader: its last keypress was
+answered a second before the take was even stopped. So removing the report
+would have made two failures out of three silent, and keeping it doubled the
+third. `transcribe` now returns whether it reported, the watcher announces only
+what was not announced, and the test counts toasts and journal lines rather than
+asserting their presence — the defect here is a duplicate, and only a count
+finds it.
+
+**What five of the six findings had in common.** Each was a place where the plan
+asserted something instead of checking it: that a helper existed, that a wake
+would free a waiter, that a declared function had a caller, that one failure
+would produce one message, that a call site was the only one. None was
+carelessness in the sense of haste; each was something that seemed too obvious
+to verify. That is the shape of the thing: the claims worth checking are the
+ones confident enough not to have been checked.
