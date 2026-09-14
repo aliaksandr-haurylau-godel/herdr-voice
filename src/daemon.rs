@@ -80,6 +80,18 @@ pub struct Runtime {
     /// concurrent takes is two notices instead of one, not a correctness
     /// failure (`tasks/36/DESIGN_36.md`, section 3).
     pub told: std::sync::atomic::AtomicBool,
+    /// The hold in progress, if a key is down. In memory on purpose: a file
+    /// would bring back the truncated read the prototype lost recordings to.
+    pub hold: std::sync::Mutex<Option<crate::ptt::Hold>>,
+    /// `[ptt]`, read once with the rest of the configuration.
+    ///
+    /// Nothing reads it yet: the watcher is what compares a hold against these
+    /// two durations, and it arrives with the next step of issue #17. That step
+    /// removes this allowance.
+    #[allow(dead_code)]
+    pub ptt: crate::ptt::Settings,
+    /// Behind an `Arc` because the watcher thread holds it too.
+    pub clock: std::sync::Arc<dyn crate::ptt::Clock>,
 }
 
 /// The two context fields `Runtime` holds, resolved from the loaded
@@ -105,33 +117,68 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
             Reply::Ok("nothing to cancel".to_string()),
             Control::Continue,
         ),
-        command if needs_target_pane(command) => match context::parse(&request.context) {
-            Err(why) => (Reply::Error(why.to_string()), Control::Continue),
-            Ok(invocation) => match invocation.target_pane() {
-                None => (
-                    Reply::Error(
-                        "the invocation context names no focused pane; \
-                         invoke this from a pane running an agent"
-                            .to_string(),
+        command if needs_target_pane(command) => {
+            // A repeat that arrives is evidence the key is down, whatever its
+            // payload turns out to say. The context answers where the take
+            // goes, and that was settled when the hold began.
+            let refreshed = if command == "ptt" {
+                refresh_hold(runtime)
+            } else {
+                None
+            };
+            match context::parse(&request.context) {
+                Err(why) => {
+                    if let Some(target) = &refreshed {
+                        runtime
+                            .journal
+                            .write(&unreadable_repeat_line(target, &why.to_string()));
+                    }
+                    (Reply::Error(why.to_string()), Control::Continue)
+                }
+                Ok(invocation) => match invocation.target_pane() {
+                    None => {
+                        if let Some(target) = &refreshed {
+                            runtime.journal.write(&unreadable_repeat_line(
+                                target,
+                                "the invocation context names no focused pane",
+                            ));
+                        }
+                        (
+                            Reply::Error(
+                                "the invocation context names no focused pane; \
+                                 invoke this from a pane running an agent"
+                                    .to_string(),
+                            ),
+                            Control::Continue,
+                        )
+                    }
+                    Some(pane) if command == "dictate" => (
+                        dictate(
+                            recorder,
+                            runtime,
+                            pane,
+                            invocation.focused_pane_cwd.as_deref(),
+                            invocation.focused_pane_agent.as_deref(),
+                        ),
+                        Control::Continue,
                     ),
-                    Control::Continue,
-                ),
-                Some(pane) if command == "dictate" => (
-                    dictate(
-                        recorder,
-                        runtime,
-                        pane,
-                        invocation.focused_pane_cwd.as_deref(),
-                        invocation.focused_pane_agent.as_deref(),
+                    Some(pane) if command == "ptt" => (
+                        ptt(
+                            recorder,
+                            runtime,
+                            pane,
+                            invocation.focused_pane_cwd.as_deref(),
+                            invocation.focused_pane_agent.as_deref(),
+                        ),
+                        Control::Continue,
                     ),
-                    Control::Continue,
-                ),
-                Some(_) => (
-                    Reply::Ok(format!("{command}: not implemented yet")),
-                    Control::Continue,
-                ),
-            },
-        },
+                    Some(_) => (
+                        Reply::Ok(format!("{command}: not implemented yet")),
+                        Control::Continue,
+                    ),
+                },
+            }
+        }
         other => (
             Reply::Error(format!("unknown command: {other}")),
             Control::Continue,
@@ -177,6 +224,67 @@ fn dictate(
                 transcribe(runtime, &take, &collected.bias)
             }
         },
+    }
+}
+
+/// Move the hold's stamp forward, if there is one, and say which pane it
+/// belongs to. Called before a `ptt` request's context is examined, so that a
+/// request the daemon cannot read never becomes evidence that the key came up
+/// (`tasks/17/DESIGN_17.md`, section 2a).
+///
+/// The returned target is what lets the refusal that follows be journalled
+/// against the hold it did not end.
+fn refresh_hold(runtime: &Runtime) -> Option<String> {
+    let mut held = runtime.hold.lock().ok()?;
+    let hold = held.as_mut()?;
+    hold.last_poke = runtime.clock.now();
+    hold.pokes = hold.pokes.saturating_add(1);
+    Some(hold.target.clone())
+}
+
+/// One repeat of a held key.
+///
+/// The stamp has already been moved by `refresh_hold`, before this request's
+/// context was read. What is left to decide is whether this repeat begins a
+/// hold — and beginning one is the only thing here that does real work.
+fn ptt(
+    recorder: &Recorder,
+    runtime: &Runtime,
+    pane: &str,
+    cwd: Option<&str>,
+    agent: Option<&str>,
+) -> Reply {
+    if let Ok(held) = runtime.hold.lock() {
+        if let Some(hold) = held.as_ref() {
+            // A repeat. The target stays what it was: the pane is pinned when
+            // the hold begins, so that text does not follow the focus while
+            // somebody is still speaking.
+            return Reply::Ok(format!("holding for {}", hold.target));
+        }
+    }
+    match recorder.start(pane, cwd, agent) {
+        Started::CouldNotStart(why) => Reply::Error(why),
+        Started::PreviousFailure(why) => Reply::Error(why),
+        Started::AlreadyRunning => Reply::Error(
+            "a take is already recording for another action; \
+             end it with `herdr-voice dictate` before holding the key"
+                .to_string(),
+        ),
+        Started::Began => {
+            let now = runtime.clock.now();
+            if let Ok(mut held) = runtime.hold.lock() {
+                *held = Some(crate::ptt::Hold {
+                    target: pane.to_string(),
+                    cwd: cwd.map(|c| c.to_string()),
+                    agent: agent.map(|a| a.to_string()),
+                    began: now,
+                    last_poke: now,
+                    pokes: 1,
+                });
+            }
+            runtime.clock.wake();
+            Reply::Ok(format!("holding for {pane}"))
+        }
     }
 }
 
@@ -462,6 +570,13 @@ pub fn toast_failed_line(why: &str) -> String {
     format!("toast failed: {why}")
 }
 
+/// A repeat whose context could not be read, while a hold was open. Journal
+/// only: the keypress's own reply already carries the failure, and the hold
+/// continuing is the correct outcome rather than something to act on.
+fn unreadable_repeat_line(target: &str, why: &str) -> String {
+    format!("ptt {target}: a repeat could not be read ({why}); the hold continues")
+}
+
 /// Written when no rewrite engine is available to run this take through —
 /// `Resolution::Unavailable`, or a live `Resolution::Engine` call that
 /// failed. Never written for `Resolution::Off`, which is not "unavailable",
@@ -563,6 +678,12 @@ pub fn start() -> Result<Outcome, TransportError> {
         rewrite,
         skip_if_plain: loaded.config.rewrite.skip_if_plain,
         told: std::sync::atomic::AtomicBool::new(false),
+        hold: std::sync::Mutex::new(None),
+        ptt: crate::ptt::Settings {
+            release_ms: loaded.config.ptt.release_ms,
+            min_hold_ms: loaded.config.ptt.min_hold_ms,
+        },
+        clock: std::sync::Arc::new(crate::ptt::SystemClock::default()),
     };
     serve(listener, address, Arc::new(recorder), Arc::new(runtime));
     Ok(Outcome::Served)
@@ -644,8 +765,18 @@ mod tests {
     /// A runtime that always produces the same transcript, delivers against a
     /// fake that never fails, and never submits or toasts — so a dispatch
     /// test is about which branch runs rather than about speech or delivery.
-    fn fake_runtime(text: &str) -> Runtime {
-        Runtime {
+    /// The same runtime `fake_runtime` builds, plus the clock it was built
+    /// with. Tests that move time need the concrete type; `Runtime` only ever
+    /// holds the trait object, so the concrete `Arc` is handed back here rather
+    /// than stored and downcast.
+    fn fake_runtime_with_clock(
+        text: &str,
+    ) -> (
+        Runtime,
+        std::sync::Arc<crate::ptt::tests_support::TestClock>,
+    ) {
+        let clock = std::sync::Arc::new(crate::ptt::tests_support::TestClock::default());
+        let runtime = Runtime {
             recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
                 text.to_string()
             )))),
@@ -662,7 +793,18 @@ mod tests {
             rewrite: crate::rewrite::Resolution::Off,
             skip_if_plain: true,
             told: std::sync::atomic::AtomicBool::new(false),
-        }
+            hold: std::sync::Mutex::new(None),
+            ptt: crate::ptt::Settings {
+                release_ms: 1000,
+                min_hold_ms: 300,
+            },
+            clock: std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::ptt::Clock>,
+        };
+        (runtime, clock)
+    }
+
+    fn fake_runtime(text: &str) -> Runtime {
+        fake_runtime_with_clock(text).0
     }
 
     #[test]
@@ -732,11 +874,18 @@ mod tests {
         )
     }
 
-    fn runtime_with(
+    /// As `runtime_with`, plus the clock. `runtime_with` keeps its signature —
+    /// `FakeDeliverer` unboxed, `submit: bool` — because the existing suite
+    /// calls it a dozen times.
+    fn runtime_with_clock(
         deliverer: crate::delivery::tests_support::FakeDeliverer,
         submit: bool,
-    ) -> Runtime {
-        Runtime {
+    ) -> (
+        Runtime,
+        std::sync::Arc<crate::ptt::tests_support::TestClock>,
+    ) {
+        let clock = std::sync::Arc::new(crate::ptt::tests_support::TestClock::default());
+        let runtime = Runtime {
             recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
                 "fix the worklog entry".to_string(),
             )))),
@@ -753,7 +902,21 @@ mod tests {
             rewrite: crate::rewrite::Resolution::Off,
             skip_if_plain: true,
             told: std::sync::atomic::AtomicBool::new(false),
-        }
+            hold: std::sync::Mutex::new(None),
+            ptt: crate::ptt::Settings {
+                release_ms: 1000,
+                min_hold_ms: 300,
+            },
+            clock: std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::ptt::Clock>,
+        };
+        (runtime, clock)
+    }
+
+    fn runtime_with(
+        deliverer: crate::delivery::tests_support::FakeDeliverer,
+        submit: bool,
+    ) -> Runtime {
+        runtime_with_clock(deliverer, submit).0
     }
 
     #[test]
@@ -878,6 +1041,13 @@ mod tests {
             rewrite: crate::rewrite::Resolution::Off,
             skip_if_plain: true,
             told: std::sync::atomic::AtomicBool::new(false),
+            hold: std::sync::Mutex::new(None),
+            ptt: crate::ptt::Settings {
+                release_ms: 1000,
+                min_hold_ms: 300,
+            },
+            // This test never holds a key; the real clock is the plain choice.
+            clock: std::sync::Arc::new(crate::ptt::SystemClock::default()),
         };
         let request = dictate_request();
         answer(&request, &recorder, &runtime);
@@ -1796,5 +1966,119 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("the accept loop must end after a stop request");
         served.join().expect("the loop must end");
+    }
+
+    const PANE_1: &[u8] = br#"{"focused_pane_id":"w1:p1"}"#;
+
+    #[test]
+    fn a_first_ptt_begins_a_hold_and_names_the_pane() {
+        let (runtime, _clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("ptt-first");
+        let (reply, _) = answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert_eq!(reply, Reply::Ok("holding for w1:p1".to_string()));
+        let held = runtime.hold.lock().unwrap();
+        let hold = held.as_ref().expect("a hold");
+        assert_eq!(hold.target, "w1:p1");
+        assert_eq!(hold.pokes, 1);
+    }
+
+    #[test]
+    fn a_repeat_refreshes_the_stamp_and_does_not_start_a_second_take() {
+        let (runtime, clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("ptt-repeat");
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        let first = runtime.hold.lock().unwrap().as_ref().unwrap().last_poke;
+        clock.advance(90);
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        let held = runtime.hold.lock().unwrap();
+        let hold = held.as_ref().expect("still one hold");
+        assert!(hold.last_poke > first, "the repeat must move the stamp");
+        assert_eq!(hold.pokes, 2);
+        assert_eq!(hold.target, "w1:p1");
+    }
+
+    #[test]
+    fn a_repeat_from_another_pane_does_not_move_the_target() {
+        let (runtime, clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("ptt-other-pane");
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(90);
+        let (reply, _) = answer(
+            &request("ptt", br#"{"focused_pane_id":"w1:p9"}"#),
+            &recorder,
+            &runtime,
+        );
+        assert_eq!(reply, Reply::Ok("holding for w1:p1".to_string()));
+        assert_eq!(
+            runtime.hold.lock().unwrap().as_ref().unwrap().target,
+            "w1:p1"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_repeat_refreshes_the_hold_and_is_still_refused() {
+        let (runtime, clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("ptt-unreadable");
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        let first = runtime.hold.lock().unwrap().as_ref().unwrap().last_poke;
+        clock.advance(90);
+        // Not JSON at all: `context::parse` refuses it.
+        let (reply, _) = answer(&request("ptt", b"not json"), &recorder, &runtime);
+        assert!(
+            matches!(reply, Reply::Error(_)),
+            "the keypress itself failed"
+        );
+        let held = runtime.hold.lock().unwrap();
+        let hold = held
+            .as_ref()
+            .expect("the hold survives an unreadable repeat");
+        assert!(
+            hold.last_poke > first,
+            "a signal the daemon could not read is not evidence the key came up"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_request_with_no_hold_open_is_refused_as_before() {
+        let (runtime, _clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("ptt-unreadable-idle");
+        let (reply, _) = answer(&request("ptt", b"not json"), &recorder, &runtime);
+        assert!(matches!(reply, Reply::Error(_)));
+        assert!(
+            runtime.hold.lock().unwrap().is_none(),
+            "nothing to pin a hold to"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_repeat_is_recorded_against_the_hold_it_did_not_end() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake, false);
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let recorder = tone_recorder("ptt-unreadable-line");
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(90);
+        answer(&request("ptt", b"not json"), &recorder, &runtime);
+        let lines = journal.0.lock().unwrap();
+        assert!(
+            lines.iter().any(|line| line.contains("the hold continues")),
+            "the refusal is recorded against the hold it did not end: got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_request_with_no_hold_writes_no_ptt_line() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, _clock) = runtime_with_clock(fake, false);
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let recorder = tone_recorder("ptt-unreadable-line-idle");
+        answer(&request("ptt", b"not json"), &recorder, &runtime);
+        let lines = journal.0.lock().unwrap();
+        assert!(
+            lines.is_empty(),
+            "with no hold there is nothing a refusal failed to end: got {lines:?}"
+        );
     }
 }
