@@ -3071,6 +3071,111 @@ mod tests {
         held.finish();
     }
 
+    /// Drive one hold from keypress to end with the given recogniser, and hand
+    /// back everything the person was told: the journal lines and the calls
+    /// made against herdr.
+    ///
+    /// The hold is over the minimum and released by the deadline, so the take
+    /// reaches recognition. What recognition does with it is the argument.
+    fn a_hold_with_recognition(
+        tag: &str,
+        recognition: Recognition,
+    ) -> (Vec<String>, Vec<crate::delivery::tests_support::Call>) {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        runtime.recognition = recognition;
+        runtime.delivery_settings.toasts = true;
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder(tag));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(400);
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(1_000);
+
+        let lines = wait_for_journal(&journal, "the take failed", WITHIN);
+        wait_for_idle(&runtime);
+
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+        (lines, fake.calls())
+    }
+
+    #[test]
+    fn a_hold_whose_recogniser_fails_is_announced_by_the_watcher() {
+        // The person holds the key, speaks, releases — and without this branch
+        // nothing at all happens: the reply that would have carried the failure
+        // went out to a keypress a second before the take was even stopped.
+        let (lines, calls) = a_hold_with_recognition(
+            "ptt-recognition-fails",
+            Ok(Box::new(crate::stt::tests_support::Fake(Err(
+                "the model file is not a model".to_string(),
+            )))),
+        );
+        let failed = lines
+            .iter()
+            .find(|line| line.contains("the take failed"))
+            .unwrap_or_else(|| panic!("the failure is recorded: {lines:?}"));
+        assert!(
+            failed.contains("the model file is not a model"),
+            "and it names what to fix: {failed}"
+        );
+        assert!(
+            failed.contains("w1:p1"),
+            "and the pane it was held over: {failed}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| matches!(call, crate::delivery::tests_support::Call::Notify(_, _))),
+            "and it is raised where the person is looking: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, crate::delivery::tests_support::Call::Insert(_, _))),
+            "nothing was delivered: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn a_hold_with_no_recogniser_at_all_is_announced_the_same_way() {
+        // `[stt] engine` misconfigured: the take is on disk and named, and the
+        // person has to be told, because there is no reply to tell.
+        let (lines, calls) = a_hold_with_recognition(
+            "ptt-recognition-absent",
+            Err("recognition unavailable: no model is configured".to_string()),
+        );
+        let failed = lines
+            .iter()
+            .find(|line| line.contains("the take failed"))
+            .unwrap_or_else(|| panic!("the failure is recorded: {lines:?}"));
+        assert!(
+            failed.contains("no model is configured"),
+            "and it names what to fix: {failed}"
+        );
+        assert!(
+            failed.contains(".wav"),
+            "and where the take is, since it was kept: {failed}"
+        );
+        assert_eq!(
+            calls.len(),
+            1,
+            "one failure, one toast, and no delivery: {calls:?}"
+        );
+    }
+
     #[test]
     fn every_ptt_line_names_what_happened_and_what_to_do() {
         let lines = vec![
