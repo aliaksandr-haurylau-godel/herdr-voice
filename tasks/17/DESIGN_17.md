@@ -25,10 +25,17 @@ on the recorder thread as locals (`src/capture.rs:197`).
 answer "when did the last keypress arrive", and the recorder thread is the wrong
 place to ask: it owns the audio device and knows nothing about requests.
 
-**Decision.** The daemon gains one piece of state, a `Hold`, guarded by a mutex
-and held for as long as a key is down:
+**Decision.** The daemon gains one piece of state, a `HoldState`, guarded by a
+mutex and covering the whole life of a hold — not only the part where a key is
+down:
 
 ```
+HoldState =
+    Idle                 // no key down, and this mechanism owns no take
+  | Opening(Hold)        // a first `ptt` arrived; the device is being opened
+  | Live(Hold)           // the device is open and the key is still down
+  | Ending(Hold)         // the repeats stopped; the take is in the pipeline
+
 Hold {
     target: String,        // the pane pinned when the hold began
     cwd: Option<String>,
@@ -39,10 +46,32 @@ Hold {
 }
 ```
 
-**Why.** A hold is a fact about the arrival of requests, and the daemon is what
-receives them. Putting it beside the recorder would mean teaching the audio
-thread about the shape of requests, and would put the hold behind the same
-channel that serves start and stop.
+**Why four states rather than "a hold or nothing".** A recording exists for
+longer than a key is down. Opening a real input takes hundreds of milliseconds
+before there is any recording at all, and the take spends seconds in
+recognition, rewrite and delivery after the last keypress. With two states both
+of those spans say "nothing is happening", and every request that arrives in
+them is answered as though nothing were: a `dictate` arriving during the second
+takes the hold's own take for itself, a `ptt` arriving during it starts a second
+recording that nothing can time until the first pipeline returns, and a repeat
+arriving during the first is told a take is recording for another action — a
+cause that does not exist.
+
+**Why on the daemon.** A hold is a fact about the arrival of requests, and the
+daemon is what receives them. Putting it beside the recorder would mean teaching
+the audio thread about the shape of requests, and would put the hold behind the
+same channel that serves start and stop.
+
+**The discipline the states are kept under.** The state is only ever read or
+changed with the guard held, and the guard is **never** held across
+`recorder.start`, `recorder.stop`, the pipeline, or a wait on the clock. Each
+site decides what a request is while holding the guard and does the work after
+dropping it. A keypress must never wait for a transcription, and the `ptt` that
+opens the device claims `Opening` before the open rather than after it, so that
+the repeats arriving during those hundreds of milliseconds find the hold they
+belong to. Every site recovers a poisoned lock with `into_inner()`: nothing
+fallible runs under this mutex, so poison is unreachable, and a site that gave up
+instead would leave the recorder running with nothing left to stop it.
 
 ## 2. One keypress
 
@@ -58,11 +87,17 @@ second and is wasted eleven of them.
 
 | state | what happens | reply |
 |---|---|---|
-| no hold, no take running | the recorder is asked to start; a `Hold` is created | `holding for <pane>` |
-| a hold for the same pane | `last_poke` is updated, `pokes` incremented | `holding` |
-| a hold for a different pane | `last_poke` is updated; the pane is **not** changed; a journal line names both panes | `holding for <original pane>` |
-| a `dictate` take is open | nothing starts | an error naming the open take and how it ends |
-| the request cannot be read (§2a) | `last_poke` is updated if a hold is open; nothing else | an error naming what could not be read |
+| `Idle`, no take running | the state becomes `Opening`, then the recorder is asked to start; on success it becomes `Live` | `holding for <pane>` |
+| `Opening` or `Live`, same pane | `last_poke` is updated, `pokes` incremented | `holding for <pane>` |
+| `Opening` or `Live`, different pane | `last_poke` is updated; the pane is **not** changed; a journal line names both panes | `holding for <original pane>` |
+| `Ending` | nothing starts; the take that is finishing is left alone | an error saying that take is still being transcribed |
+| `Idle`, a `dictate` take is open | nothing starts; the state goes back to `Idle` | an error naming the open take and how it ends |
+| the request cannot be read (§2a) | `last_poke` is updated if the state is `Opening` or `Live`; nothing else | an error naming what could not be read |
+
+A repeat arriving while the device is opening is a repeat, not a collision: the
+request that is inside `recorder.start` has already claimed the state, and this
+one moves its stamp like any other. A repeat arriving while a take is in the
+pipeline is neither — §7 says what it gets and why.
 
 No file is written, nothing is allocated that grows with the hold, and no work
 is done on the repeat path beyond taking a mutex and storing a stamp. `ptt`
@@ -111,10 +146,18 @@ cannot be a request handler.
 does. It waits until `last_poke + release_ms`, wakes, and re-reads the hold:
 
 - more repeats arrived — recompute the deadline and wait again;
-- the deadline has passed — take the hold, clear it, stop the recorder, and run
+- the deadline has passed — move the hold to `Ending`, stop the recorder, and run
   the take through the path `dictate` already uses: `take_bias`, `transcribe`,
-  `deliver` (`src/daemon.rs:165-178`, `:367`);
+  `deliver`; the state returns to `Idle` only after delivery;
+- the device is still being opened — wait to be woken, not on a deadline: there
+  is no recording to stop until the open returns, and the request thread wakes
+  the watcher when it does;
 - no hold — wait until there is one.
+
+**The pipeline is not a gap.** The seconds the take spends being stopped,
+transcribed and delivered are `Ending`, not `Idle`. Both of the collisions in §7
+are refused for the whole of them, so no other request can find an idle recorder
+and take over a take that is still being finished.
 
 **A hold ends for one of two reasons, and the journal names which.** The
 prototype distinguished a stamp that had gone stale from a stamp file that had
@@ -124,6 +167,10 @@ disappeared; without a file, nothing can disappear, and what remains is:
 |---|---|---|
 | released | the deadline passed with no further repeat — the ordinary case | goes through the pipeline |
 | daemon stopping | the daemon is shutting down with a hold open | the take is stopped and kept on disk, and the journal names its path |
+
+Shutdown takes the hold whatever stage it is at, `Opening` included. A `ptt` that
+was inside `recorder.start` when that happened finds nothing left to promote and
+answers as it would have; the process is on its way out.
 
 Only the first is a release. The second ends a hold with no evidence that the
 key came up, and the journal line says so in those words, because "the hold
@@ -229,15 +276,30 @@ second start.
 
 **Problem.** Each can arrive while the other is in progress.
 
-**Decision.** Neither interrupts the other. A `ptt` arriving while a `dictate`
-take is open does not start a hold and answers with what is running and how it
-ends. A `dictate` arriving during a hold does not end the hold and answers the
-same way.
+**Decision.** Neither interrupts the other, and "during a hold" means the whole
+of `Opening`, `Live` and `Ending`, not only the part where a key is down.
+
+- A `ptt` arriving while a `dictate` take is open does not start a hold and
+  answers with what is running and how it ends.
+- A `dictate` arriving while the state is `Opening` or `Live` does not end the
+  hold and answers with the pane it is held over.
+- A `dictate` arriving while the state is `Ending` is refused too, and says that
+  the take that key produced is being transcribed and lands in its pane on its
+  own. Accepted, it would find the recorder idle, be handed the toggle's second
+  half, and stop, transcribe and deliver the hold's own take — leaving the
+  watcher to report as failed a take that had in fact been delivered.
+- A `ptt` arriving while the state is `Ending` is **refused**, not queued, and
+  says the same thing: hold the key again once the take lands. Queueing it would
+  start a recording at a moment nobody is pressing anything, and would make a
+  keypress wait for a transcription, which is the one thing the guard discipline
+  of §1 exists to prevent. A refusal per repeat is noisy for as long as the
+  person keeps the key down, and it is the honest answer: nothing is recording.
 
 **Why.** Making `dictate` end a hold would be an action that ends a hold
 immediately — which is issue #55, deliberately outside this task. Refusing with
 an explanation is the behaviour that does not quietly implement a different
-feature.
+feature, and the same reasoning decides the `Ending` window: the alternative to a
+refusal there is a second take nothing can time.
 
 ## 8. What the person sees
 
@@ -308,6 +370,16 @@ clock; a device found dead when the deadline stops the take, which must produce
 a release line and a failure line rather than one line claiming the hold ended
 because the device went; and the ordering of journal line against delivery call,
 which the tracing doubles already make visible.
+
+Two of those cover windows of time rather than moments: the hundreds of
+milliseconds the device is being opened, and the seconds the take is in the
+pipeline. Neither is slept through. A source that blocks inside `start` and an
+engine that blocks inside `transcribe` each say when they got there and wait to
+be let through, so a test can act inside the window and the order is the same on
+every machine.
+
+Every test waits for the thing it asserts on — the journal line, the delivery
+call, the file — and never for the hold as a proxy for them.
 
 One thing is measured rather than asserted: that a repeat is served fast enough
 to sustain twelve a second. A test issues repeats at that rate against a daemon

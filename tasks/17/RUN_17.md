@@ -245,3 +245,54 @@ would produce one message, that a call site was the only one. None was
 carelessness in the sense of haste; each was something that seemed too obvious
 to verify. That is the shape of the thing: the claims worth checking are the
 ones confident enough not to have been checked.
+
+### S4 review of the implementation
+
+Two independent reviews read the finished implementation. Nine findings, all
+accepted; three were defects in behaviour, four were tests that could not fail,
+and two were smaller. What changed:
+
+**The hold had two states and its life has four.** `watch` cleared the hold and
+only then stopped the recorder and ran the pipeline — seconds of work — and `ptt`
+assigned the hold only after the blocking `recorder.start` returned. So there
+were two windows in which the state said nothing was happening while a recording
+existed or was being made. Three defects came out of them: a `dictate` landing in
+the second window took the hold's own take, delivered it, and left the watcher to
+journal and toast that the take had failed; a `ptt` landing there started a
+second recording that the single watcher could not time until the first pipeline
+returned; and every repeat arriving during the device open — twelve a second
+against an open that takes hundreds of milliseconds — was refused with "a take is
+already recording for another action", naming a cause that did not exist. The
+state now covers `Idle`, `Opening`, `Live` and `Ending`; sections 1, 2, 3 and 7
+of `DESIGN_17.md` say what each does. A `ptt` arriving during `Ending` is refused
+rather than queued, for the reason section 7 gives.
+
+**Four mutations stayed green, so four tests were missing.** Gutting the branch
+that announces what `transcribe` did not — recognition unavailable, recognition
+failed — left the suite green, and so did making those two branches claim they
+had already reported; that branch is the whole of what the person gets when
+`[stt] engine` is misconfigured. "The take is kept" on shutdown was proved by a
+journal line naming a path, not by the file being there. A tap's recording was
+never proved removed. And release-over-time was covered by the pure function
+alone, with no daemon-level test running a watcher against repeats spread over
+time.
+
+**Four tests waited on the wrong thing.** They waited for the hold to clear and
+then asserted on a journal line, a toast or a delivery that, under the code of
+the time, came after it. One reviewer saw the suite go red about one run in
+twelve; injecting 300 ms into that window failed all four every time, which was
+reproduced here before the change. Each now waits for what it asserts on.
+
+**The poisoned-lock policy was inconsistent across four sites**, and in `ptt` a
+poisoned lock after `Started::Began` would have left the recorder running with
+nothing to stop it and the watcher waiting an hour. All four recover with
+`into_inner()`. Poison stays unreachable: nothing fallible runs under that mutex.
+
+Every fix was driven by the test that failed first. The three window defects are
+reproduced without a sleep: a source that blocks inside `start` and an engine
+that blocks inside `transcribe` turn each window into two events the test
+controls.
+
+```yaml
+review: {stage: S4, artifact: code, reviewers: 2, findings: 9, accepted: 9, date: 2026-09-14}
+```
