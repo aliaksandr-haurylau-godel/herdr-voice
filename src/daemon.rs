@@ -293,6 +293,7 @@ fn ptt(
 fn watch(recorder: Arc<Recorder>, runtime: Arc<Runtime>, stop: Arc<AtomicBool>) {
     loop {
         if stop.load(Ordering::SeqCst) {
+            finish_on_shutdown(&recorder, &runtime);
             return;
         }
         let now = runtime.clock.now();
@@ -328,6 +329,24 @@ fn watch(recorder: Arc<Recorder>, runtime: Arc<Runtime>, stop: Arc<AtomicBool>) 
                 discard_take(&recorder, &runtime, &hold, held_ms);
             }
         }
+    }
+}
+
+/// The daemon is going away with a key still down. This is not a release: no
+/// repeat stopped arriving, so nothing here says the key came up. The recording
+/// is stopped and kept, and the journal names where it is.
+fn finish_on_shutdown(recorder: &Recorder, runtime: &Runtime) {
+    let Some(hold) = take_hold(runtime) else {
+        return;
+    };
+    match recorder.stop() {
+        Ok(take) => runtime.journal.write(&kept_on_shutdown_line(
+            &hold.target,
+            &take.path.display().to_string(),
+        )),
+        Err(why) => runtime
+            .journal
+            .write(&shutdown_lost_line(&hold.target, &why.to_string())),
     }
 }
 
@@ -759,6 +778,28 @@ fn too_short_line(target: &str, held_ms: u64, min_hold_ms: u64) -> String {
 fn take_failed_line(target: &str, why: &str) -> String {
     format!(
         "ptt {target}: the take failed ({}); nothing was delivered",
+        why.replace('\n', " ")
+    )
+}
+
+/// Written when the daemon stopped while a key was still down. The take is not
+/// transcribed and not delivered — nobody is there to receive it — so the path
+/// is what makes it recoverable by hand.
+fn kept_on_shutdown_line(target: &str, path: &str) -> String {
+    format!(
+        "ptt {target}: the daemon stopped with the key still down; the \
+         recording is kept at {}",
+        path.replace('\n', " ")
+    )
+}
+
+/// Written when the daemon stopped while a key was still down and the take
+/// could not even be kept — the recorder refused it.
+fn shutdown_lost_line(target: &str, why: &str) -> String {
+    format!(
+        "ptt {target}: the daemon stopped with the key still down and the \
+         recording could not be kept ({}); hold the key again once the daemon \
+         is back",
         why.replace('\n', " ")
     )
 }
@@ -2500,5 +2541,51 @@ mod tests {
         runtime.clock.wake();
         clock.advance(1);
         watcher.join().unwrap();
+    }
+
+    #[test]
+    fn stopping_the_daemon_with_a_hold_open_keeps_the_take_and_names_it() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("ptt-shutdown"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        // A key is down, well inside the gap, when the daemon is told to stop.
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(400);
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+
+        assert!(
+            fake.calls().is_empty(),
+            "a daemon going away delivers nothing: got {:?}",
+            fake.calls()
+        );
+        assert!(
+            runtime.hold.lock().unwrap().is_none(),
+            "the hold is cleared rather than left for nobody"
+        );
+        let lines = journal.0.lock().unwrap();
+        let kept = lines
+            .iter()
+            .find(|line| line.contains(".wav"))
+            .unwrap_or_else(|| panic!("the kept take is named: got {lines:?}"));
+        assert!(
+            !kept.contains("released"),
+            "stopping is not a release: nothing here says the key came up: {kept}"
+        );
     }
 }
