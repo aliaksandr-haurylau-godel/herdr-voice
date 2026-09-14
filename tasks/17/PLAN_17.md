@@ -12,6 +12,8 @@
 
 ## Global Constraints
 
+- **Line numbers in this plan drift as the tasks land.** They were taken against `main` at `b8a07a8`. Every citation also names the function or test it points at; when the two disagree, the name is right and the number is stale. `src/daemon.rs` grows by several hundred lines over Tasks 3 to 5.
+
 - Everything in the repository is English: code, comments, output strings, commits.
 - No employer, client, internal-system or personal name, and no absolute home path, in any file. Cite paths relative to the repository root.
 - The daemon has no panic paths. No `unwrap`, `expect` or indexing that can fail on a path reachable while serving a request.
@@ -1164,7 +1166,12 @@ Expected: FAIL — no function `watch`.
 fn watch(recorder: Arc<Recorder>, runtime: Arc<Runtime>, stop: Arc<AtomicBool>) {
     loop {
         if stop.load(Ordering::SeqCst) {
-            finish_on_shutdown(&recorder, &runtime);
+            // A bare return, on purpose, and only until Task 5. Calling
+            // `finish_on_shutdown` here would make Task 5's test pass the
+            // moment it was written, leaving nothing to watch fail — and a
+            // test never seen red proves nothing. This return *is* the defect
+            // Task 5 exists against: a daemon going away with a key down,
+            // losing the recording silently.
             return;
         }
         let now = runtime.clock.now();
@@ -1470,6 +1477,10 @@ git commit -m "A watcher ends the hold when the repeats stop, and keeps the take
 
 **Why this is its own task.** `serve` keeps its stop flag as a local `Arc<AtomicBool>` (`src/daemon.rs:577`) and returns as soon as the accept loop breaks. Without this, stopping the daemon while a key is held loses the recording with nothing said — the failure class this whole issue exists against.
 
+This task writes `finish_on_shutdown` **and** replaces Task 4's bare `return`
+with the call to it. Task 4 left the defect in place so that this task's test
+has something to fail against.
+
 - [ ] **Step 1: Write the failing test**
 
 ```rust
@@ -1700,7 +1711,7 @@ git commit -m "ptt reaches the daemon instead of exiting 69"
 
 **Interfaces:**
 - Consumes: the `Decision` handling from Task 4, `finish_on_shutdown` from Task 5.
-- Produces: `released_line`, `too_short_line`, `kept_on_shutdown_line`, `shutdown_lost_line`, `take_failed_line`, each `fn(..) -> String`, tested as pure functions the way the existing lines are. `unreadable_repeat_line` is **not** here: it belongs to Task 3, where the behaviour it records lives and where its two tests are.
+- Produces: the tests. The line functions themselves — `released_line`, `too_short_line`, `take_failed_line`, `kept_on_shutdown_line`, `shutdown_lost_line` — are **already written**, in Tasks 4 and 5: the watcher and `finish_on_shutdown` call them, and neither task compiles without them. This task adds the tests that pin their wording, and the two toast tests. Expect the wording tests to pass as soon as they are written; that is not a reason to skip them, because what they pin is that a line names the pane and the numbers, which nothing else checks. `unreadable_repeat_line` is **not** here: it belongs to Task 3, where the behaviour it records lives and where its two tests are.
 
 **The split.** Success is silent — the text appearing in the input box is the message. Every failure writes a journal line, and raises a toast when `[ui] toasts` is on. Two lines are journal-only because neither is a failure the person must act on: the repeat that could not be read while a hold continued — written in Task 3, at the refusal — and the reason a hold ended.
 
