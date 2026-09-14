@@ -2730,4 +2730,25 @@ mod tests {
         clock.advance(1);
         watcher.join().unwrap();
     }
+    #[test]
+    fn a_repeat_is_served_fast_enough_to_sustain_twelve_a_second() {
+        let runtime = fake_runtime("a transcript");
+        let recorder = tone_recorder("ptt-rate");
+        let request = request("ptt", PANE_1);
+        answer(&request, &recorder, &runtime);
+        let started = std::time::Instant::now();
+        let repeats = 120;
+        for _ in 0..repeats {
+            answer(&request, &recorder, &runtime);
+        }
+        let each = started.elapsed() / repeats;
+        // Twelve a second is one every ~83 ms. A bound of 8 ms is an order of
+        // magnitude of headroom and still fails loudly if a repeat ever starts
+        // doing real work — a file write, an allocation that grows with the hold.
+        assert!(
+            each < std::time::Duration::from_millis(8),
+            "a repeat took {each:?}; twelve a second needs one every 83 ms"
+        );
+        eprintln!("repeat served in {each:?}");
+    }
 }

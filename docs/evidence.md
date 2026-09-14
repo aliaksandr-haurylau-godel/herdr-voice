@@ -19,6 +19,29 @@ Conclusions: herdr invokes a bound command on every auto-repeat, at roughly twel
 per second; there is no half-second pause before repeats begin; and a single tap
 is distinguishable from a hold by producing exactly one event.
 
+## What a repeat costs the daemon
+
+macOS 25.6, Apple silicon, debug build, no herdr and no microphone involved. The
+measurement is inside the daemon: one `ptt` request opens a hold against a
+scripted audio source and a fake transcription engine, then `answer` is called
+120 more times with the same request and the elapsed time is divided by 120. The
+test is `a_repeat_is_served_fast_enough_to_sustain_twelve_a_second` in
+`src/daemon.rs`.
+
+A repeat was served in 0.64 to 0.68 microseconds across five consecutive runs;
+the first run after a rebuild, with everything cold, took 2.2 microseconds. The
+rate the auto-repeat table above measured — twelve a second — needs one every 83
+milliseconds, so the margin is five orders of magnitude. The test asserts a far
+looser bound of 8 milliseconds, which is there to fail loudly if a repeat ever
+starts doing real work, such as writing a file or allocating something that
+grows with the length of the hold.
+
+This does not establish what a keypress costs end to end. It measures the
+daemon's own handling of a request already in hand, not the client's round trip
+— herdr invoking the plugin, the socket connection, the request and the reply
+travelling over it. That path is exercised only by holding a real key over a
+live herdr pane, which is issue #17's hand verification.
+
 ## Context and its effect on the transcript
 
 Target pane: an agent working in a notes repository. Spoken phrase, in Russian,
