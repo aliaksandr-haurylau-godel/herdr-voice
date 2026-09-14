@@ -429,6 +429,22 @@ pub mod tests_support {
         }
         fn stop(&mut self) {}
     }
+
+    /// Hears one moment and then reports the device gone, so a test can drive
+    /// the mid-take failure without hardware.
+    pub struct LosingSource;
+
+    impl Source for LosingSource {
+        fn start(&mut self, _device: Option<&str>, sink: Sink) -> Result<Format, String> {
+            sink.push(Event::Samples(vec![0.0; 4_800]));
+            sink.push(Event::Failed("the device went away".to_string()));
+            Ok(Format {
+                rate: 48_000,
+                channels: 1,
+            })
+        }
+        fn stop(&mut self) {}
+    }
 }
 
 #[cfg(test)]

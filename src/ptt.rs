@@ -8,11 +8,6 @@
 //! The decision is a pure function so that a one-second gap costs nothing to
 //! test. The thread that calls it does nothing but wait and act.
 
-// Nothing outside this module's own tests calls any of it yet: the daemon
-// takes the hold, the settings and the clock in issue #17's next step, and the
-// watcher is what calls `decide`. Remove this once both are wired in.
-#![allow(dead_code)]
-
 /// Monotonic milliseconds since the clock's origin.
 pub type Stamp = u64;
 

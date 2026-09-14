@@ -83,12 +83,8 @@ pub struct Runtime {
     /// The hold in progress, if a key is down. In memory on purpose: a file
     /// would bring back the truncated read the prototype lost recordings to.
     pub hold: std::sync::Mutex<Option<crate::ptt::Hold>>,
-    /// `[ptt]`, read once with the rest of the configuration.
-    ///
-    /// Nothing reads it yet: the watcher is what compares a hold against these
-    /// two durations, and it arrives with the next step of issue #17. That step
-    /// removes this allowance.
-    #[allow(dead_code)]
+    /// `[ptt]`, read once with the rest of the configuration. The watcher is
+    /// what compares a hold against these two durations.
     pub ptt: crate::ptt::Settings,
     /// Behind an `Arc` because the watcher thread holds it too.
     pub clock: std::sync::Arc<dyn crate::ptt::Clock>,
@@ -221,7 +217,7 @@ fn dictate(
                     take.cwd.as_deref(),
                     take.agent.as_deref(),
                 );
-                transcribe(runtime, &take, &collected.bias)
+                transcribe(runtime, &take, &collected.bias).0
             }
         },
     }
@@ -285,6 +281,137 @@ fn ptt(
             runtime.clock.wake();
             Reply::Ok(format!("holding for {pane}"))
         }
+    }
+}
+
+/// Ends a hold when the repeats stop.
+///
+/// One thread for the daemon's life: a hold is a singleton, because the
+/// recorder serves one take at a time. The pipeline runs here too — it takes
+/// seconds, and no hold can exist during them, because a `ptt` arriving while
+/// the recorder is busy is refused rather than queued.
+fn watch(recorder: Arc<Recorder>, runtime: Arc<Runtime>, stop: Arc<AtomicBool>) {
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let now = runtime.clock.now();
+        let decision = {
+            let held = match runtime.hold.lock() {
+                Ok(held) => held,
+                // A poisoned lock would otherwise spin this thread forever.
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            crate::ptt::decide(now, held.as_ref(), &runtime.ptt)
+        };
+        match decision {
+            crate::ptt::Decision::Idle => runtime.clock.wait_until(now.saturating_add(3_600_000)),
+            crate::ptt::Decision::KeepWaiting { until } => runtime.clock.wait_until(until),
+            crate::ptt::Decision::Release { held_ms } => {
+                let Some(hold) = take_hold(&runtime) else {
+                    continue;
+                };
+                runtime
+                    .journal
+                    .write(&released_line(&hold.target, held_ms, hold.pokes));
+                end_take(&recorder, &runtime, &hold);
+            }
+            crate::ptt::Decision::TooShort { held_ms } => {
+                let Some(hold) = take_hold(&runtime) else {
+                    continue;
+                };
+                runtime.journal.write(&too_short_line(
+                    &hold.target,
+                    held_ms,
+                    runtime.ptt.min_hold_ms,
+                ));
+                discard_take(&recorder, &runtime, &hold, held_ms);
+            }
+        }
+    }
+}
+
+/// Clear the hold and return it, so no second path can act on the same one.
+fn take_hold(runtime: &Runtime) -> Option<crate::ptt::Hold> {
+    match runtime.hold.lock() {
+        Ok(mut held) => held.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    }
+}
+
+/// A hold that was released: stop the recording and run the take through the
+/// pipeline the toggle already runs.
+///
+/// `recorder.stop()` failing here is how a device that died during the hold is
+/// discovered — the watcher has no way to learn it sooner
+/// (`tasks/17/DESIGN_17.md`, section 3). That is a second fact, not a different
+/// reason the hold ended: the release line is already written, and this adds
+/// the failure beside it.
+fn end_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold) {
+    match recorder.stop() {
+        Ok(take) => {
+            let collected = take_bias(
+                runtime,
+                &take.target,
+                take.cwd.as_deref(),
+                take.agent.as_deref(),
+            );
+            // `transcribe` reports its own delivery failure, and only that one.
+            // Reporting again here would put two journal lines and two toasts
+            // on one failure; saying nothing would leave the other two silent,
+            // because a hold has no keypress waiting to be told.
+            match transcribe(runtime, &take, &collected.bias) {
+                (_, Reported::Yes) => {}
+                (Reply::Error(why), Reported::No) => report_failure(runtime, &hold.target, &why),
+                (Reply::Ok(_), Reported::No) => {}
+            }
+        }
+        Err(why) => report_failure(runtime, &hold.target, &why.to_string()),
+    }
+}
+
+/// A hold too short to be one: stop the recording, remove it, and say so.
+///
+/// Only the `Ok` path has a file to remove. When the recorder refuses a take
+/// itself — a lost device, or a level under the floor — it removes the file
+/// before returning the error.
+fn discard_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold, held_ms: u64) {
+    match recorder.stop() {
+        Ok(take) => {
+            let _ = std::fs::remove_file(&take.path);
+            // The journal line was written by the caller; this is the part the
+            // person sees without going to look.
+            toast(
+                runtime,
+                "Too short to be a hold",
+                &format!(
+                    "{}: held {held_ms} ms, and a hold starts at {} ms",
+                    hold.target, runtime.ptt.min_hold_ms
+                ),
+            );
+        }
+        Err(why) => report_failure(runtime, &hold.target, &why.to_string()),
+    }
+}
+
+/// A failure the person has to know about: recorded, and raised where they are
+/// looking when `[ui] toasts` is on.
+fn report_failure(runtime: &Runtime, target: &str, why: &str) {
+    runtime.journal.write(&take_failed_line(target, why));
+    toast(runtime, "Dictation failed", &format!("{target}: {why}"));
+}
+
+/// `[ui] toasts` decides whether the person is interrupted. It never decides
+/// whether a failure is recorded — the journal line is written by the caller in
+/// every case, including this one.
+fn toast(runtime: &Runtime, title: &str, body: &str) {
+    if !runtime.delivery_settings.toasts {
+        return;
+    }
+    if let Err(why) = runtime.deliverer.notify(title, body) {
+        runtime
+            .journal
+            .write(&toast_failed_line(&why.to_string().replace('\n', " ")));
     }
 }
 
@@ -417,28 +544,52 @@ pub fn bias_refused_line(why: &str, collected: &bias::Collected, prompt_chars: u
     )
 }
 
+/// Whether the failure inside a `Reply::Error` has already been journalled and
+/// toasted by the code that produced it.
+///
+/// Only the delivery branch of `transcribe` reports its own failure. This is
+/// how a caller with nobody waiting for the reply — the watcher, ending a hold
+/// — knows which failures it still has to announce, without reading the
+/// message to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reported {
+    Yes,
+    No,
+}
+
 /// A finished take becomes text, and the text is delivered — or, if either
 /// step fails, the reply is a Reply::Error naming why and what to do next
 /// (client::outcome maps Reply::Ok to exit 0, Reply::Error to exit 1).
-fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> Reply {
+///
+/// The second half of the return says whether the failure in a `Reply::Error`
+/// was already journalled and toasted here. The toggle drops it, because the
+/// client prints the reply; the watcher reads it, because a hold has nobody
+/// waiting for a reply at all.
+fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> (Reply, Reported) {
     let engine = match &runtime.recognition {
         Ok(engine) => engine,
         // The take is on disk and named, so nothing is lost by the engine being
         // absent: somebody can fix the configuration and the file is still there.
         Err(why) => {
-            return Reply::Error(format!(
-                "{why} — the take is kept at {}",
-                take.path.display()
-            ))
+            return (
+                Reply::Error(format!(
+                    "{why} — the take is kept at {}",
+                    take.path.display()
+                )),
+                Reported::No,
+            )
         }
     };
     let text = match engine.transcribe(&take.path, bias) {
         Ok(text) => text,
         Err(why) => {
-            return Reply::Error(format!(
-                "{why} — the take is kept at {}",
-                take.path.display()
-            ))
+            return (
+                Reply::Error(format!(
+                    "{why} — the take is kept at {}",
+                    take.path.display()
+                )),
+                Reported::No,
+            )
         }
     };
 
@@ -479,10 +630,13 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> Rep
         &take.target,
         &text,
     ) {
-        Ok(()) => Reply::Ok(format!(
-            "delivered to {} [{:.1} dB]",
-            take.target, take.level_dbfs
-        )),
+        Ok(()) => (
+            Reply::Ok(format!(
+                "delivered to {} [{:.1} dB]",
+                take.target, take.level_dbfs
+            )),
+            Reported::No,
+        ),
         Err(why) => {
             // Whether a pane id or a path can carry a newline was never
             // established either way, and both sit ahead of the transcript in
@@ -505,10 +659,15 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> Rep
                     ));
                 }
             }
-            Reply::Error(format!(
-                "could not deliver to {target} ({why}) — the take is kept at {path}; text: {}",
-                text.replace('\n', " "),
-            ))
+            (
+                Reply::Error(format!(
+                    "could not deliver to {target} ({why}) — the take is kept at {path}; text: {}",
+                    text.replace('\n', " "),
+                )),
+                // The journal line and the toast above are this branch's own
+                // report; a caller that reported again would double it.
+                Reported::Yes,
+            )
         }
     }
 }
@@ -575,6 +734,33 @@ pub fn toast_failed_line(why: &str) -> String {
 /// continuing is the correct outcome rather than something to act on.
 fn unreadable_repeat_line(target: &str, why: &str) -> String {
     format!("ptt {target}: a repeat could not be read ({why}); the hold continues")
+}
+
+/// Written when the repeats stopped and the hold ended on its own. Journal
+/// only: the text arriving in the pane is what the person sees, and a hold
+/// ending on time is not something to act on.
+fn released_line(target: &str, held_ms: u64, pokes: u32) -> String {
+    format!("ptt {target}: released after {held_ms} ms and {pokes} repeats")
+}
+
+/// Written when the hold was shorter than `[ptt] min_hold_ms`. Both durations
+/// are named, so the minimum can be judged against the hold that missed it.
+fn too_short_line(target: &str, held_ms: u64, min_hold_ms: u64) -> String {
+    format!(
+        "ptt {target}: too short to be a hold — held {held_ms} ms, and a hold \
+         starts at {min_hold_ms} ms; hold the key while you speak"
+    )
+}
+
+/// Written when a take a hold produced could not be finished — the recorder
+/// refused it, recognition was unavailable, or recognition failed. Nobody is
+/// waiting for a reply, so this line and the toast beside it are the only way
+/// the person learns of it.
+fn take_failed_line(target: &str, why: &str) -> String {
+    format!(
+        "ptt {target}: the take failed ({}); nothing was delivered",
+        why.replace('\n', " ")
+    )
 }
 
 /// Written when no rewrite engine is available to run this take through —
@@ -696,6 +882,12 @@ fn serve(
     runtime: Arc<Runtime>,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        let runtime = Arc::clone(&runtime);
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || watch(recorder, runtime, stop))
+    };
     loop {
         let connection = match listener.accept() {
             Ok(connection) => connection,
@@ -716,6 +908,13 @@ fn serve(
                 eprintln!("connection failed: {e}");
             }
         });
+    }
+
+    // The watcher is waiting on the clock, not on the accept loop, so it has to
+    // be woken before it can see the stop flag and end.
+    runtime.clock.wake();
+    if let Err(e) = watcher.join() {
+        eprintln!("the watcher thread ended badly: {e:?}");
     }
 }
 
@@ -862,6 +1061,16 @@ mod tests {
     fn tone_recorder(tag: &str) -> Recorder {
         Recorder::spawn(
             || Box::new(crate::capture::tests_support::ToneSource),
+            crate::config::Audio::default(),
+            std::env::temp_dir().join(format!("daemon-takes-{tag}-{}", std::process::id())),
+        )
+    }
+
+    /// A recorder whose device goes away during the take, so the mid-take
+    /// failure can be driven without hardware.
+    fn losing_recorder(tag: &str) -> Recorder {
+        Recorder::spawn(
+            || Box::new(crate::capture::tests_support::LosingSource),
             crate::config::Audio::default(),
             std::env::temp_dir().join(format!("daemon-takes-{tag}-{}", std::process::id())),
         )
@@ -1102,7 +1311,13 @@ mod tests {
             crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
         );
         let runtime = runtime_with(fake, false);
-        let reply = transcribe(&runtime, &take, "");
+        let (reply, reported) = transcribe(&runtime, &take, "");
+        assert_eq!(
+            reported,
+            Reported::Yes,
+            "the delivery branch reports its own failure; that is what lets a \
+             hold know which failures it still has to announce"
+        );
         let text = match reply {
             Reply::Error(text) => text,
             other => panic!("expected Reply::Error, got {other:?}"),
@@ -2080,5 +2295,210 @@ mod tests {
             lines.is_empty(),
             "with no hold there is nothing a refusal failed to end: got {lines:?}"
         );
+    }
+
+    /// Poll the fake's log until it has a call or the bound expires. Waits on
+    /// the condition rather than on a duration, so it neither slows the suite
+    /// nor goes flaky on a loaded machine.
+    fn wait_for_calls(
+        fake: &crate::delivery::tests_support::FakeDeliverer,
+        within: std::time::Duration,
+    ) -> Vec<crate::delivery::tests_support::Call> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let calls = fake.calls();
+            if !calls.is_empty() || std::time::Instant::now() >= deadline {
+                return calls;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// Wait for the watcher to clear the hold, rather than for a duration.
+    fn wait_for_the_hold_to_clear(runtime: &Runtime) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while runtime.hold.lock().unwrap().is_some() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn the_deadline_ends_the_hold_and_the_take_is_delivered() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("ptt-deadline"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        // A hold of 400 ms, over the 300 ms minimum: advance, then let a repeat
+        // stamp the new time the way a real one would.
+        clock.advance(400);
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        // The gap passes with no further repeat.
+        clock.advance(1_000);
+
+        let calls = wait_for_calls(&fake, std::time::Duration::from_secs(5));
+        assert!(
+            matches!(
+                calls.first(),
+                Some(crate::delivery::tests_support::Call::Insert(pane, _)) if pane == "w1:p1"
+            ),
+            "the take is inserted into the pinned pane: got {calls:?}"
+        );
+        assert!(
+            runtime.hold.lock().unwrap().is_none(),
+            "the hold is cleared"
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+    }
+
+    #[test]
+    fn a_tap_is_discarded_and_says_so() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("ptt-tap"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        // One repeat and nothing more: held for 0 ms, far under the minimum.
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(1_000);
+
+        wait_for_the_hold_to_clear(&runtime);
+
+        assert!(
+            fake.calls().is_empty(),
+            "a tap delivers nothing: got {:?}",
+            fake.calls()
+        );
+        let lines = journal.0.lock().unwrap();
+        assert!(
+            lines.iter().any(|line| line.contains("too short")),
+            "a tap says it was a tap: got {lines:?}"
+        );
+
+        drop(lines);
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+    }
+
+    #[test]
+    fn a_device_lost_during_a_hold_gives_a_release_line_and_a_failure_line() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(losing_recorder("ptt-device-lost"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(400);
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(1_000);
+
+        wait_for_the_hold_to_clear(&runtime);
+
+        assert!(
+            fake.calls().is_empty(),
+            "a take whose device went away delivers nothing: {:?}",
+            fake.calls()
+        );
+        let lines = journal.0.lock().unwrap();
+        let released = lines
+            .iter()
+            .find(|line| line.contains("released"))
+            .unwrap_or_else(|| panic!("the hold was released, and says so: {lines:?}"));
+        assert!(
+            !released.contains("device"),
+            "the release line says why the hold ended, not why the take failed: {released}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("the device went away")),
+            "and the failure is its own line: {lines:?}"
+        );
+
+        drop(lines);
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+    }
+
+    #[test]
+    fn a_delivery_failure_during_a_hold_is_reported_once_and_not_twice() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        );
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        runtime.delivery_settings.toasts = true;
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("ptt-delivery-failure"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(400);
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(1_000);
+
+        wait_for_the_hold_to_clear(&runtime);
+
+        let notifies = fake
+            .calls()
+            .into_iter()
+            .filter(|call| matches!(call, crate::delivery::tests_support::Call::Notify(_, _)))
+            .count();
+        assert_eq!(notifies, 1, "one failure, one toast: {:?}", fake.calls());
+        let lines = journal.0.lock().unwrap();
+        let failures = lines
+            .iter()
+            .filter(|line| line.contains("pane_not_found"))
+            .count();
+        assert_eq!(failures, 1, "one failure, one journal line: {lines:?}");
+
+        drop(lines);
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
     }
 }
