@@ -613,6 +613,8 @@ pub mod tests_support {
         failing: bool,
         /// Only `tabs()` fails while this is set.
         tabs_failing: bool,
+        /// Renaming any tab named here fails; the rest succeed.
+        refused_renames: Vec<String>,
     }
 
     /// Records every call in order and answers what it was told to.
@@ -666,6 +668,13 @@ pub mod tests_support {
         /// From now on only `tabs()` fails.
         pub fn fail_tabs(&self) {
             self.0.lock().unwrap().tabs_failing = true;
+        }
+
+        /// From now on renaming this one tab fails and every other tab is
+        /// renamed as usual — a tab herdr will not accept a new label for,
+        /// among tabs it will.
+        pub fn refuse_rename_of(&self, tab: &str) {
+            self.0.lock().unwrap().refused_renames.push(tab.to_string());
         }
 
         /// Change a label behind the painter's back, as a person renaming a tab
@@ -738,7 +747,7 @@ pub mod tests_support {
             inner
                 .calls
                 .push(Paint::Rename(tab.to_string(), label.to_string()));
-            if inner.failing {
+            if inner.failing || inner.refused_renames.iter().any(|id| id == tab) {
                 // A rename herdr refused changed no label, so neither does this.
                 return Err(refusal());
             }
@@ -1275,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn the_token_carries_a_time_to_live_longer_than_the_interval() {
+    fn the_token_carries_a_time_to_live_longer_than_the_interval_and_not_much_longer() {
         let d = Drawing::start(RecordingPainter::ok());
         d.set(recording("w1:p1", "w1:t1", 0));
         d.tick(1);
@@ -1287,10 +1296,23 @@ mod tests {
             .into_iter()
             .find(|call| matches!(call, Paint::Token(..)))
         {
-            Some(Paint::Token(_, _, ttl)) => assert!(
-                ttl > Ui::default().blink_ms,
-                "a token that lapses between renewals flickers: {ttl}"
-            ),
+            Some(Paint::Token(_, _, ttl)) => {
+                assert!(
+                    ttl > Ui::default().blink_ms,
+                    "a token that lapses between renewals flickers: {ttl}"
+                );
+                // The upper bound is the half that matters on the way out. The
+                // token is never cleared: a daemon that is killed stops
+                // renewing, and the token is gone only once it expires. A time
+                // to live of minutes would leave a pane in the sidebar saying
+                // REC long after nothing was recording.
+                assert_eq!(
+                    ttl,
+                    Ui::default().blink_ms * 3,
+                    "three renewals, no more: the token outlives a killed daemon by exactly \
+                     this long"
+                );
+            }
             other => panic!("expected a token, got {other:?}"),
         }
         d.stop();
@@ -1674,6 +1696,75 @@ mod tests {
             "and only once, whatever happens after: {:?}",
             d.painter.renames()
         );
+        d.stop();
+    }
+
+    #[test]
+    fn a_retry_that_fails_too_settles_rather_than_running_for_ever() {
+        // Only `tabs()` fails, so paints still succeed and the sweep's retry
+        // gets the evidence it waits for that herdr answers at all.
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let painter = RecordingPainter::with_tabs(&[("w1:t1", "1 🎙️🔴 REC 0:12")]);
+        painter.fail_tabs();
+        let d = Drawing::with_journal(painter, &journal);
+        d.tick(1);
+        // A take paints its token successfully — that is the evidence — and
+        // ends, which is the one moment the owed retry may run.
+        d.set(recording("w1:p9", "w1:t9", 0));
+        d.tick(2);
+        d.set(crate::daemon::Activity::Idle);
+        d.tick(1);
+        let after_retry = d.painter.tab_listings();
+        assert!(after_retry > 1, "the retry ran: {:?}", d.painter.calls());
+        // Every idle tick after it would be another attempt if the retry had
+        // not settled the sweep, and each of those is a subprocess, for the
+        // life of a daemon whose herdr never answers.
+        d.tick_quiet(5);
+        assert_eq!(
+            d.painter.tab_listings(),
+            after_retry,
+            "a retry that failed is still the last attempt: {:?}",
+            d.painter.calls()
+        );
+        let lines = journal.0.lock().unwrap();
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("will not be tried again"))
+                .count(),
+            1,
+            "and it says so once, naming what is left to do by hand: {lines:?}"
+        );
+        drop(lines);
+        d.stop();
+    }
+
+    #[test]
+    fn a_tab_herdr_will_not_rename_does_not_cost_the_rest_of_the_list_its_sweep() {
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let painter = RecordingPainter::with_tabs(&[
+            ("w1:t1", "1 🎙️🔴 REC 0:12"),
+            ("w1:t2", "review 🎙️📝 TRANSCR"),
+            ("w1:t3", "🎙️🪄 FIX"),
+        ]);
+        // The first tab of the three: a tab that was closed between the listing
+        // and the rename looks exactly like this.
+        painter.refuse_rename_of("w1:t1");
+        let d = Drawing::with_journal(painter, &journal);
+        d.tick(1);
+        let renames = d.painter.renames();
+        assert!(
+            renames.contains(&("w1:t2".to_string(), "review".to_string()))
+                && renames.contains(&("w1:t3".to_string(), String::new())),
+            "the pass runs to the end of the list: {renames:?}"
+        );
+        let lines = journal.0.lock().unwrap();
+        assert!(
+            lines.iter().any(|line| line.contains("cannot take off")),
+            "and the pass still answers with the refusal it met, rather than reporting \
+             success: {lines:?}"
+        );
+        drop(lines);
         d.stop();
     }
 
