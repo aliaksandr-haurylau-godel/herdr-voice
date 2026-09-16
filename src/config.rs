@@ -133,10 +133,41 @@ impl Default for Rewrite {
 #[serde(default)]
 pub struct Ui {
     pub toasts: bool,
+    /// The token on the pane's row in the sidebar.
+    pub sidebar_token: bool,
+    /// The suffix on the tab's label, which paints the tab bar and the
+    /// sidebar's tab row at once.
+    pub tab_indicator: bool,
+    /// How often the token is rewritten, which is also how fast it blinks. The
+    /// token's time to live is three times this and is not configurable, so the
+    /// two cannot be set into a combination that makes the token lapse between
+    /// renewals.
+    ///
+    /// Read through `load`, which raises anything under `MIN_BLINK_MS` to it.
+    pub blink_ms: u64,
+}
+
+impl Ui {
+    /// The smallest renewal interval a configuration file can ask for.
+    ///
+    /// Every tick runs up to three herdr subprocesses — a listing, a rename and
+    /// a token — so the interval is a rate limit on child processes, not only a
+    /// blink rate. A hundred milliseconds is ten ticks a second, which is
+    /// slower than the twelve-a-second keypress path this plugin already
+    /// sustains and so is certainly affordable; anything much under it turns
+    /// the drawing thread into a spin that competes with the take for the
+    /// machine. It is a floor rather than a refusal because an out-of-range
+    /// value is not a reason to stop the daemon starting.
+    pub const MIN_BLINK_MS: u64 = 100;
 }
 impl Default for Ui {
     fn default() -> Self {
-        Ui { toasts: true }
+        Ui {
+            toasts: true,
+            sidebar_token: true,
+            tab_indicator: true,
+            blink_ms: 600,
+        }
     }
 }
 
@@ -261,10 +292,17 @@ pub fn load(directory: Option<&Path>) -> Loaded {
             source: Source::Defaults(Some(path)),
         },
         Ok(text) => match toml::from_str::<Config>(&text) {
-            Ok(config) => Loaded {
-                config,
-                source: Source::File(path),
-            },
+            Ok(mut config) => {
+                // Clamped here rather than where the value is used: a floor
+                // applied at the point of use is a floor every future reader of
+                // the key has to remember, and the drawing loop's own `.max(1)`
+                // only keeps the loop from having no wait in it at all.
+                config.ui.blink_ms = config.ui.blink_ms.max(Ui::MIN_BLINK_MS);
+                Loaded {
+                    config,
+                    source: Source::File(path),
+                }
+            }
             Err(e) => Loaded {
                 config: Config::default(),
                 source: Source::Invalid {
@@ -391,10 +429,13 @@ mod tests {
         let directory = scratch("future");
         // The section has to be one no `Config` field claims, or this test
         // silently stops testing anything. `[ptt]` was that section until
-        // issue #17 gave it fields; `[indicator]` is issue #40's, unbuilt.
+        // issue #17 gave it fields, and `[indicator]` was it until issue #40
+        // landed the indicator's keys under `[ui]`. `[keys]` is the next one:
+        // keybindings live in herdr's own configuration today, and a section
+        // for them here is claimed by nothing.
         std::fs::write(
             directory.join("config.toml"),
-            "[indicator]\nblink_ms = 600\n\n[stt]\nmodel = \"small\"\n",
+            "[keys]\ndictate = \"ctrl+d\"\n\n[stt]\nmodel = \"small\"\n",
         )
         .unwrap();
         let loaded = load(Some(&directory));
@@ -568,5 +609,45 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.ptt.release_ms, 1000);
         assert_eq!(config.ptt.min_hold_ms, 300);
+    }
+
+    #[test]
+    fn the_indicator_keys_have_defaults_and_are_read() {
+        let directory = scratch("indicator");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[ui]\nblink_ms = 250\ntab_indicator = false\n",
+        )
+        .unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(loaded.config.ui.blink_ms, 250);
+        assert!(!loaded.config.ui.tab_indicator);
+        // The keys the file did not name keep their defaults.
+        assert!(loaded.config.ui.sidebar_token);
+        assert!(loaded.config.ui.toasts);
+    }
+
+    #[test]
+    fn a_blink_interval_under_the_floor_is_raised_to_it_rather_than_obeyed() {
+        let directory = scratch("blink-floor");
+        std::fs::write(directory.join("config.toml"), "[ui]\nblink_ms = 5\n").unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(
+            loaded.config.ui.blink_ms,
+            Ui::MIN_BLINK_MS,
+            "five milliseconds is two hundred ticks a second, each of them up to three \
+             herdr subprocesses"
+        );
+        // A value over the floor is left exactly as it was asked for.
+        std::fs::write(directory.join("config.toml"), "[ui]\nblink_ms = 250\n").unwrap();
+        assert_eq!(load(Some(&directory)).config.ui.blink_ms, 250);
+    }
+
+    #[test]
+    fn the_indicator_defaults_are_the_documented_ones() {
+        let ui = Ui::default();
+        assert!(ui.sidebar_token);
+        assert!(ui.tab_indicator);
+        assert_eq!(ui.blink_ms, 600);
     }
 }

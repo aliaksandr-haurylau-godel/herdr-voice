@@ -17,6 +17,11 @@ pub struct Hold {
     pub target: String,
     pub cwd: Option<String>,
     pub agent: Option<String>,
+    /// The tab that pane sits in, if herdr named one. Pinned at the same moment
+    /// as `target` and for the same reason: the indicator decorates the tab the
+    /// take began in, not whichever one the focus has reached by the time it
+    /// ends.
+    pub tab: Option<String>,
     pub began: Stamp,
     pub last_poke: Stamp,
     /// How many repeats arrived. For the journal only.
@@ -212,6 +217,12 @@ pub mod tests_support {
     struct State {
         now: Stamp,
         woken: bool,
+        /// How many times a waiter has entered `wait_until`. A test driving a
+        /// thread that waits on this clock reads it to know the thread has
+        /// finished what the last return set it going on and is parked again —
+        /// which is the only moment at which changing what that thread reads is
+        /// not a race.
+        waits: u64,
     }
 
     /// A clock the test moves by hand. `wait_until` returns as soon as the
@@ -225,6 +236,11 @@ pub mod tests_support {
     }
 
     impl TestClock {
+        /// How many times a waiter has entered `wait_until`.
+        pub fn waits(&self) -> u64 {
+            self.state.lock().map(|state| state.waits).unwrap_or(0)
+        }
+
         pub fn advance(&self, by: u64) {
             if let Ok(mut state) = self.state.lock() {
                 state.now = state.now.saturating_add(by);
@@ -242,6 +258,8 @@ pub mod tests_support {
             let Ok(mut state) = self.state.lock() else {
                 return;
             };
+            state.waits = state.waits.saturating_add(1);
+            self.bell.notify_all();
             loop {
                 if state.woken {
                     state.woken = false;
@@ -286,6 +304,7 @@ mod tests {
             target: "w1:p1".to_string(),
             cwd: None,
             agent: None,
+            tab: None,
             began,
             last_poke,
             pokes: 2,

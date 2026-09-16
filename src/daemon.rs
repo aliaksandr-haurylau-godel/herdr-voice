@@ -46,6 +46,40 @@ pub fn needs_target_pane(command: &str) -> bool {
 /// run for `cancel` and for `doctor`, which is where somebody finds out what to fix.
 pub type Recognition = Result<Box<dyn Engine + Send + Sync>, String>;
 
+/// What this daemon's take is doing, for display and for nothing else.
+///
+/// Written by the take path at every stage it enters, read by the drawing
+/// thread. Nothing decides anything from it, so a stale or missed update costs
+/// a wrong label for one interval and never a wrong take
+/// (`tasks/40/DESIGN_40.md`, section 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Activity {
+    /// No take of this daemon's is running.
+    Idle,
+    /// A recording is open. `since` is stamped from `Runtime.clock`, so elapsed
+    /// time is measured against that clock and no other.
+    Recording {
+        target: String,
+        tab: Option<String>,
+        since: crate::ptt::Stamp,
+    },
+    /// The recording is over and the take is in the pipeline.
+    Working {
+        target: String,
+        tab: Option<String>,
+        stage: Stage,
+    },
+}
+
+/// The two pipeline stages worth displaying. Bias assembly and delivery are
+/// not stages here: one takes fractions of a second, and the other announces
+/// itself by the text appearing (`tasks/40/DESIGN_40.md`, section 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Transcribing,
+    Fixing,
+}
+
 /// Everything resolved once, at daemon start, and needed everywhere a take can
 /// finish.
 pub struct Runtime {
@@ -91,6 +125,18 @@ pub struct Runtime {
     pub ptt: crate::ptt::Settings,
     /// Behind an `Arc` because the watcher thread holds it too.
     pub clock: std::sync::Arc<dyn crate::ptt::Clock>,
+    /// What the take path is doing, for the drawing thread to read. Display
+    /// only: nothing in the take path reads it back.
+    pub activity: std::sync::Mutex<Activity>,
+    /// `[ui]`, read once with the rest of the configuration. The drawing thread
+    /// reads all three of its indicator keys from here.
+    ///
+    /// `toasts` therefore exists in two places, here and on
+    /// `delivery_settings`, which is where delivery reads it today. The
+    /// duplication is deliberate and bounded: delivery goes on reading what it
+    /// already reads, and unifying the two belongs to whoever next touches
+    /// `delivery::Settings`.
+    pub ui: crate::config::Ui,
 }
 
 /// The two context fields `Runtime` holds, resolved from the loaded
@@ -158,6 +204,7 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
                             pane,
                             invocation.focused_pane_cwd.as_deref(),
                             invocation.focused_pane_agent.as_deref(),
+                            invocation.tab_id.as_deref(),
                         ),
                         Control::Continue,
                     ),
@@ -168,6 +215,7 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
                             pane,
                             invocation.focused_pane_cwd.as_deref(),
                             invocation.focused_pane_agent.as_deref(),
+                            invocation.tab_id.as_deref(),
                         ),
                         Control::Continue,
                     ),
@@ -200,6 +248,7 @@ fn dictate(
     pane: &str,
     cwd: Option<&str>,
     agent: Option<&str>,
+    tab: Option<&str>,
 ) -> Reply {
     // A hold is not ended by the toggle. An action that ends a hold at once is
     // issue #55; doing it here would be that feature under another name.
@@ -227,13 +276,36 @@ fn dictate(
             ))
         }
     }
-    match recorder.start(pane, cwd, agent) {
-        Started::Began => Reply::Ok(format!("recording for {pane}")),
+    match recorder.start(pane, cwd, agent, tab) {
+        Started::Began => {
+            publish(
+                runtime,
+                Activity::Recording {
+                    target: pane.to_string(),
+                    tab: tab.map(|t| t.to_string()),
+                    since: runtime.clock.now(),
+                },
+            );
+            Reply::Ok(format!("recording for {pane}"))
+        }
         Started::CouldNotStart(why) => Reply::Error(why),
         Started::PreviousFailure(why) => Reply::Error(why),
         Started::AlreadyRunning => match recorder.stop() {
-            Err(why) => Reply::Error(why.to_string()),
+            Err(why) => {
+                // The take is over, however badly. Nothing else will clear the
+                // Recording published when it began.
+                publish(runtime, Activity::Idle);
+                Reply::Error(why.to_string())
+            }
             Ok(take) => {
+                publish(
+                    runtime,
+                    Activity::Working {
+                        target: take.target.clone(),
+                        tab: take.tab.clone(),
+                        stage: Stage::Transcribing,
+                    },
+                );
                 // Assembled here, where the take has just finished and
                 // recognition is about to run on it. The collected string is
                 // reported on without being written down
@@ -250,6 +322,18 @@ fn dictate(
             }
         },
     }
+}
+
+/// The one way the take path says what it is doing. A poisoned lock is
+/// recovered rather than given up on, the same way `hold_of` recovers one: this
+/// is display state, and refusing to publish it would strand a decoration on a
+/// tab for the rest of the daemon's life.
+fn publish(runtime: &Runtime, activity: Activity) {
+    let mut held = runtime
+        .activity
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *held = activity;
 }
 
 /// Move the hold's stamp forward, if there is one, and say which pane it
@@ -317,6 +401,7 @@ fn ptt(
     pane: &str,
     cwd: Option<&str>,
     agent: Option<&str>,
+    tab: Option<&str>,
 ) -> Reply {
     let now = runtime.clock.now();
     {
@@ -346,6 +431,7 @@ fn ptt(
                     target: pane.to_string(),
                     cwd: cwd.map(|c| c.to_string()),
                     agent: agent.map(|a| a.to_string()),
+                    tab: tab.map(|t| t.to_string()),
                     began: now,
                     last_poke: now,
                     pokes: 1,
@@ -353,7 +439,7 @@ fn ptt(
             }
         }
     }
-    match recorder.start(pane, cwd, agent) {
+    match recorder.start(pane, cwd, agent, tab) {
         Started::Began => {
             {
                 let mut state = hold_of(runtime);
@@ -368,6 +454,14 @@ fn ptt(
                     other => other,
                 };
             }
+            publish(
+                runtime,
+                Activity::Recording {
+                    target: pane.to_string(),
+                    tab: tab.map(|t| t.to_string()),
+                    since: now,
+                },
+            );
             runtime.clock.wake();
             Reply::Ok(format!("holding for {pane}"))
         }
@@ -453,6 +547,9 @@ fn finish_on_shutdown(recorder: &Recorder, runtime: &Runtime) {
     let Some(hold) = take_hold(runtime) else {
         return;
     };
+    // Abandoned is one of the ways a take ends, and the drawing thread is
+    // joined after this: its last look must not find a take still running.
+    publish(runtime, Activity::Idle);
     match recorder.stop() {
         Ok(take) => runtime.journal.write(&kept_on_shutdown_line(
             &hold.target,
@@ -521,6 +618,14 @@ fn finish_ending(runtime: &Runtime) {
 fn end_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold) {
     match recorder.stop() {
         Ok(take) => {
+            publish(
+                runtime,
+                Activity::Working {
+                    target: take.target.clone(),
+                    tab: take.tab.clone(),
+                    stage: Stage::Transcribing,
+                },
+            );
             let collected = take_bias(
                 runtime,
                 &take.target,
@@ -537,7 +642,12 @@ fn end_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold) {
                 (Reply::Ok(_), Reported::No) => {}
             }
         }
-        Err(why) => report_failure(runtime, &hold.target, &why.to_string()),
+        Err(why) => {
+            // No take to run through the pipeline, so nothing downstream will
+            // publish the end of this one.
+            publish(runtime, Activity::Idle);
+            report_failure(runtime, &hold.target, &why.to_string());
+        }
     }
 }
 
@@ -547,6 +657,9 @@ fn end_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold) {
 /// itself — a lost device, or a level under the floor — it removes the file
 /// before returning the error.
 fn discard_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold, held_ms: u64) {
+    // A tap is a take that ended; the indicator has to stop saying otherwise
+    // whichever way the recorder answers.
+    publish(runtime, Activity::Idle);
     match recorder.stop() {
         Ok(take) => {
             let _ = std::fs::remove_file(&take.path);
@@ -737,6 +850,20 @@ enum Reported {
 /// client prints the reply; the watcher reads it, because a hold has nobody
 /// waiting for a reply at all.
 fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> (Reply, Reported) {
+    let outcome = transcribe_take(runtime, take, bias);
+    // Every way out of the pipeline is a take that ended, the two that give up
+    // before delivery included. Published here rather than at each return so
+    // that a path added later cannot forget it: a take left saying TRANSCR is a
+    // token renewed forever and a tab decorated forever.
+    publish(runtime, Activity::Idle);
+    outcome
+}
+
+fn transcribe_take(
+    runtime: &Runtime,
+    take: &crate::capture::Take,
+    bias: &str,
+) -> (Reply, Reported) {
     let engine = match &runtime.recognition {
         Ok(engine) => engine,
         // The take is on disk and named, so nothing is lost by the engine being
@@ -769,6 +896,14 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> (Re
     // leave the take on the reply path below unaffected either way; only a
     // configured engine that is unavailable, or one that fails, ever calls
     // `tell_once` (`tasks/36/DESIGN_36.md`, section 2).
+    publish(
+        runtime,
+        Activity::Working {
+            target: take.target.clone(),
+            tab: take.tab.clone(),
+            stage: Stage::Fixing,
+        },
+    );
     let text = match &runtime.rewrite {
         crate::rewrite::Resolution::Off => text,
         crate::rewrite::Resolution::Unavailable(why) => {
@@ -1063,6 +1198,8 @@ pub fn start() -> Result<Outcome, TransportError> {
             min_hold_ms: loaded.config.ptt.min_hold_ms,
         },
         clock: std::sync::Arc::new(crate::ptt::SystemClock::default()),
+        activity: std::sync::Mutex::new(Activity::Idle),
+        ui: loaded.config.ui.clone(),
     };
     serve(listener, address, Arc::new(recorder), Arc::new(runtime));
     Ok(Outcome::Served)
@@ -1080,6 +1217,19 @@ fn serve(
         let runtime = Arc::clone(&runtime);
         let stop = Arc::clone(&stop);
         thread::spawn(move || watch(recorder, runtime, stop))
+    };
+    // The drawing thread waits on a clock of its own. `Clock`'s contract
+    // consumes a wake with the return it causes, so two waiters on one clock
+    // steal each other's wakes — and the hold's start and this shutdown both
+    // depend on a wake reaching the watcher.
+    let drawing_clock: Arc<dyn crate::ptt::Clock> = Arc::new(crate::ptt::SystemClock::default());
+    let drawer = {
+        let painter: Arc<dyn crate::indicator::Painter> =
+            Arc::new(crate::indicator::HerdrPainter::new());
+        let runtime = Arc::clone(&runtime);
+        let clock = Arc::clone(&drawing_clock);
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || crate::indicator::draw(painter, runtime, clock, stop))
     };
     loop {
         let connection = match listener.accept() {
@@ -1108,6 +1258,13 @@ fn serve(
     runtime.clock.wake();
     if let Err(e) = watcher.join() {
         eprintln!("the watcher thread ended badly: {e:?}");
+    }
+    // Woken and joined for the same reason, and after the watcher: a thread
+    // that could still draw once the daemon had decided to stop would leave a
+    // decoration behind it.
+    drawing_clock.wake();
+    if let Err(e) = drawer.join() {
+        eprintln!("the drawing thread ended badly: {e:?}");
     }
 }
 
@@ -1141,7 +1298,73 @@ fn serve_one(
 }
 
 #[cfg(test)]
+pub mod tests_support {
+    use super::*;
+
+    /// A program that is certainly not there, so `bias::pane::read` misses
+    /// without a live herdr — the same fixture `bias`'s own tests use.
+    pub const MISSING_HERDR: &str = "/definitely/not/a/real/herdr-binary";
+
+    /// Records every line written, in order.
+    #[derive(Default)]
+    pub struct RecordingJournal(pub std::sync::Mutex<Vec<String>>);
+    impl Journal for RecordingJournal {
+        fn write(&self, line: &str) {
+            self.0.lock().unwrap().push(line.to_string());
+        }
+    }
+
+    /// Lets a Runtime own a Journal while the test keeps its own handle to read
+    /// what was written — the same shape FakeDeliverer::clone() gives.
+    pub struct TestJournal(pub std::sync::Arc<RecordingJournal>);
+    impl Journal for TestJournal {
+        fn write(&self, line: &str) {
+            self.0.write(line);
+        }
+    }
+
+    /// The runtime the drawing tests need: `activity` at `Idle`, the given
+    /// `[ui]`, and the take's clock as `runtime.clock`.
+    ///
+    /// The drawing thread waits on a clock of its own, which the caller builds
+    /// separately — the two count from different origins, and this one is the
+    /// one elapsed time is measured against.
+    pub fn runtime_with_clocks(
+        take_clock: &std::sync::Arc<crate::ptt::tests_support::TestClock>,
+        ui: crate::config::Ui,
+    ) -> Runtime {
+        Runtime {
+            recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+                "a transcript".to_string(),
+            )))),
+            bias_source: Ok(bias::Source::Auto),
+            transcript_root: None,
+            context: crate::config::Context::default(),
+            herdr_binary: MISSING_HERDR.to_string(),
+            deliverer: Box::new(crate::delivery::tests_support::FakeDeliverer::ok()),
+            delivery_settings: crate::delivery::Settings {
+                submit: false,
+                toasts: false,
+            },
+            journal: Box::new(StderrJournal),
+            rewrite: crate::rewrite::Resolution::Off,
+            skip_if_plain: true,
+            told: std::sync::atomic::AtomicBool::new(false),
+            hold: std::sync::Mutex::new(crate::ptt::HoldState::Idle),
+            ptt: crate::ptt::Settings {
+                release_ms: 1000,
+                min_hold_ms: 300,
+            },
+            clock: std::sync::Arc::clone(take_clock) as std::sync::Arc<dyn crate::ptt::Clock>,
+            activity: std::sync::Mutex::new(Activity::Idle),
+            ui,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::tests_support::{RecordingJournal, TestJournal, MISSING_HERDR};
     use super::*;
 
     /// A recorder that hears one quiet moment and stops. Enough for the dispatch
@@ -1191,6 +1414,8 @@ mod tests {
                 min_hold_ms: 300,
             },
             clock: std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::ptt::Clock>,
+            activity: std::sync::Mutex::new(Activity::Idle),
+            ui: crate::config::Ui::default(),
         };
         (runtime, clock)
     }
@@ -1329,6 +1554,8 @@ mod tests {
                 min_hold_ms: 300,
             },
             clock: std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::ptt::Clock>,
+            activity: std::sync::Mutex::new(Activity::Idle),
+            ui: crate::config::Ui::default(),
         };
         (runtime, clock)
     }
@@ -1469,6 +1696,8 @@ mod tests {
             },
             // This test never holds a key; the real clock is the plain choice.
             clock: std::sync::Arc::new(crate::ptt::SystemClock::default()),
+            activity: std::sync::Mutex::new(Activity::Idle),
+            ui: crate::config::Ui::default(),
         };
         let request = dictate_request();
         answer(&request, &recorder, &runtime);
@@ -1518,6 +1747,7 @@ mod tests {
             target: "w1\n:p2".to_string(),
             agent: None,
             cwd: None,
+            tab: None,
         };
         let fake = crate::delivery::tests_support::FakeDeliverer::failing(
             crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
@@ -1537,23 +1767,6 @@ mod tests {
         assert!(!text.contains('\n'), "got {text:?}");
         assert!(text.contains("w1 :p2"), "got {text:?}");
         assert!(text.contains("/tmp/oddly named.wav"), "got {text:?}");
-    }
-
-    /// Records every line written, in order.
-    #[derive(Default)]
-    struct RecordingJournal(std::sync::Mutex<Vec<String>>);
-    impl Journal for RecordingJournal {
-        fn write(&self, line: &str) {
-            self.0.lock().unwrap().push(line.to_string());
-        }
-    }
-    /// Lets a Runtime own a Journal while the test keeps its own handle to read
-    /// what was written — the same shape FakeDeliverer::clone() gives above.
-    struct TestJournal(std::sync::Arc<RecordingJournal>);
-    impl Journal for TestJournal {
-        fn write(&self, line: &str) {
-            self.0.write(line);
-        }
     }
 
     #[test]
@@ -1892,10 +2105,6 @@ mod tests {
             )]
         );
     }
-
-    /// A program that is certainly not there, so `bias::pane::read` misses
-    /// without a live herdr — the same fixture `bias`'s own tests use.
-    const MISSING_HERDR: &str = "/definitely/not/a/real/herdr-binary";
 
     fn bias_scratch(tag: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
@@ -2886,6 +3095,16 @@ mod tests {
         tag: &str,
         fake: &crate::delivery::tests_support::FakeDeliverer,
     ) -> InThePipeline {
+        a_take_in_the_pipeline_from(tag, fake, PANE_1)
+    }
+
+    /// The same, with the invocation context the hold is driven from — for the
+    /// tests that need the take to carry a tab.
+    fn a_take_in_the_pipeline_from(
+        tag: &str,
+        fake: &crate::delivery::tests_support::FakeDeliverer,
+        context: &[u8],
+    ) -> InThePipeline {
         let gate = std::sync::Arc::new(crate::gate::Gate::default());
         let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
         runtime.recognition = Ok(Box::new(crate::stt::tests_support::BlockingFake {
@@ -2904,9 +3123,9 @@ mod tests {
             thread::spawn(move || watch(recorder, runtime, stop))
         };
 
-        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        answer(&request("ptt", context), &recorder, &runtime);
         clock.advance(400);
-        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        answer(&request("ptt", context), &recorder, &runtime);
         clock.advance(1_000);
         // The watcher has taken the hold, stopped the recorder and reached the
         // recogniser. It stays there until `gate.open()`.
@@ -3375,5 +3594,301 @@ mod tests {
             "a repeat took {each:?}; twelve a second needs one every 83 ms"
         );
         eprintln!("repeat served in {each:?}");
+    }
+
+    #[test]
+    fn a_hold_publishes_recording_with_the_pane_and_the_tab_it_was_pinned_to() {
+        let (runtime, _clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("activity-recording");
+        answer(
+            &request("ptt", br#"{"focused_pane_id":"w1:p1","tab_id":"w1:t1"}"#),
+            &recorder,
+            &runtime,
+        );
+        let activity = runtime.activity.lock().unwrap();
+        match &*activity {
+            Activity::Recording { target, tab, .. } => {
+                assert_eq!(target, "w1:p1");
+                assert_eq!(tab.as_deref(), Some("w1:t1"));
+            }
+            other => panic!("expected Recording, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_toggle_take_publishes_the_same_states_as_a_hold() {
+        // dictate's first half publishes Recording; its second half runs the
+        // same pipeline, so the stages come from the same code.
+        let (runtime, _clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("activity-toggle");
+        let request = request(
+            "dictate",
+            br#"{"focused_pane_id":"w1:p2","tab_id":"w1:t2"}"#,
+        );
+        answer(&request, &recorder, &runtime);
+        assert!(matches!(
+            &*runtime.activity.lock().unwrap(),
+            Activity::Recording { .. }
+        ));
+        answer(&request, &recorder, &runtime);
+        assert!(
+            matches!(&*runtime.activity.lock().unwrap(), Activity::Idle),
+            "a finished take publishes Idle, or the token never lapses"
+        );
+    }
+
+    /// A hold driven from a pane that sits in a named tab.
+    const PANE_1_IN_TAB: &[u8] = br#"{"focused_pane_id":"w1:p1","tab_id":"w1:t1"}"#;
+
+    #[test]
+    fn a_take_in_recognition_says_transcribing_and_still_names_the_tab_it_began_in() {
+        // The only place a `Working` value is read while it is the live one.
+        // The tab in it did not come from the request: it went into the
+        // recorder when the hold began and came back out on the `Take`, which
+        // is the whole path the tab bar depends on.
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let pipeline = a_take_in_the_pipeline_from("activity-transcr", &fake, PANE_1_IN_TAB);
+        match activity_of(&pipeline.runtime) {
+            Activity::Working { target, tab, stage } => {
+                assert_eq!(target, "w1:p1");
+                assert_eq!(
+                    tab.as_deref(),
+                    Some("w1:t1"),
+                    "a take that lost its tab paints no tab bar at all"
+                );
+                assert_eq!(stage, Stage::Transcribing);
+            }
+            other => panic!("expected Working while the recogniser runs, got {other:?}"),
+        }
+        pipeline.finish();
+    }
+
+    #[test]
+    fn a_take_in_the_rewrite_step_says_fixing_and_names_the_tab_the_toggle_pinned() {
+        // FIX had a string and an enum variant and nothing joining them: no
+        // test ever reached the rewrite step, so `Stage::Fixing` was never
+        // proved reachable at all. It is reached here through the toggle, which
+        // also proves the tab the toggle read off the invocation reaches the
+        // take.
+        let gate = std::sync::Arc::new(crate::gate::Gate::default());
+        let (mut runtime, _clock) = fake_runtime_with_clock("fix the worklog entry");
+        runtime.rewrite = crate::rewrite::Resolution::Engine(Box::new(
+            crate::rewrite::tests_support::BlockingFake {
+                gate: std::sync::Arc::clone(&gate),
+                text: "Fix the worklog entry.".to_string(),
+            },
+        ));
+        // Otherwise a transcript this plain never reaches the engine.
+        runtime.skip_if_plain = false;
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("activity-fixing"));
+        let request = request(
+            "dictate",
+            br#"{"focused_pane_id":"w1:p2","tab_id":"w1:t2"}"#,
+        );
+
+        answer(&request, &recorder, &runtime);
+        match activity_of(&runtime) {
+            Activity::Recording { target, tab, .. } => {
+                assert_eq!(target, "w1:p2");
+                assert_eq!(
+                    tab.as_deref(),
+                    Some("w1:t2"),
+                    "the toggle reads the tab off the invocation it was given"
+                );
+            }
+            other => panic!("expected Recording after the first keypress, got {other:?}"),
+        }
+
+        // The second keypress runs the pipeline, which stops inside the rewrite
+        // engine until the gate is opened.
+        let second = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            thread::spawn(move || answer(&request, &recorder, &runtime).0)
+        };
+        gate.wait_until_entered();
+        match activity_of(&runtime) {
+            Activity::Working { target, tab, stage } => {
+                assert_eq!(target, "w1:p2");
+                assert_eq!(tab.as_deref(), Some("w1:t2"));
+                assert_eq!(
+                    stage,
+                    Stage::Fixing,
+                    "the rewrite step is the one moment the indicator says FIX"
+                );
+            }
+            other => panic!("expected Working while the rewrite engine runs, got {other:?}"),
+        }
+        // And the string that state is drawn as is the one the indicator has.
+        assert_eq!(
+            crate::indicator::value(&crate::indicator::State::Fixing, false),
+            "🎙️🪄 FIX"
+        );
+        gate.open();
+        second.join().expect("the second keypress ended badly");
+        assert_eq!(activity_of(&runtime), Activity::Idle);
+    }
+
+    /// What the drawing thread would read right now.
+    fn activity_of(runtime: &Runtime) -> Activity {
+        runtime.activity.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn a_tap_too_short_to_be_a_hold_leaves_the_indicator_saying_nothing_is_recording() {
+        // The sharpest of the four. A tap runs no pipeline at all, so nothing
+        // downstream can publish the end of it: if the one line in
+        // `discard_take` goes, the indicator says REC for the rest of the
+        // daemon's life, on a keypress that produced no take.
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("activity-tap"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert!(
+            matches!(activity_of(&runtime), Activity::Recording { .. }),
+            "the keypress published Recording, or this test proves nothing"
+        );
+        // One repeat and nothing more: held for 0 ms, far under the minimum.
+        clock.advance(1_000);
+        wait_for_journal(&journal, "too short", WITHIN);
+        // The hold going idle is the watcher having finished with the tap, and
+        // `finish_ending` runs after `discard_take`: no test here sleeps.
+        wait_for_idle(&runtime);
+        assert_eq!(
+            activity_of(&runtime),
+            Activity::Idle,
+            "a tap is a take that ended before it began"
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+    }
+
+    #[test]
+    fn a_hold_whose_device_went_away_leaves_the_indicator_saying_nothing_is_recording() {
+        // `end_take`'s failing half: there is no take, so nothing downstream
+        // publishes the end of this one either.
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(losing_recorder("activity-lost"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert!(matches!(activity_of(&runtime), Activity::Recording { .. }));
+        clock.advance(400);
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(1_000);
+        wait_for_journal(&journal, "the device went away", WITHIN);
+        wait_for_idle(&runtime);
+        assert_eq!(
+            activity_of(&runtime),
+            Activity::Idle,
+            "a take whose device went away is still a take that ended"
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+    }
+
+    #[test]
+    fn a_daemon_stopped_with_a_key_still_down_leaves_the_indicator_idle() {
+        // The drawing thread is joined after the watcher, so its last look must
+        // not find a take still running: a decoration it then held would be put
+        // back by nothing.
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("activity-shutdown"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert!(matches!(activity_of(&runtime), Activity::Recording { .. }));
+        // The key is still down — no release, no deadline — and the daemon
+        // stops anyway.
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+        assert_eq!(
+            activity_of(&runtime),
+            Activity::Idle,
+            "abandoned is one of the ways a take ends"
+        );
+    }
+
+    #[test]
+    fn a_toggle_whose_take_could_not_be_stopped_leaves_the_indicator_idle() {
+        // `dictate`'s `AlreadyRunning` arm with a recorder that refuses the
+        // take. The take is silence, so stopping it fails, and the second
+        // keypress reaches neither the pipeline nor anything else that
+        // publishes an end.
+        let runtime = fake_runtime_with_clock("unused").0;
+        let recorder = silent_recorder();
+        let request = request("dictate", br#"{"focused_pane_id":"w1:p2"}"#);
+        answer(&request, &recorder, &runtime);
+        assert!(matches!(activity_of(&runtime), Activity::Recording { .. }));
+        let (reply, _) = answer(&request, &recorder, &runtime);
+        assert!(
+            matches!(&reply, Reply::Error(text) if text.contains("dB")),
+            "the silent take is refused, which is what puts this on the failing arm: {reply:?}"
+        );
+        assert_eq!(
+            activity_of(&runtime),
+            Activity::Idle,
+            "a take the recorder would not give up is still a take that ended"
+        );
+    }
+
+    #[test]
+    fn a_take_that_fails_still_ends_at_idle() {
+        // A recognition failure must not leave the indicator saying TRANSCR
+        // forever: the token would go on being renewed by a thread that thinks
+        // work is in progress, and the tab would stay decorated.
+        let mut runtime = fake_runtime_with_clock("unused").0;
+        runtime.recognition = Err("no engine".to_string());
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = tone_recorder("activity-failed");
+        let request = request(
+            "dictate",
+            br#"{"focused_pane_id":"w1:p3","tab_id":"w1:t3"}"#,
+        );
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        let activity = runtime.activity.lock().unwrap().clone();
+        assert!(
+            matches!(activity, Activity::Idle),
+            "a take that failed is still a take that ended: {activity:?}"
+        );
     }
 }
