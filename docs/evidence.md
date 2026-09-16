@@ -882,3 +882,68 @@ terminal Option composes a character instead of reaching the binding. `ctrl+g`
 worked first time. The action that is meant to print a working snippet and know
 this, `setup`, is still a stub: issue #41. A person installing the plugin meets
 the same three attempts with nothing to guide them.
+
+## The indicator, by hand on macOS
+
+Run on 2026-09-16 on macOS 25.6, Apple silicon, herdr 0.9.0, with the release
+build of the plugin linked from a checkout of `feat/40-indicator`. Two people
+looking at two different things: a person watching the three surfaces while
+holding a key, and a scripted run measuring what happens to a decoration when
+the daemon is killed.
+
+For the by-hand part the release gap was widened to 20 seconds and `[rewrite]`
+pointed at a local model runner, so that the states after release lasted long
+enough to be seen. Neither is a default and both were restored afterwards; with
+the shipped defaults the rewrite engine is not invoked at all and the fixing
+state passes in microseconds.
+
+### What a person saw
+
+All three surfaces carried the indicator: the tab bar, the sidebar's tab row and
+the sidebar's agent row. The states followed each other as designed —
+recording with a running clock, then transcribing, then fixing.
+
+**The blink moved the text, and that was a defect.** The blink form was built by
+removing the coloured glyph, so everything to its right shifted by a cell and
+back on every tick. Fixed by replacing the glyph with U+3000 IDEOGRAPHIC SPACE
+rather than removing it: a terminal lays out cells by East Asian Width, the
+three icons are Wide and cover two columns, and U+3000 is the one blank that is
+Wide as well. A single ordinary space would have moved the text by half a cell —
+half of the defect. Which width table herdr's own renderer consults has not been
+established, and the constant carries a comment saying it is the one thing to
+change if the text still moves.
+
+**The blink appeared in one place only**, on the sidebar's agent row, which is
+correct: the token is the only surface that is rewritten on every tick. The tab
+label carries the steady form and is renamed only when its text would differ —
+once a second while a clock is running in it, and once on entering a state that
+has no clock.
+
+### What a killed daemon leaves, measured
+
+Driven by sending `ptt` requests to the daemon directly, so no microphone was
+involved.
+
+| what | measured |
+|---|---|
+| token gone after `kill -9` | **1.50 s** |
+| tab label after `kill -9` | still decorated, frozen at the second the daemon died |
+| decoration gone after the next daemon started | **0.71 s** |
+| tab label after that | exactly what it was before, and no decorated tab anywhere |
+
+The token's time to live is three renewal intervals, 1.8 s at the default
+`blink_ms`; 1.50 s is what it comes to when the kill lands partway through an
+interval rather than at a renewal. The point of the number is not its size but
+that nobody had to do anything to get it: there is no clearing call in the
+plugin, so there is no exit path on which clearing can be missed.
+
+The tab label is the half that has no such mechanism, and the measurement shows
+both sides of that: a killed daemon leaves it decorated, and the next daemon's
+start-up sweep takes the decoration off in under a second by cutting its own
+suffix from any label carrying the marker.
+
+**What this does not establish.** Any platform but macOS. Whether the blink
+still moves the text after the fix — that is the one thing a person must look at
+again, and the fix went in after the run above. And the width table herdr uses
+to lay out its own sidebar, which is what decides whether U+3000 is the right
+blank.
