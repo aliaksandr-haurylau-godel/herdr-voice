@@ -673,8 +673,10 @@ git commit -m "The take path says what it is doing, and the tab travels with the
 - Elapsed time is `runtime.clock.now()` minus `since` — the take's clock, never
   the drawing clock, which counts from its own origin and is used only for
   waiting.
-- A failed paint is recorded once per take and disables drawing for that take.
-  It does not disable the restore.
+- A failed paint is recorded once per take, and drawing carries on being
+  attempted — a thread that stopped renewing would let the token lapse and the
+  sidebar would say the take was over while it was still running. The restore is
+  attempted regardless.
 
 - [ ] **Step 1: Make the daemon's test helpers reachable from another module**
 

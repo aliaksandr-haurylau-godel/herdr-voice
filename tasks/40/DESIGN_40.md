@@ -304,14 +304,27 @@ same animation in the sidebar sits where somebody looks on purpose.
 **Context.** Drawing means running `herdr`, which can be absent, slow or
 refuse.
 
-**Decision.** A failed draw is recorded once per take and drawing is then
-disabled for the rest of that take. The take continues untouched. The restore in
-section 4 is still attempted at the end, because a tab decorated before the
-failure would otherwise stay decorated.
+**Decision.** A failed draw is recorded once per take, and drawing carries on
+being attempted. The take continues untouched. The restore in section 4 is
+attempted at the end regardless, because a tab decorated before the failure
+would otherwise stay decorated.
 
-**Why.** An indicator is an optimisation; the take is not. Recording once rather
-than per interval is what keeps a broken herdr from filling the journal at two
-lines a second.
+**Why.** An indicator is an optimisation; the take is not, so a failure must
+never reach it. But giving up for the rest of the take is worse than it sounds:
+the token is kept alive by being renewed, so a thread that stopped renewing
+would let it lapse within three intervals, and the sidebar would then say the
+take was over while the person was still speaking. A missing indicator is a
+nuisance; an indicator that says "finished" mid-sentence is a lie. Retrying
+costs one subprocess per interval against a herdr that is refusing, bounded by
+the length of the take — and if herdr is refusing, the delivery at the end of
+that take is going to fail too.
+
+Recording once rather than per interval is what keeps a broken herdr from
+filling the journal at two lines a second.
+
+This reverses the first answer written here, which disabled drawing for the
+take. It was changed when the plan's own tests turned out to forbid it and the
+reason above came out of asking why.
 
 ## 7. Configuration
 

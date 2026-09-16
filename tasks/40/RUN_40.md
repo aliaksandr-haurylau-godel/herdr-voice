@@ -234,3 +234,22 @@ three times.
 One loose end the reviewer named and declined to gate on, folded in anyway: a
 `Take` built as a struct literal in `daemon.rs`'s tests, which a search for call
 sites does not find.
+
+### S4, after Tasks 4 and 5: one decision reversed
+
+The design said a failed draw disables drawing for the rest of the take. The
+plan's own tests forbade it — a painter that fails everything is driven for five
+ticks, and a disabled painter would be called zero times, which the harness
+cannot wait for. The implementer followed the tests and said so rather than
+quietly changing either.
+
+The tests are right, and the reason is stronger than the one the design gave.
+The token stays alive only by being renewed. A thread that gives up stops
+renewing, the token lapses within three intervals, and the sidebar then says the
+take is over while the person is still speaking. A missing indicator is a
+nuisance; an indicator that says "finished" mid-sentence is a lie. The cost of
+retrying is one subprocess per interval against a refusing herdr, bounded by the
+take's length — and a herdr that refuses the drawing call is going to refuse the
+delivery at the end of that take too.
+
+Changed in `DESIGN_40.md` section 6, with the reversal recorded there.
