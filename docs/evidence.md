@@ -942,8 +942,10 @@ both sides of that: a killed daemon leaves it decorated, and the next daemon's
 start-up sweep takes the decoration off in under a second by cutting its own
 suffix from any label carrying the marker.
 
-**What this does not establish.** Any platform but macOS. Whether the blink
-still moves the text after the fix — that is the one thing a person must look at
-again, and the fix went in after the run above. And the width table herdr uses
-to lay out its own sidebar, which is what decides whether U+3000 is the right
-blank.
+**The fix was looked at.** The blink was watched again after the change, on the
+same machine and the same sidebar: the text stands still and the icon goes dark
+and comes back. So U+3000 lands on the two columns the icon left, and herdr's
+renderer lays those cells out by the same rule the fix assumed.
+
+**What this does not establish.** Any platform but macOS — the width a blank
+occupies is the renderer's business, and only this one has been looked at.
