@@ -1360,6 +1360,63 @@ mod tests {
     }
 
     #[test]
+    fn the_daemon_going_away_puts_the_tab_back() {
+        // A decoration must not outlive the daemon that made it. Nothing
+        // publishes `Idle` on the way out of a daemon that is being stopped
+        // while a take runs, so the stop branch of the drawing loop is the only
+        // thing that can restore the label.
+        let painter = RecordingPainter::with_tabs(&[("w1:t1", "1")]);
+        let d = Drawing::start(painter.clone());
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(2);
+        assert!(
+            painter
+                .renames()
+                .last()
+                .is_some_and(|(_, label)| label.contains(MARKER)),
+            "the tab is decorated before the daemon stops: {:?}",
+            painter.renames()
+        );
+        // The activity is left saying `Recording`, exactly as a killed daemon
+        // would leave it.
+        d.stop();
+        assert_eq!(
+            painter.renames().last().map(|(_, label)| label.clone()),
+            Some("1".to_string()),
+            "the last thing the thread does on its way out is put the label back: {:?}",
+            painter.renames()
+        );
+    }
+
+    #[test]
+    fn a_take_that_moved_to_another_tab_gives_the_first_one_its_label_back() {
+        let d = Drawing::start(RecordingPainter::with_tabs(&[
+            ("w1:t1", "1"),
+            ("w1:t2", "2"),
+        ]));
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(2);
+        // A second take, in another tab, with nothing in between saying the
+        // first one ended.
+        d.set(recording("w1:p2", "w1:t2", 0));
+        d.tick(2);
+        assert_eq!(
+            renames_of(&d.painter, "w1:t1").last().cloned(),
+            Some("1".to_string()),
+            "the tab the activity left keeps no decoration: {:?}",
+            d.painter.renames()
+        );
+        assert!(
+            renames_of(&d.painter, "w1:t2")
+                .iter()
+                .all(|label| label.starts_with("2 ")),
+            "and the tab it moved to is decorated from its own label, not the first one's: {:?}",
+            d.painter.renames()
+        );
+        d.stop();
+    }
+
+    #[test]
     fn a_tab_renamed_by_somebody_else_during_a_take_is_left_alone() {
         let painter = RecordingPainter::with_tabs(&[("w1:t1", "1")]);
         let d = Drawing::start(painter);
