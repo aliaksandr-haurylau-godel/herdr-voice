@@ -195,3 +195,42 @@ before the gate did. The gate still found two, both of the same kind: a run file
 describing decisions as open that the design records as settled, and a sentence
 counting four write sites above a table of six. Reading the whole thing is what
 finds this class, and the author has to do it too, not only the reviewer.
+
+### S3 Plan
+
+Artifact: `tasks/40/PLAN_40.md`, 8 tasks.
+
+```yaml
+gate: {stage: S3, artifact: PLAN_40.md, reviewer: implementer, verdict: QUESTIONS, round: 1, date: 2026-09-16,
+  findings: ["Recorder::start's new signature was named but not written, and its eighteen call sites not enumerated",
+             "RecordingPainter's surface was used by twelve methods in later tasks and defined by one sentence",
+             "Drawing::with_journal and with_ui were called but never defined, and chaining them onto an already-spawned thread could not mean anything",
+             "BLINK_MS_FOR_TESTS was asserted against and declared nowhere"]}
+gate: {stage: S3, artifact: PLAN_40.md, reviewer: implementer, verdict: QUESTIONS, round: 2, date: 2026-09-16,
+  findings: ["the drawing thread reads [ui] and no task plumbed it into Runtime, so draw() had nowhere to read it from"]}
+gate: {stage: S3, artifact: PLAN_40.md, reviewer: implementer, verdict: QUESTIONS, round: 3, date: 2026-09-16,
+  findings: ["the harness lives in src/indicator.rs and calls three helpers private to src/daemon.rs's test module"]}
+gate: {stage: S3, artifact: PLAN_40.md, reviewer: implementer, verdict: READY, round: 4, date: 2026-09-16, blocker: null}
+```
+
+**These four rounds were a different failure from the design's ten.** There,
+every finding after the first was introduced by the previous fix: sections
+edited one at a time, their neighbours left describing the old answer. Here
+nothing was broken by a fix. All three findings were original, and all three
+were the same shape — something a later task uses that no earlier task makes
+exist or makes reachable: a signature, a fake's surface, a configuration field,
+a module boundary.
+
+The cause is different too, and worth naming. The tests were written as
+statements of wanted behaviour rather than as code that has to compile. Reading
+the plan again afterwards does not catch that, because the text reads correctly;
+what catches it is asking, of every symbol a test names, which task creates it
+and whether it is reachable from where the test sits. The self-check before
+round 1 did find and fix fifteen tests left as comments, and it found the same
+problem in the harness and in one more test — but it was a check for
+placeholders, not for reachability, and reachability is what the gate found
+three times.
+
+One loose end the reviewer named and declined to gate on, folded in anyway: a
+`Take` built as a struct literal in `daemon.rs`'s tests, which a search for call
+sites does not find.
