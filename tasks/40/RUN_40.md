@@ -140,22 +140,58 @@ gate: {stage: S2, artifact: DESIGN_40.md, reviewer: planner, verdict: READY, rou
   note: "the label-form decision in section 10 is more than a string for the plan: a prefix makes the sweep a task, a replacement removes it or replaces it with stored state. The plan will carry the sweep with an explicit dependency on the owner's answer."}
 ```
 
-### Waiting on the owner
+### Answered by the owner, 2026-09-16
 
-Three decisions, all user-visible, none of them this stage's to take. The design
-carries a proposal for each and states what the alternative costs, so S3 can be
-written against the proposals and only a literal changes — except the third,
-which changes a task.
+Three decisions, all user-visible, none of them this stage's to take. Two of the
+three came back different from the proposal, and one of those was better than
+the proposal for a reason the proposal had got wrong.
 
-1. **What the token is called and what it reads.** Proposed: name `voice`, value
-   `REC 0:05` while recording and the stage's word after that.
-2. **Whether it blinks.** Proposed: steady. Answering "blink" is not a flag: the
-   token outlives three renewal intervals, so skipping a renewal does not hide
-   it, and blinking would need the clearing call section 3 removes and AC-2
-   forbids.
-3. **What the decorated tab label looks like.** Proposed: a prefix, no
-   truncation. This one decides whether section 4a exists: recovering from a
-   killed daemon works by stripping the prefix, and a replacement would need
-   stored state — a file, which #17 removed from this plugin — or would give the
-   case up. The prefix must also be a string nobody would type, because people
-   already put their own prefixes on tab labels.
+**The token's three states**, with the icon after the microphone blinking in
+each: `🎙️🔴 REC 0:05` recording, `🎙️📝 TRANSCR` transcribing, `🎙️🪄 FIX`
+fixing. Bias assembly merged into transcribing, and delivery dropped as a state
+— it is one call, and the text arriving says more than a token could.
+
+**It blinks**, against the proposal, and the proposal's stated cost turned out
+not to exist. The design argued that answering "blink" would reopen section 3,
+because a token outliving three renewal intervals cannot be hidden by skipping a
+renewal, so blinking would need the clearing call section 3 removes. That
+assumed blinking means the token disappearing. It means the icon inside it
+alternating, and the value is rewritten on every renewal anyway — so the blink
+is free and nothing is ever cleared. The question was posed wrongly, not
+answered wrongly.
+
+**A suffix, against the proposal of a prefix.** Section 4a's recovery is
+unaffected: a suffix cuts off as cleanly, and the design now says so throughout.
+
+**And a fourth thing, settled by a probe rather than by asking.** The owner
+wanted the status on the tab name and on the agent name. Drawing all three
+candidate mechanisms at once on a live pane showed that a tab rename paints both
+the tab bar and the sidebar's tab row, that the pane token paints the agent row,
+and that `--display-agent` adds a third copy of the same status in the same row
+while truncating the agent's real name. Two mechanisms, three surfaces, and the
+third mechanism unused.
+
+```yaml
+gate: {stage: S2, artifact: DESIGN_40.md, reviewer: planner, verdict: QUESTIONS, round: 8, date: 2026-09-16,
+  findings: ["Stage::Delivering kept a write site but section 10 gave no string for it",
+             "the tab rename trigger was stated three incompatible ways across sections 4, 5 and 8",
+             "the sweep still matched a prefix while the decoration had become a suffix"]}
+gate: {stage: S2, artifact: DESIGN_40.md, reviewer: planner, verdict: QUESTIONS, round: 9, date: 2026-09-16,
+  findings: ["section 4 still carried the per-stage rename rule and its justification, contradicting the rule sections 5, 8 and 10 now state"]}
+gate: {stage: S2, artifact: DESIGN_40.md, reviewer: planner, verdict: READY, round: 10, date: 2026-09-16, blocker: null}
+```
+
+**Ten rounds, and the cause of nine of them was one habit.** Every finding after
+round 1 was introduced by the previous round's fix, and every one of those was
+the same mistake in a different place: a section edited, its neighbours left
+describing the old answer. The design is eleven sections whose rules reference
+each other, which is past the size where a targeted edit can be checked by
+looking at what was edited.
+
+Round 10 was the first sent after reading the whole document rather than the
+diff, and grepping it for the two phrases that had gone stale repeatedly — the
+prefix-versus-suffix wording and the rename trigger. That found two more places
+before the gate did. The gate still found two, both of the same kind: a run file
+describing decisions as open that the design records as settled, and a sentence
+counting four write sites above a table of six. Reading the whole thing is what
+finds this class, and the author has to do it too, not only the reviewer.

@@ -31,7 +31,7 @@ enum Activity {
     Working { target: String, tab: Option<String>, stage: Stage },
 }
 
-enum Stage { Context, Recognising, Rewriting, Delivering }
+enum Stage { Transcribing, Fixing }
 ```
 
 Set by the code that enters each stage, read by the drawing thread. It is
@@ -42,15 +42,16 @@ costs a wrong label for one interval and never a wrong take.
 about where the pipeline is, which is how a display starts disagreeing with the
 thing it displays. One value, written where the work actually starts.
 
-**Who writes it, exactly.** Four sites, and they cover both the hold and the
+**Who writes it, exactly.** These sites, and they cover both the hold and the
 toggle, because `transcribe` is shared by them:
 
 | site | writes |
 |---|---|
 | `ptt`, on `Started::Began` | `Recording` |
 | `dictate`, on `Started::Began` | `Recording` |
-| `end_take` and `dictate`'s second half, before `take_bias` | `Working { stage: Context }` |
-| `transcribe`, before recognition, before rewrite, before delivery | `Working` with each stage |
+| `end_take` and `dictate`'s second half, before `take_bias` | `Working { stage: Transcribing }` |
+| `transcribe`, before rewrite | `Working { stage: Fixing }` |
+| `transcribe`, after delivery returns | `Idle` |
 | the take path, when the take is finished, failed, discarded or abandoned | `Idle` |
 
 A missed write costs one interval of a stale label. A missed `Idle` costs
@@ -148,7 +149,9 @@ tab themselves while the take runs.
 holds it in its own locals.
 
 On the first tick of a take it reads the label with `herdr tab get` and keeps
-it. On each tick where the stage has changed since the last, it renames. On the
+it. On each tick it computes the steady form for the current state and renames only
+if that differs from what it last wrote — section 5 states the rule and what it
+comes out as. On the
 first tick at which `Activity` is `Idle` **while it is still holding a
 decoration**, it restores: read the label again; if it equals what the thread
 last wrote, write the original back; if it differs, somebody renamed the tab
@@ -169,9 +172,11 @@ regardless.
 **Why.** Reading before decorating is the only value that is certainly the
 person's; the invocation context cannot serve, because it arrives only on
 keypresses and after the key comes up the pipeline runs for seconds with no
-request at all. Renaming per stage rather than per renewal keeps a take to four
-or five renames instead of one every few hundred milliseconds — a tab bar that
-flickers is worse than one that does not move.
+request at all. Renaming only when the text would differ keeps the tab bar
+still except when it has something new to say: once a second while a clock is
+running in it, and once on entering a state that has no clock. A tab bar
+rewritten on every renewal flickers; one rewritten when its content changes does
+not.
 
 ## 4a. A daemon that was killed
 
@@ -184,12 +189,19 @@ thread being joined at shutdown. A daemon killed outright does none of them.
 be shown by hand. As sections 3 and 4 stand, the token goes and the label stays
 — exactly the permanently decorated tab `docs/design.md` section 6 warns about.
 
-**Decision.** The decoration is a prefix, and a prefix is removable without
+**Decision.** The decoration is a suffix, and a suffix is removable without
 knowing what it was attached to. At daemon start, before anything else draws,
-the drawing thread sweeps: it lists every tab, and for each label that begins
-with the plugin's prefix it renames that tab to the label without it. No stored
-state, no file, no record of what the previous daemon was doing — the decoration
-identifies itself, and removing a prefix from a string leaves the string.
+the drawing thread sweeps: it lists every tab, and for each label that carries
+the plugin's marker it renames that tab to the label with the marker and
+everything after it removed, trailing separator included. No stored state, no
+file, no record of what the previous daemon was doing — the decoration
+identifies itself, and cutting a suffix off a string leaves the string.
+
+The marker is the `🎙️` that every value in section 10 begins with, and the
+decoration is written as the original label, one space, then the value. So the
+sweep cuts from the first `🎙️` back through the space before it, and what
+remains is exactly what was there before — including the empty label, which
+decorates to a value with no leading space and sweeps back to empty.
 
 **The listing is one call, and it covers everything.** `herdr tab list`, with no
 `--workspace`, returns every tab in every workspace with its `tab_id` and its
@@ -198,12 +210,11 @@ one answer. Scope is therefore not a question the sweep has to settle — at
 daemon start there is no invocation context and so no workspace to scope to, and
 none is needed.
 
-**The prefix has to be unmistakable, and that is a constraint on the answer to
-section 10.** People already put their own prefixes on tab labels, bracketed
+**The marker has to be unmistakable.** People already put their own prefixes on tab labels, bracketed
 ones among them — observed on the machine this was developed on, where several
-tabs carry a bracketed project marker ahead of their name. A decoration that
-looks like an ordinary bracketed prefix would make this sweep strip labels
-nobody decorated. Whatever string is chosen must be one a person would not type.
+tabs carry a bracketed project marker ahead of their name. A marker that
+looked like an ordinary bracketed tag would make this sweep strip labels nobody
+decorated. `🎙️` is not something a person types into a tab name by accident.
 
 **The sweep runs whether or not the tab indicator is switched on.** `[ui]
 tab_indicator = false` means this plugin does not decorate; it cannot mean that
@@ -240,11 +251,11 @@ the next daemon start — which is honest, bounded, and quiet.
 
 **Not during a take**, which was the first answer written here and is wrong for
 the same reason the sweep is safe at start: a sweep firing while
-the thread is decorating a live take would strip its own fresh prefix, and then
-— because section 4 renames only when the stage changes — the tab would stay
-undecorated until the next stage, and the restore would find a label differing
-from what it last wrote and leave the tab alone, exactly as though somebody else
-had renamed it. Waiting for an idle tick costs nothing: a decoration left by a
+the thread is decorating a live take would strip the decoration it had just
+written, and the restore would then find a label differing from what it last
+wrote and leave the tab alone, exactly as though somebody else had renamed it.
+The tab would also stay bare until the next rename, which in the working states
+is the next state change, because nothing else in those strings moves. Waiting for an idle tick costs nothing: a decoration left by a
 killed daemon is already there, and a few seconds more changes nothing, while a
 sweep that collides with a live take breaks the take's own display and its
 restore.
@@ -257,28 +268,36 @@ means a file, and a file is the thing #17 removed from this plugin for good
 reasons. Self-identifying decoration costs one listing at start and closes the
 case the criteria actually name.
 
-**What this ties to section 10.** It works because the decoration is a prefix.
-If the owner chooses a replacement instead, the original is not recoverable from
-the label, and the killed-daemon case needs stored state or has to be given up —
-so that decision is no longer only about how the tab bar reads.
+**Why this works at all.** Because the decoration is appended rather than
+substituted. A replacement would leave the original unrecoverable from the label
+and would need stored state — a file, which #17 removed from this plugin — or
+would give the killed-daemon case up.
 
 ## 5. What the two places show
 
 **Context.** The criteria ask that both places show the same thing, so that a
 collapsed sidebar loses only the place and not the information.
 
-**Problem.** The token can carry a clock cheaply, because it is rewritten every
-interval anyway. The label cannot, because rewriting it every interval is the
-flicker of section 4.
+**Decision.** Every state's value has two forms, identical but for the second
+character: the **steady** form and the **blink** form, in which that character
+is replaced by a space. The token alternates between them on every renewal —
+that is the blink. The tab label always carries the steady form.
 
-**Decision.** Both carry the same **stage**. The token also carries elapsed
-time, which the label does not. So the label says what is happening and the
-token says what is happening and for how long.
+That gives one rule for each surface, and no third:
 
-**Why.** This is a departure from the criteria's requirement 3 read strictly,
-and it is named rather than hidden: the information that matters when a sidebar
-is collapsed is which stage the take is in, and the second of the two — how long
-— is the one that costs a rename every interval to show.
+- **The token is written on every tick**, alternating the two forms.
+- **The tab is renamed only when its steady form differs from the one last
+  written.** In `REC` that is once a second, because the clock is in it. In
+  `TRANSCR` and `FIX` it is once, on entering the state, because nothing in
+  those strings changes.
+
+**Why.** The earlier answer here took the clock off the tab to avoid renaming
+it every renewal; the answer before that had three different triggers in three
+sections. One rule — write when the text would differ — produces the right rate
+on each surface without anybody choosing a rate, and it is the same rule for all
+three states. The tab does not blink, and that is deliberate: a tab bar that
+flashes a character twice a second is noise in the corner of the eye, while the
+same animation in the sidebar sits where somebody looks on purpose.
 
 ## 6. Failure
 
@@ -314,7 +333,7 @@ already does (`src/delivery.rs:64`), so every test runs with no herdr. The clock
 seam from #17 drives elapsed time and the renewal interval, so no test waits.
 
 Covered: a token is renewed while recording and not after; its value carries the
-stage and the elapsed time; the tab is decorated once per stage; the restore
+stage and the elapsed time; the tab is renamed exactly when its steady form changes — once a second while recording, once per state otherwise — and never on a blink; the restore
 writes the original back; a label changed by somebody else is left alone; an
 empty original is restored as empty; a draw failure is recorded once and
 disables drawing for that take but not the take itself; both halves obey their
@@ -336,37 +355,65 @@ with a checkable outcome, named here so the plan does not discover it.
   `report-metadata` offers.
 - Anything about `cancel` (#18), which still stops nothing.
 
-## 10. Open, and the owner's rather than this stage's
+## 10. What the indicator says, and where
 
-**What the token is called and what it says.** Both are visible in the sidebar.
-The shape is fixed — a name and a short value, rewritten every interval — and
-the strings are not. Proposed, pending the owner: name `voice`, value
-`REC 0:05` while recording and the stage's own word after that.
+Settled by the owner on 2026-09-16, after a probe that drew all three
+mechanisms at once on a live pane and tab.
 
-**What the decorated label looks like.** Answering this decides more than how
-the tab bar reads: section 4a recovers from a killed daemon by stripping the
-prefix, which only works because a prefix is removable. A replacement would need
-stored state to recover, or would give that case up.
+**Three states, one line each:**
 
- `AC_40.md` hands this stage the choice
-between a prefix, a suffix and a replacement, and what to do with a label that
-is already long — and every one of those is text a person reads in their own tab
-bar, which makes it the same kind of decision as the token's wording rather than
-a mechanism. The restore's comparison and the per-stage rename both need the
-exact string, so it cannot be left to whoever implements it. Proposed, pending
-the owner: a prefix, so that a tab named by its owner keeps its name visible,
-and no truncation, because a tab bar already truncates and doing it twice loses
-more than it saves.
+| state | value |
+|---|---|
+| recording | `🎙️🔴 REC 0:05` — the red dot blinks |
+| transcribing | `🎙️📝 TRANSCR` — the memo blinks |
+| fixing | `🎙️🪄 FIX` — the wand blinks |
 
-**Whether it blinks at all.** `docs/design.md` section 6 says it blinks. A
-steady token with a running clock says more and is quieter. Proposed, pending
-the owner: steady, on the grounds that the clock already proves it is alive and
-a blinking token in a sidebar is harder to ignore than to read.
+Bias assembly is part of `TRANSCR` rather than a state of its own: it takes
+fractions of a second, and a state that flickers past in a hundred milliseconds
+cannot be read.
 
-This one is not a flag, and that is worth knowing before answering it. The token
-outlives three renewal intervals by design, so skipping a renewal does not make
-it disappear — blinking would need a clearing call every other interval, which
-section 3 removes on purpose and AC-2 forbids in as many words. Answering
-"blink" therefore reopens section 3 rather than flipping a switch: the token
-would have to be cleared and reset, and the property that a killed daemon leaves
-nothing behind would have to be re-established some other way.
+**Delivery is not a displayed state either, for the same reason and one more.**
+It is a single call that inserts the text, and the moment it succeeds the text
+is in the input box — which is a louder signal than any token. So there are
+three states and not four: `Activity` goes from `Fixing` straight to `Idle` when
+delivery returns, and the token lapses. `AC_40.md` AC-3 named recognition,
+rewrite and delivery; it is corrected to the two that are worth naming, and the
+correction is recorded there.
+
+**It blinks by alternating the second character, not by disappearing.** The
+value is rewritten every renewal anyway, so blinking costs nothing and takes
+nothing back: the token is present on every renewal, and only the icon
+alternates. This is why the blink question turned out not to reopen section 3 —
+nothing is ever cleared.
+
+**It is a suffix, after the name**, written as the label, one space, then the
+value. That is what section 4a's recovery from a killed daemon cuts back off. Every value begins with `🎙️`,
+which is the marker the sweep cuts from — see section 4a — and is not something
+a person types into a tab name by accident.
+
+**Two mechanisms paint three surfaces, and the third mechanism is not used.**
+
+| surface | painted by |
+|---|---|
+| the tab bar at the top | the tab's label |
+| the sidebar's tab row | the tab's label — the same rename paints both |
+| the sidebar's agent row | the pane's token |
+
+`herdr pane report-metadata --display-agent` is deliberately **not** used.
+Drawn alongside the other two it produces a third copy of the same status in the
+same row, and it displaces the agent's real name, which is then truncated. The
+probe that established this showed all three at once and the row read as three
+repetitions of one fact.
+
+**Both surfaces carry the same text; only the token animates.** One rule governs
+each, and the rates follow from it rather than being chosen: the token is
+written on every tick, alternating the steady and blink forms; the tab is
+renamed when its steady form differs from the one last written. In `REC` that
+comes out as one rename a second, because the clock is in the string. In
+`TRANSCR` and `FIX` it comes out as one rename on entering the state, because
+nothing in those strings changes. None at all when no take is running.
+
+The cost of putting the clock on the tab is therefore one rename a second during
+a take, and it is stated rather than hidden. Renaming on every renewal instead
+would move the tab bar several times a second for a character nobody reads
+there.
