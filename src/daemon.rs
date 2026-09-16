@@ -3627,6 +3627,146 @@ mod tests {
         );
     }
 
+    /// What the drawing thread would read right now.
+    fn activity_of(runtime: &Runtime) -> Activity {
+        runtime.activity.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn a_tap_too_short_to_be_a_hold_leaves_the_indicator_saying_nothing_is_recording() {
+        // The sharpest of the four. A tap runs no pipeline at all, so nothing
+        // downstream can publish the end of it: if the one line in
+        // `discard_take` goes, the indicator says REC for the rest of the
+        // daemon's life, on a keypress that produced no take.
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("activity-tap"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert!(
+            matches!(activity_of(&runtime), Activity::Recording { .. }),
+            "the keypress published Recording, or this test proves nothing"
+        );
+        // One repeat and nothing more: held for 0 ms, far under the minimum.
+        clock.advance(1_000);
+        wait_for_journal(&journal, "too short", WITHIN);
+        // The hold going idle is the watcher having finished with the tap, and
+        // `finish_ending` runs after `discard_take`: no test here sleeps.
+        wait_for_idle(&runtime);
+        assert_eq!(
+            activity_of(&runtime),
+            Activity::Idle,
+            "a tap is a take that ended before it began"
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+    }
+
+    #[test]
+    fn a_hold_whose_device_went_away_leaves_the_indicator_saying_nothing_is_recording() {
+        // `end_take`'s failing half: there is no take, so nothing downstream
+        // publishes the end of this one either.
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(losing_recorder("activity-lost"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert!(matches!(activity_of(&runtime), Activity::Recording { .. }));
+        clock.advance(400);
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(1_000);
+        wait_for_journal(&journal, "the device went away", WITHIN);
+        wait_for_idle(&runtime);
+        assert_eq!(
+            activity_of(&runtime),
+            Activity::Idle,
+            "a take whose device went away is still a take that ended"
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+    }
+
+    #[test]
+    fn a_daemon_stopped_with_a_key_still_down_leaves_the_indicator_idle() {
+        // The drawing thread is joined after the watcher, so its last look must
+        // not find a take still running: a decoration it then held would be put
+        // back by nothing.
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, clock) = runtime_with_clock(fake.clone(), false);
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("activity-shutdown"));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert!(matches!(activity_of(&runtime), Activity::Recording { .. }));
+        // The key is still down — no release, no deadline — and the daemon
+        // stops anyway.
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+        assert_eq!(
+            activity_of(&runtime),
+            Activity::Idle,
+            "abandoned is one of the ways a take ends"
+        );
+    }
+
+    #[test]
+    fn a_toggle_whose_take_could_not_be_stopped_leaves_the_indicator_idle() {
+        // `dictate`'s `AlreadyRunning` arm with a recorder that refuses the
+        // take. The take is silence, so stopping it fails, and the second
+        // keypress reaches neither the pipeline nor anything else that
+        // publishes an end.
+        let runtime = fake_runtime_with_clock("unused").0;
+        let recorder = silent_recorder();
+        let request = request("dictate", br#"{"focused_pane_id":"w1:p2"}"#);
+        answer(&request, &recorder, &runtime);
+        assert!(matches!(activity_of(&runtime), Activity::Recording { .. }));
+        let (reply, _) = answer(&request, &recorder, &runtime);
+        assert!(
+            matches!(&reply, Reply::Error(text) if text.contains("dB")),
+            "the silent take is refused, which is what puts this on the failing arm: {reply:?}"
+        );
+        assert_eq!(
+            activity_of(&runtime),
+            Activity::Idle,
+            "a take the recorder would not give up is still a take that ended"
+        );
+    }
+
     #[test]
     fn a_take_that_fails_still_ends_at_idle() {
         // A recognition failure must not leave the indicator saying TRANSCR
