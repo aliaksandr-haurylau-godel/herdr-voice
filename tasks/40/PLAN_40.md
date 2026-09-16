@@ -329,8 +329,13 @@ carries `tab_id`, `label`, `number`, `workspace_id`, `focused`, `pane_count` and
 `agent_status`. Across fifty tabs in sixteen workspaces, `label` was present on
 every one and was always a string — an unnamed tab reports the empty string
 rather than omitting the field. Parse defensively anyway: a tab whose label is
-absent or not a string counts as the empty label, because a missing field must
-not lose the sweep the rest of the list.
+absent or is not a string counts as the empty label, because one odd field must
+not lose the sweep the rest of the list. `serde(default)` answers only for the
+absent half — it does not apply to a field that is present and of another type —
+so `label` is read as arbitrary JSON and coerced: a string stays itself, and
+anything else, `null` included, becomes empty. The sweep is the only recovery
+from a daemon killed with a tab still decorated, which is what makes this the
+one parse in the plugin that must not be all-or-nothing.
 
 **`RecordingPainter` in full**, because Tasks 5 and 6 lean on all of it. It is
 `Clone` and shares everything through one inner `Arc<Mutex<Inner>>`, the way

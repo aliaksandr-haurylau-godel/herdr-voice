@@ -141,7 +141,8 @@ fn list_args() -> Vec<String> {
 }
 
 /// What `herdr tab list` answers with: `result.tabs[]`, each with a `tab_id`
-/// and a `label`. A tab whose label is absent counts as the empty label.
+/// and a `label`. A tab whose label is absent, or is not a string, counts as
+/// the empty label.
 #[derive(serde::Deserialize)]
 struct Listing {
     result: ListingResult,
@@ -156,8 +157,31 @@ struct ListingResult {
 #[derive(serde::Deserialize)]
 struct ListedTab {
     tab_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "label_or_empty")]
     label: String,
+}
+
+/// A label that is not a string is the empty label, the way an absent one is.
+///
+/// This is the one parse in the plugin that must not be all-or-nothing. The
+/// sweep is the only thing that takes a decoration off a tab a killed daemon
+/// left, and it works from this list: a single tab whose `label` came back as a
+/// number would otherwise fail the whole envelope and cost every other tab its
+/// sweep, which is the opposite of what one odd field should cost.
+///
+/// `serde(default)` alone does not cover it — it answers for a field that is
+/// absent, not for one that is present and of another type — so the value is
+/// read as arbitrary JSON and coerced here: a string stays itself, anything
+/// else, `null` included, becomes empty.
+fn label_or_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(label) => label,
+        _ => String::new(),
+    })
 }
 
 /// Paints by running the herdr binary, the way `HerdrDeliverer` delivers by
@@ -1030,6 +1054,79 @@ mod tests {
             "an unnamed tab is the empty label, and an absent one is too"
         );
         assert_eq!(herdr.argv(), vec!["tab", "list"]);
+    }
+
+    /// A listing where one tab's `label` is a number and another's is `null`,
+    /// with decorated string labels on either side of them. Nothing a live
+    /// herdr produced — every one of its fifty tabs answered with a string —
+    /// which is exactly why the parse has to be asked about it here.
+    const TAB_LIST_WITH_A_LABEL_THAT_IS_NOT_A_STRING: &str = r#"{
+      "id": 8,
+      "result": {
+        "type": "tab_list",
+        "tabs": [
+          {"tab_id": "w1:t1", "label": "1 🎙️🔴 REC 0:12", "number": 1,
+           "workspace_id": "w1", "focused": true, "pane_count": 1, "agent_status": "idle"},
+          {"tab_id": "w1:t2", "label": 7, "number": 2, "workspace_id": "w1",
+           "focused": false, "pane_count": 1, "agent_status": "idle"},
+          {"tab_id": "w1:t3", "label": null, "number": 3, "workspace_id": "w1",
+           "focused": false, "pane_count": 1, "agent_status": "idle"},
+          {"tab_id": "w1:t4", "label": "review", "number": 4, "workspace_id": "w1",
+           "focused": false, "pane_count": 1, "agent_status": "idle"}
+        ]
+      }
+    }"#;
+
+    #[test]
+    fn a_label_that_is_not_a_string_is_the_empty_label_and_costs_no_other_tab_its_sweep() {
+        let listing: Listing = serde_json::from_str(TAB_LIST_WITH_A_LABEL_THAT_IS_NOT_A_STRING)
+            .expect("one odd field must not fail the whole envelope");
+        let tabs: Vec<(String, String)> = listing
+            .result
+            .tabs
+            .into_iter()
+            .map(|tab| (tab.tab_id, tab.label))
+            .collect();
+        assert_eq!(
+            tabs,
+            vec![
+                ("w1:t1".to_string(), "1 🎙️🔴 REC 0:12".to_string()),
+                ("w1:t2".to_string(), String::new()),
+                ("w1:t3".to_string(), String::new()),
+                ("w1:t4".to_string(), "review".to_string()),
+            ],
+            "every tab comes back, and only the odd ones lose their label"
+        );
+    }
+
+    #[test]
+    fn the_real_painter_sweeps_the_rest_of_the_list_around_a_label_that_is_not_a_string() {
+        // The same defence where the parse actually runs. The decorated tab is
+        // the one the sweep exists for: a daemon killed mid-take left it, and
+        // this listing is the only way anything learns of it.
+        let herdr = fake_herdr("odd-label", TAB_LIST_WITH_A_LABEL_THAT_IS_NOT_A_STRING, 0);
+        let tabs = herdr
+            .painter()
+            .tabs()
+            .expect("a number where a label was expected is not a reason to lose the list");
+        assert_eq!(
+            tabs.len(),
+            4,
+            "the whole list survives one odd field: {tabs:?}"
+        );
+        assert_eq!(
+            tabs.iter()
+                .find(|(id, _)| id == "w1:t1")
+                .map(|(_, label)| strip(label)),
+            Some("1".to_string()),
+            "and the tab a killed daemon left decorated is still there to be stripped: {tabs:?}"
+        );
+        assert!(
+            tabs.iter()
+                .filter(|(id, _)| id == "w1:t2" || id == "w1:t3")
+                .all(|(_, label)| label.is_empty()),
+            "the odd ones read as unnamed, which is what the sweep does nothing to: {tabs:?}"
+        );
     }
 
     #[test]
