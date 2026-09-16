@@ -1319,6 +1319,37 @@ mod tests {
     }
 
     #[test]
+    fn the_configured_interval_is_the_one_the_drawing_thread_keeps() {
+        // Two things at once, and both of them would pass with the interval
+        // hard-coded to the default: `tick` advances the drawing clock by
+        // `blink_ms`, so a thread waiting on any other interval never wakes and
+        // the harness fails on the bound rather than on an assertion; and the
+        // token's time to live is three of these, so it moves with the key.
+        let d = Drawing::with_ui(
+            RecordingPainter::ok(),
+            Ui {
+                blink_ms: 200,
+                ..Ui::default()
+            },
+        );
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(1);
+        match d
+            .painter
+            .calls()
+            .into_iter()
+            .find(|call| matches!(call, Paint::Token(..)))
+        {
+            Some(Paint::Token(_, _, ttl)) => assert_eq!(
+                ttl, 600,
+                "three renewals of the configured interval, not of the default one"
+            ),
+            other => panic!("expected a token, got {other:?}"),
+        }
+        d.stop();
+    }
+
+    #[test]
     fn the_tab_is_renamed_once_a_second_while_recording_and_not_on_a_blink() {
         let d = Drawing::start(RecordingPainter::with_tabs(&[("w1:t1", "1")]));
         d.set(recording("w1:p1", "w1:t1", 0));

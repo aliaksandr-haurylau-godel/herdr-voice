@@ -317,12 +317,21 @@ min_hold_ms = 300
 [ui]
 sidebar_token = true      # the token on the sidebar's agent row
 tab_indicator = true      # the suffix on the tab label
-blink_ms = 600            # the renewal interval, and so the blink rate
+blink_ms = 600            # the renewal interval, and so the blink rate; floor 100
 toasts = true
 
 [delivery]
 submit = false
 ```
+
+`blink_ms` is raised to 100 ms when a configuration file asks for less. Every
+tick runs up to three herdr subprocesses — a listing, a rename and a token — so
+the interval is a rate limit on child processes and not only a blink rate, and a
+value of a few milliseconds turns the drawing thread into a spin competing with
+the take for the machine. A hundred milliseconds is ten ticks a second, slower
+than the twelve-a-second keypress path the plugin already sustains. It is a
+floor rather than a refusal: an out-of-range value is not a reason to stop the
+daemon starting.
 
 Keybindings are **not** part of this file. A herdr plugin manifest cannot declare
 keys, so they live in the user's herdr configuration; the `setup` action prints
