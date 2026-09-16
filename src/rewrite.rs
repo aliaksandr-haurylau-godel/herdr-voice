@@ -127,6 +127,23 @@ pub mod tests_support {
             }
         }
     }
+
+    /// An engine that stops inside `rewrite` until the test lets it through,
+    /// the way `stt::tests_support::BlockingFake` stops inside recognition. The
+    /// rewrite step is the only moment the indicator says FIX, and it lasts as
+    /// long as a model takes — a window a test has to act in rather than sleep
+    /// through.
+    pub struct BlockingFake {
+        pub gate: std::sync::Arc<crate::gate::Gate>,
+        pub text: String,
+    }
+
+    impl Engine for BlockingFake {
+        fn rewrite(&self, _transcript: &str, _bias: &str) -> Result<String, EngineError> {
+            self.gate.enter();
+            Ok(self.text.clone())
+        }
+    }
 }
 
 #[cfg(test)]

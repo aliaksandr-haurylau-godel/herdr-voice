@@ -609,6 +609,30 @@ mod tests {
     }
 
     #[test]
+    fn a_take_reports_the_tab_the_pane_sat_in_when_it_began() {
+        // The tab travels from the keypress through `Running` to the `Take`,
+        // and the indicator decorates it and restores it from there. A take
+        // that comes back without it paints no tab bar at all.
+        let (recorder, _) = recorder_with("tab-pinned", vec![Event::Samples(tone(0.3, 0.1))]);
+        assert_eq!(
+            recorder.start("w1:p2", None, Some("claude"), Some("w1:t2")),
+            Started::Began
+        );
+        let take = recorder.stop().expect("a take");
+        assert_eq!(take.tab.as_deref(), Some("w1:t2"));
+        std::fs::remove_file(&take.path).ok();
+    }
+
+    #[test]
+    fn a_take_started_outside_any_tab_reports_none() {
+        let (recorder, _) = recorder_with("tab-no", vec![Event::Samples(tone(0.3, 0.1))]);
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        let take = recorder.stop().expect("a take");
+        assert_eq!(take.tab, None);
+        std::fs::remove_file(&take.path).ok();
+    }
+
+    #[test]
     fn a_take_started_with_no_agent_reports_none() {
         let (recorder, _) = recorder_with("agent-no", vec![Event::Samples(tone(0.3, 0.1))]);
         assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);

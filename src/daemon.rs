@@ -3095,6 +3095,16 @@ mod tests {
         tag: &str,
         fake: &crate::delivery::tests_support::FakeDeliverer,
     ) -> InThePipeline {
+        a_take_in_the_pipeline_from(tag, fake, PANE_1)
+    }
+
+    /// The same, with the invocation context the hold is driven from — for the
+    /// tests that need the take to carry a tab.
+    fn a_take_in_the_pipeline_from(
+        tag: &str,
+        fake: &crate::delivery::tests_support::FakeDeliverer,
+        context: &[u8],
+    ) -> InThePipeline {
         let gate = std::sync::Arc::new(crate::gate::Gate::default());
         let (mut runtime, clock) = runtime_with_clock(fake.clone(), false);
         runtime.recognition = Ok(Box::new(crate::stt::tests_support::BlockingFake {
@@ -3113,9 +3123,9 @@ mod tests {
             thread::spawn(move || watch(recorder, runtime, stop))
         };
 
-        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        answer(&request("ptt", context), &recorder, &runtime);
         clock.advance(400);
-        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        answer(&request("ptt", context), &recorder, &runtime);
         clock.advance(1_000);
         // The watcher has taken the hold, stopped the recorder and reached the
         // recogniser. It stays there until `gate.open()`.
@@ -3625,6 +3635,99 @@ mod tests {
             matches!(&*runtime.activity.lock().unwrap(), Activity::Idle),
             "a finished take publishes Idle, or the token never lapses"
         );
+    }
+
+    /// A hold driven from a pane that sits in a named tab.
+    const PANE_1_IN_TAB: &[u8] = br#"{"focused_pane_id":"w1:p1","tab_id":"w1:t1"}"#;
+
+    #[test]
+    fn a_take_in_recognition_says_transcribing_and_still_names_the_tab_it_began_in() {
+        // The only place a `Working` value is read while it is the live one.
+        // The tab in it did not come from the request: it went into the
+        // recorder when the hold began and came back out on the `Take`, which
+        // is the whole path the tab bar depends on.
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let pipeline = a_take_in_the_pipeline_from("activity-transcr", &fake, PANE_1_IN_TAB);
+        match activity_of(&pipeline.runtime) {
+            Activity::Working { target, tab, stage } => {
+                assert_eq!(target, "w1:p1");
+                assert_eq!(
+                    tab.as_deref(),
+                    Some("w1:t1"),
+                    "a take that lost its tab paints no tab bar at all"
+                );
+                assert_eq!(stage, Stage::Transcribing);
+            }
+            other => panic!("expected Working while the recogniser runs, got {other:?}"),
+        }
+        pipeline.finish();
+    }
+
+    #[test]
+    fn a_take_in_the_rewrite_step_says_fixing_and_names_the_tab_the_toggle_pinned() {
+        // FIX had a string and an enum variant and nothing joining them: no
+        // test ever reached the rewrite step, so `Stage::Fixing` was never
+        // proved reachable at all. It is reached here through the toggle, which
+        // also proves the tab the toggle read off the invocation reaches the
+        // take.
+        let gate = std::sync::Arc::new(crate::gate::Gate::default());
+        let (mut runtime, _clock) = fake_runtime_with_clock("fix the worklog entry");
+        runtime.rewrite = crate::rewrite::Resolution::Engine(Box::new(
+            crate::rewrite::tests_support::BlockingFake {
+                gate: std::sync::Arc::clone(&gate),
+                text: "Fix the worklog entry.".to_string(),
+            },
+        ));
+        // Otherwise a transcript this plain never reaches the engine.
+        runtime.skip_if_plain = false;
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder("activity-fixing"));
+        let request = request(
+            "dictate",
+            br#"{"focused_pane_id":"w1:p2","tab_id":"w1:t2"}"#,
+        );
+
+        answer(&request, &recorder, &runtime);
+        match activity_of(&runtime) {
+            Activity::Recording { target, tab, .. } => {
+                assert_eq!(target, "w1:p2");
+                assert_eq!(
+                    tab.as_deref(),
+                    Some("w1:t2"),
+                    "the toggle reads the tab off the invocation it was given"
+                );
+            }
+            other => panic!("expected Recording after the first keypress, got {other:?}"),
+        }
+
+        // The second keypress runs the pipeline, which stops inside the rewrite
+        // engine until the gate is opened.
+        let second = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            thread::spawn(move || answer(&request, &recorder, &runtime).0)
+        };
+        gate.wait_until_entered();
+        match activity_of(&runtime) {
+            Activity::Working { target, tab, stage } => {
+                assert_eq!(target, "w1:p2");
+                assert_eq!(tab.as_deref(), Some("w1:t2"));
+                assert_eq!(
+                    stage,
+                    Stage::Fixing,
+                    "the rewrite step is the one moment the indicator says FIX"
+                );
+            }
+            other => panic!("expected Working while the rewrite engine runs, got {other:?}"),
+        }
+        // And the string that state is drawn as is the one the indicator has.
+        assert_eq!(
+            crate::indicator::value(&crate::indicator::State::Fixing, false),
+            "🎙️🪄 FIX"
+        );
+        gate.open();
+        second.join().expect("the second keypress ended badly");
+        assert_eq!(activity_of(&runtime), Activity::Idle);
     }
 
     /// What the drawing thread would read right now.
