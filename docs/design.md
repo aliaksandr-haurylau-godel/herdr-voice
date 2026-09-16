@@ -232,16 +232,20 @@ There are three states, and their text is fixed:
 
 | state | steady form | blink form |
 |---|---|---|
-| recording | `🎙️🔴 REC 0:05` | `🎙️ REC 0:05` |
-| transcribing | `🎙️📝 TRANSCR` | `🎙️ TRANSCR` |
-| fixing | `🎙️🪄 FIX` | `🎙️ FIX` |
+| recording | `🎙️🔴 REC 0:05` | `🎙️　 REC 0:05` |
+| transcribing | `🎙️📝 TRANSCR` | `🎙️　 TRANSCR` |
+| fixing | `🎙️🪄 FIX` | `🎙️　 FIX` |
 
 The clock is minutes and seconds with the minutes uncapped, so a take nobody
 ended reads as `43:11` instead of reading as though it had just begun. The blink
-form is the steady form with its second glyph removed: the token alternates
-between the two forms on every renewal, and that alternation is the blink. The
-tab label always carries the steady form, because a tab bar that flashes a
-character twice a second is noise where nobody chose to look.
+form is the steady form with its second glyph replaced by U+3000 IDEOGRAPHIC
+SPACE, a blank of the same width, so the label keeps its shape while the glyph
+goes dark: the token alternates between the two forms on every renewal, and that
+alternation is the blink. A terminal lays its cells out by East Asian Width, the
+icons are Wide there and so is U+3000, which is why an ordinary space is not
+used — it is Narrow, and the text would move by half a cell. The tab label
+always carries the steady form, because a tab bar that flashes a character twice
+a second is noise where nobody chose to look.
 
 A thread of its own does all the drawing. It wakes every `blink_ms`, reads what
 the take path published, and paints; nothing that runs herdr sits between the

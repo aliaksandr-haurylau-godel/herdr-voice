@@ -29,13 +29,17 @@ Settled by the owner. These strings are the contract; nothing invents a variant.
 
 | state | steady form | blink form |
 |---|---|---|
-| recording | `🎙️🔴 REC 0:05` | `🎙️ REC 0:05` |
-| transcribing | `🎙️📝 TRANSCR` | `🎙️ TRANSCR` |
-| fixing | `🎙️🪄 FIX` | `🎙️ FIX` |
+| recording | `🎙️🔴 REC 0:05` | `🎙️　 REC 0:05` |
+| transcribing | `🎙️📝 TRANSCR` | `🎙️　 TRANSCR` |
+| fixing | `🎙️🪄 FIX` | `🎙️　 FIX` |
 
-The blink form is the steady form with the second glyph removed, so the text
-shifts by one glyph and back. Both forms begin with `🎙️`, which is what the
-sweep cuts from. The clock is `m:ss`, minutes uncapped.
+The blink form is the steady form with the second glyph replaced by U+3000
+IDEOGRAPHIC SPACE — the blank in the table above — so the two forms are the same
+width and nothing to the right of the glyph moves. U+3000 is used because a
+terminal lays its cells out by East Asian Width and it is the one blank that is
+Wide there, as the icons are; an ordinary space is Narrow and would move the
+text by half a cell. Both forms begin with `🎙️`, which is what the sweep cuts
+from. The clock is `m:ss`, minutes uncapped.
 
 ## Plan decisions
 
@@ -98,10 +102,13 @@ mod tests {
     }
 
     #[test]
-    fn the_blink_form_drops_the_second_glyph_and_nothing_else() {
-        assert_eq!(value(&State::Recording { elapsed_ms: 5_000 }, true), "🎙️ REC 0:05");
-        assert_eq!(value(&State::Transcribing, true), "🎙️ TRANSCR");
-        assert_eq!(value(&State::Fixing, true), "🎙️ FIX");
+    fn the_blink_form_keeps_the_width_of_the_steady_form_and_loses_only_the_ink() {
+        assert_eq!(value(&State::Recording { elapsed_ms: 5_000 }, true), "🎙️　 REC 0:05");
+        assert_eq!(value(&State::Transcribing, true), "🎙️　 TRANSCR");
+        assert_eq!(value(&State::Fixing, true), "🎙️　 FIX");
+        // And, over all three states: the two forms cover the same columns,
+        // so nothing to the right of the glyph moves, and the text after the
+        // glyph is the same in both.
     }
 
     #[test]
@@ -161,10 +168,10 @@ Expected: FAIL — module `indicator` does not exist.
 //! What the indicator says.
 //!
 //! Three states, two forms each: the steady form and the blink form, which is
-//! the steady form without its second glyph. The token alternates between them
-//! on every tick — that is the blink — and the tab label always carries the
-//! steady form, because a tab bar that flashes a character twice a second is
-//! noise where nobody chose to look.
+//! the steady form with its second glyph replaced by a blank of the same width.
+//! The token alternates between them on every tick — that is the blink — and
+//! the tab label always carries the steady form, because a tab bar that flashes
+//! a character twice a second is noise where nobody chose to look.
 //!
 //! Every form begins with `MARKER`, which is what the start-up sweep cuts from
 //! when a previous daemon was killed with a tab still decorated.
@@ -181,6 +188,12 @@ pub enum State {
     Fixing,
 }
 
+/// What stands in for the coloured glyph in the blink form: a blank covering
+/// the same two columns, so nothing to the right of it moves. U+3000 and not an
+/// ordinary space, because a terminal lays its cells out by East Asian Width and
+/// U+3000 is the one blank that is Wide there, as the icons are.
+const BLANK: &str = "\u{3000}";
+
 /// The value for a state, in the steady form or the blink form.
 pub fn value(state: &State, blink: bool) -> String {
     let (icon, text) = match state {
@@ -189,7 +202,7 @@ pub fn value(state: &State, blink: bool) -> String {
         State::Fixing => ("🪄", "FIX".to_string()),
     };
     if blink {
-        format!("{MARKER} {text}")
+        format!("{MARKER}{BLANK} {text}")
     } else {
         format!("{MARKER}{icon} {text}")
     }

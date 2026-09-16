@@ -1,10 +1,10 @@
 //! What the indicator says.
 //!
 //! Three states, two forms each: the steady form and the blink form, which is
-//! the steady form without its second glyph. The token alternates between them
-//! on every tick — that is the blink — and the tab label always carries the
-//! steady form, because a tab bar that flashes a character twice a second is
-//! noise where nobody chose to look.
+//! the steady form with its second glyph replaced by a blank of the same width.
+//! The token alternates between them on every tick — that is the blink — and
+//! the tab label always carries the steady form, because a tab bar that flashes
+//! a character twice a second is noise where nobody chose to look.
 //!
 //! Every form begins with `MARKER`, which is what the start-up sweep cuts from
 //! when a previous daemon was killed with a tab still decorated.
@@ -21,6 +21,22 @@ pub enum State {
     Fixing,
 }
 
+/// What stands in for the coloured glyph in the blink form: the position is
+/// kept, only the ink goes.
+///
+/// U+3000 IDEOGRAPHIC SPACE, not an ordinary space. A terminal lays its cells
+/// out by East Asian Width: the three icons are Wide and cover two columns, and
+/// U+3000 is the one blank that is Wide as well, so it lands exactly on the two
+/// columns the icon left and nothing to the right of it moves. U+2007 FIGURE
+/// SPACE is Neutral and covers one column, which would move the text by half a
+/// cell — half of the defect this replaces. Two ordinary spaces measure two
+/// columns as well, but they are two characters where the steady form has one,
+/// and anything that trims or collapses a run of spaces takes the width back; a
+/// single wide character cannot be collapsed. This is reasoned from the width
+/// tables, not measured in a terminal: if the text still moves, this constant
+/// is the one thing to change.
+const BLANK: &str = "\u{3000}";
+
 /// The value for a state, in the steady form or the blink form.
 pub fn value(state: &State, blink: bool) -> String {
     let (icon, text) = match state {
@@ -29,7 +45,7 @@ pub fn value(state: &State, blink: bool) -> String {
         State::Fixing => ("🪄", "FIX".to_string()),
     };
     if blink {
-        format!("{MARKER} {text}")
+        format!("{MARKER}{BLANK} {text}")
     } else {
         format!("{MARKER}{icon} {text}")
     }
@@ -808,14 +824,63 @@ mod tests {
         assert_eq!(value(&State::Fixing, false), "🎙️🪄 FIX");
     }
 
+    /// The columns a value occupies in a terminal grid.
+    ///
+    /// No width crate is in the tree and this does not need one: a value is
+    /// made of ASCII text, the pictographs in U+1F300..=U+1FAFF, the variation
+    /// selector U+FE0F that follows the marker, and the blank the blink form
+    /// puts where the icon was. A terminal lays out a fixed grid by East Asian
+    /// Width: the pictographs and U+3000 are Wide and cover two columns, ASCII
+    /// is Narrow and covers one, and a variation selector is a combining mark
+    /// and covers none. Which table herdr's own renderer consults has not been
+    /// established; East Asian Width is the rule a terminal grid follows, and
+    /// it is the rule asserted here.
+    fn columns(value: &str) -> usize {
+        value
+            .chars()
+            .map(|glyph| match glyph {
+                '\u{fe0f}' => 0,
+                '\u{3000}' => 2,
+                '\u{1f300}'..='\u{1faff}' => 2,
+                _ => 1,
+            })
+            .sum()
+    }
+
     #[test]
-    fn the_blink_form_drops_the_second_glyph_and_nothing_else() {
+    fn the_blink_form_keeps_the_width_of_the_steady_form_and_loses_only_the_ink() {
         assert_eq!(
             value(&State::Recording { elapsed_ms: 5_000 }, true),
-            "🎙️ REC 0:05"
+            "🎙️　 REC 0:05"
         );
-        assert_eq!(value(&State::Transcribing, true), "🎙️ TRANSCR");
-        assert_eq!(value(&State::Fixing, true), "🎙️ FIX");
+        assert_eq!(value(&State::Transcribing, true), "🎙️　 TRANSCR");
+        assert_eq!(value(&State::Fixing, true), "🎙️　 FIX");
+
+        // What the sidebar sees is a grid of cells. The blink must change what
+        // is in the second cell pair and nothing else: same width, so nothing
+        // to the right of it moves, and the same text after it.
+        for state in [
+            State::Recording { elapsed_ms: 5_000 },
+            State::Transcribing,
+            State::Fixing,
+        ] {
+            let steady = value(&state, false);
+            let blink = value(&state, true);
+            assert_ne!(steady, blink, "the blink must show: {state:?}");
+            assert_eq!(
+                columns(&steady),
+                columns(&blink),
+                "the forms differ in width, so the text moves on every tick: \
+                 {steady:?} against {blink:?}"
+            );
+            let after_the_glyph =
+                |form: &str| form[MARKER.len()..].chars().skip(1).collect::<String>();
+            assert_eq!(
+                after_the_glyph(&steady),
+                after_the_glyph(&blink),
+                "only the glyph may differ: {steady:?} against {blink:?}"
+            );
+        }
     }
 
     #[test]
@@ -1161,7 +1226,7 @@ mod tests {
         for outcome in [
             painter.tabs().map(|_| ()),
             painter.rename("w1:t1", "1"),
-            painter.token("w1:p1", "🎙️ REC 0:00", 1_800),
+            painter.token("w1:p1", "🎙️🔴 REC 0:00", 1_800),
         ] {
             match outcome {
                 Err(PaintError::NotFound { binary, path }) => {

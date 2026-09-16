@@ -399,6 +399,15 @@ nothing back: the token is present on every renewal, and only the icon
 alternates. This is why the blink question turned out not to reopen section 3 —
 nothing is ever cleared.
 
+**The blink form is the same width as the steady form.** The icon is replaced,
+not removed: where the steady form has the coloured glyph the blink form has
+U+3000 IDEOGRAPHIC SPACE, so the blank covers the same two columns and nothing
+to the right of it moves. Removing the glyph instead makes the rest of the label
+slide left and back twice a second, which reads as the label shaking rather than
+as one character blinking. U+3000 is chosen because a terminal lays its cells
+out by East Asian Width and it is the one blank that is Wide there, as the icons
+are; an ordinary space is Narrow and would move the text by half a cell.
+
 **It is a suffix, after the name**, written as the label, one space, then the
 value. That is what section 4a's recovery from a killed daemon cuts back off. Every value begins with `🎙️`,
 which is the marker the sweep cuts from — see section 4a — and is not something
