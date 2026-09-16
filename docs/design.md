@@ -276,8 +276,7 @@ would be worse than a missing indicator: the token lives by being renewed, so a
 thread that stopped renewing would let it lapse and the sidebar would say the
 take was over while the person was still speaking.
 
-Toasts announce completion and errors. A run journal and a preview step before
-insertion are available and off by default.
+Toasts announce completion and errors.
 
 `doctor` reports what is missing: microphone permission, model, rewrite engine,
 herdr version.
