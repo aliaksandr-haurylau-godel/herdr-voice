@@ -878,6 +878,227 @@ mod tests {
         );
     }
 
+    /// A stand-in `herdr`, for the tests that run `HerdrPainter` itself rather
+    /// than a fake in its place.
+    ///
+    /// The same shape `src/delivery.rs` uses for its recorder script, and for
+    /// the same reason: the parse, the exit-code classification and the process
+    /// construction are only proved by a process that actually runs. The answer
+    /// is written to a file and the script prints that file rather than
+    /// carrying the JSON inline, so no shell or `cmd.exe` quoting rule ever
+    /// touches the text under test.
+    struct FakeHerdr {
+        dir: std::path::PathBuf,
+        script: std::path::PathBuf,
+        answer: std::path::PathBuf,
+        /// Where the script writes the arguments it was called with.
+        argv: std::path::PathBuf,
+    }
+
+    /// Nothing else removes the scratch directory, and a suite that leaves one
+    /// behind on every run is one somebody eventually finds confusing.
+    impl Drop for FakeHerdr {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl FakeHerdr {
+        /// Creates the directory and hands ownership of it over in the same
+        /// step, so nothing fallible runs between the directory existing and
+        /// there being a `Drop` to remove it.
+        fn new(tag: &str, script_name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "herdr-voice-indicator-herdr-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            FakeHerdr {
+                script: dir.join(script_name),
+                answer: dir.join("answer.json"),
+                argv: dir.join("argv.out"),
+                dir,
+            }
+        }
+
+        fn binary(&self) -> String {
+            self.script.to_string_lossy().into_owned()
+        }
+
+        fn painter(&self) -> HerdrPainter {
+            HerdrPainter::with_binary(self.binary())
+        }
+
+        /// The arguments the script was called with, one per line.
+        fn argv(&self) -> Vec<String> {
+            std::fs::read_to_string(&self.argv)
+                .expect("the script must have run and written its argv")
+                .lines()
+                .map(|line| line.to_string())
+                .collect()
+        }
+    }
+
+    /// A `herdr` that prints `answer` and exits with `code`.
+    #[cfg(unix)]
+    fn fake_herdr(tag: &str, answer: &str, code: i32) -> FakeHerdr {
+        let fake = FakeHerdr::new(tag, "herdr.sh");
+        std::fs::write(&fake.answer, answer).expect("write the answer");
+        std::fs::write(
+            &fake.script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\ncat {:?}\nexit {code}\n",
+                fake.argv, fake.answer
+            ),
+        )
+        .expect("write the script");
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&fake.script).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake.script, perms).expect("chmod");
+        fake
+    }
+
+    /// Not run on this machine. `type` prints the answer file byte for byte, so
+    /// the JSON never passes through `cmd.exe`'s quoting, and `exit /b` sets the
+    /// exit code `Command::output` reads. The argv loop is the one
+    /// `src/delivery.rs` documents, with the same limits: an argument carrying
+    /// a percent sign, an embedded quote, a comma or a semicolon would very
+    /// likely come out split or mangled, and nothing these tests pass does.
+    #[cfg(windows)]
+    fn fake_herdr(tag: &str, answer: &str, code: i32) -> FakeHerdr {
+        let fake = FakeHerdr::new(tag, "herdr.cmd");
+        std::fs::write(&fake.answer, answer).expect("write the answer");
+        std::fs::write(
+            &fake.script,
+            format!(
+                "@echo off\r\n(for %%A in (%*) do echo %%~A) > \"{}\"\r\ntype \"{}\"\r\nexit /b {code}\r\n",
+                fake.argv.display(),
+                fake.answer.display()
+            ),
+        )
+        .expect("write the script");
+        fake
+    }
+
+    /// What a live herdr answered `tab list` with on 2026-09-16, trimmed to
+    /// three tabs and recorded in `tasks/40/PLAN_40.md`: an envelope carrying
+    /// `result.tabs`, each tab with `tab_id`, `label`, `number`,
+    /// `workspace_id`, `focused`, `pane_count` and `agent_status`. The third
+    /// tab omits `label` entirely, which no live tab did — the parse has to
+    /// survive it anyway, because a field that went missing must not cost the
+    /// rest of the list its sweep.
+    const LIVE_TAB_LIST: &str = r#"{
+      "id": 7,
+      "result": {
+        "type": "tab_list",
+        "tabs": [
+          {"tab_id": "w1:t1", "label": "review", "number": 1, "workspace_id": "w1",
+           "focused": true, "pane_count": 2, "agent_status": "idle"},
+          {"tab_id": "w1:t2", "label": "", "number": 2, "workspace_id": "w1",
+           "focused": false, "pane_count": 1, "agent_status": "working"},
+          {"tab_id": "w2:t1", "number": 1, "workspace_id": "w2",
+           "focused": false, "pane_count": 1, "agent_status": "idle"}
+        ]
+      }
+    }"#;
+
+    #[test]
+    fn the_real_painter_gets_the_tabs_out_of_what_herdr_answers() {
+        let herdr = fake_herdr("list", LIVE_TAB_LIST, 0);
+        let tabs = herdr
+            .painter()
+            .tabs()
+            .expect("the answer is the shape a live herdr gave");
+        assert_eq!(
+            tabs,
+            vec![
+                ("w1:t1".to_string(), "review".to_string()),
+                ("w1:t2".to_string(), String::new()),
+                ("w2:t1".to_string(), String::new()),
+            ],
+            "an unnamed tab is the empty label, and an absent one is too"
+        );
+        assert_eq!(herdr.argv(), vec!["tab", "list"]);
+    }
+
+    #[test]
+    fn an_answer_that_is_not_that_shape_is_a_refusal_naming_what_could_not_be_read() {
+        // The envelope without its `result`: the parse fails, and a failed
+        // parse is a refusal the caller records rather than a panic.
+        let herdr = fake_herdr("shape", r#"{"id": 7, "tabs": []}"#, 0);
+        match herdr.painter().tabs() {
+            Err(PaintError::Rejected(why)) => assert!(
+                why.contains("herdr tab list"),
+                "the refusal names the call: {why:?}"
+            ),
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_zero_exit_from_tab_list_is_a_refusal_carrying_what_herdr_said() {
+        let herdr = fake_herdr("refused", r#"{"error": {"code": "no_such_workspace"}}"#, 1);
+        match herdr.painter().tabs() {
+            Err(PaintError::Rejected(why)) => assert!(
+                why.contains("no_such_workspace"),
+                "what herdr said is what is carried: {why:?}"
+            ),
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_herdr_that_cannot_be_started_is_not_found_and_names_the_path() {
+        let painter = HerdrPainter::with_binary(crate::daemon::tests_support::MISSING_HERDR);
+        for outcome in [
+            painter.tabs().map(|_| ()),
+            painter.rename("w1:t1", "1"),
+            painter.token("w1:p1", "🎙️ REC 0:00", 1_800),
+        ] {
+            match outcome {
+                Err(PaintError::NotFound { binary, path }) => {
+                    assert_eq!(binary, crate::daemon::tests_support::MISSING_HERDR);
+                    assert_eq!(path, std::env::var("PATH").unwrap_or_default());
+                }
+                other => panic!("expected NotFound, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_real_painter_runs_rename_and_report_metadata_with_their_own_arguments() {
+        let herdr = fake_herdr("args", "", 0);
+        herdr
+            .painter()
+            .rename("w1:t1", "1 🎙️🪄 FIX")
+            .expect("the script always succeeds");
+        assert_eq!(
+            herdr.argv(),
+            vec!["tab", "rename", "w1:t1", "1 🎙️🪄 FIX"],
+            "rename must not be wired to some other subcommand"
+        );
+        herdr
+            .painter()
+            .token("w1:p1", "🎙️🔴 REC 0:05", 1_800)
+            .expect("the script always succeeds");
+        assert_eq!(
+            herdr.argv(),
+            vec![
+                "pane",
+                "report-metadata",
+                "w1:p1",
+                "--source",
+                "haurylau.voice",
+                "--token",
+                "voice=🎙️🔴 REC 0:05",
+                "--ttl-ms",
+                "1800",
+            ]
+        );
+    }
+
     use super::tests_support::{Paint, RecordingPainter};
     use crate::config::Ui;
     use crate::daemon::tests_support::{runtime_with_clocks, RecordingJournal, TestJournal};
