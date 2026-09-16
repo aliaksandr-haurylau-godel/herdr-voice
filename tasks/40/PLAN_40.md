@@ -320,9 +320,17 @@ pub trait Painter: Send + Sync {
 a not-found carrying the binary and the `PATH`, with the same wording about
 `HERDR_BIN_PATH` (`src/delivery.rs:19-24`).
 
-`tabs()` parses the JSON `herdr tab list` returns — `result.tabs[]`, each with
-`tab_id` and `label` — with `serde_json`, which is already a dependency. A tab
-whose label is absent counts as the empty label.
+`tabs()` parses the JSON `herdr tab list` returns with `serde_json`, which is
+already a dependency.
+
+**The shape, verified against a live herdr on 2026-09-16** rather than assumed:
+the answer is `{"id": ..., "result": {"type": ..., "tabs": [...]}}`, and each tab
+carries `tab_id`, `label`, `number`, `workspace_id`, `focused`, `pane_count` and
+`agent_status`. Across fifty tabs in sixteen workspaces, `label` was present on
+every one and was always a string — an unnamed tab reports the empty string
+rather than omitting the field. Parse defensively anyway: a tab whose label is
+absent or not a string counts as the empty label, because a missing field must
+not lose the sweep the rest of the list.
 
 **`RecordingPainter` in full**, because Tasks 5 and 6 lean on all of it. It is
 `Clone` and shares everything through one inner `Arc<Mutex<Inner>>`, the way
