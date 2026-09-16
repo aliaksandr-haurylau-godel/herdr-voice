@@ -17,6 +17,11 @@ pub struct Hold {
     pub target: String,
     pub cwd: Option<String>,
     pub agent: Option<String>,
+    /// The tab that pane sits in, if herdr named one. Pinned at the same moment
+    /// as `target` and for the same reason: the indicator decorates the tab the
+    /// take began in, not whichever one the focus has reached by the time it
+    /// ends.
+    pub tab: Option<String>,
     pub began: Stamp,
     pub last_poke: Stamp,
     /// How many repeats arrived. For the journal only.
@@ -286,6 +291,7 @@ mod tests {
             target: "w1:p1".to_string(),
             cwd: None,
             agent: None,
+            tab: None,
             began,
             last_poke,
             pokes: 2,

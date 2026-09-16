@@ -46,6 +46,40 @@ pub fn needs_target_pane(command: &str) -> bool {
 /// run for `cancel` and for `doctor`, which is where somebody finds out what to fix.
 pub type Recognition = Result<Box<dyn Engine + Send + Sync>, String>;
 
+/// What this daemon's take is doing, for display and for nothing else.
+///
+/// Written by the take path at every stage it enters, read by the drawing
+/// thread. Nothing decides anything from it, so a stale or missed update costs
+/// a wrong label for one interval and never a wrong take
+/// (`tasks/40/DESIGN_40.md`, section 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Activity {
+    /// No take of this daemon's is running.
+    Idle,
+    /// A recording is open. `since` is stamped from `Runtime.clock`, so elapsed
+    /// time is measured against that clock and no other.
+    Recording {
+        target: String,
+        tab: Option<String>,
+        since: crate::ptt::Stamp,
+    },
+    /// The recording is over and the take is in the pipeline.
+    Working {
+        target: String,
+        tab: Option<String>,
+        stage: Stage,
+    },
+}
+
+/// The two pipeline stages worth displaying. Bias assembly and delivery are
+/// not stages here: one takes fractions of a second, and the other announces
+/// itself by the text appearing (`tasks/40/DESIGN_40.md`, section 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Transcribing,
+    Fixing,
+}
+
 /// Everything resolved once, at daemon start, and needed everywhere a take can
 /// finish.
 pub struct Runtime {
@@ -91,6 +125,21 @@ pub struct Runtime {
     pub ptt: crate::ptt::Settings,
     /// Behind an `Arc` because the watcher thread holds it too.
     pub clock: std::sync::Arc<dyn crate::ptt::Clock>,
+    /// What the take path is doing, for the drawing thread to read. Display
+    /// only: nothing in the take path reads it back.
+    pub activity: std::sync::Mutex<Activity>,
+    /// `[ui]`, read once with the rest of the configuration. The drawing thread
+    /// reads all three of its indicator keys from here.
+    ///
+    /// `toasts` therefore exists in two places, here and on
+    /// `delivery_settings`, which is where delivery reads it today. The
+    /// duplication is deliberate and bounded: delivery goes on reading what it
+    /// already reads, and unifying the two belongs to whoever next touches
+    /// `delivery::Settings`.
+    // Nothing reads it yet: the drawing thread that does arrives with the
+    // drawing loop, which removes this line.
+    #[allow(dead_code)]
+    pub ui: crate::config::Ui,
 }
 
 /// The two context fields `Runtime` holds, resolved from the loaded
@@ -158,6 +207,7 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
                             pane,
                             invocation.focused_pane_cwd.as_deref(),
                             invocation.focused_pane_agent.as_deref(),
+                            invocation.tab_id.as_deref(),
                         ),
                         Control::Continue,
                     ),
@@ -168,6 +218,7 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
                             pane,
                             invocation.focused_pane_cwd.as_deref(),
                             invocation.focused_pane_agent.as_deref(),
+                            invocation.tab_id.as_deref(),
                         ),
                         Control::Continue,
                     ),
@@ -200,6 +251,7 @@ fn dictate(
     pane: &str,
     cwd: Option<&str>,
     agent: Option<&str>,
+    tab: Option<&str>,
 ) -> Reply {
     // A hold is not ended by the toggle. An action that ends a hold at once is
     // issue #55; doing it here would be that feature under another name.
@@ -227,13 +279,36 @@ fn dictate(
             ))
         }
     }
-    match recorder.start(pane, cwd, agent) {
-        Started::Began => Reply::Ok(format!("recording for {pane}")),
+    match recorder.start(pane, cwd, agent, tab) {
+        Started::Began => {
+            publish(
+                runtime,
+                Activity::Recording {
+                    target: pane.to_string(),
+                    tab: tab.map(|t| t.to_string()),
+                    since: runtime.clock.now(),
+                },
+            );
+            Reply::Ok(format!("recording for {pane}"))
+        }
         Started::CouldNotStart(why) => Reply::Error(why),
         Started::PreviousFailure(why) => Reply::Error(why),
         Started::AlreadyRunning => match recorder.stop() {
-            Err(why) => Reply::Error(why.to_string()),
+            Err(why) => {
+                // The take is over, however badly. Nothing else will clear the
+                // Recording published when it began.
+                publish(runtime, Activity::Idle);
+                Reply::Error(why.to_string())
+            }
             Ok(take) => {
+                publish(
+                    runtime,
+                    Activity::Working {
+                        target: take.target.clone(),
+                        tab: take.tab.clone(),
+                        stage: Stage::Transcribing,
+                    },
+                );
                 // Assembled here, where the take has just finished and
                 // recognition is about to run on it. The collected string is
                 // reported on without being written down
@@ -250,6 +325,18 @@ fn dictate(
             }
         },
     }
+}
+
+/// The one way the take path says what it is doing. A poisoned lock is
+/// recovered rather than given up on, the same way `hold_of` recovers one: this
+/// is display state, and refusing to publish it would strand a decoration on a
+/// tab for the rest of the daemon's life.
+fn publish(runtime: &Runtime, activity: Activity) {
+    let mut held = runtime
+        .activity
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *held = activity;
 }
 
 /// Move the hold's stamp forward, if there is one, and say which pane it
@@ -317,6 +404,7 @@ fn ptt(
     pane: &str,
     cwd: Option<&str>,
     agent: Option<&str>,
+    tab: Option<&str>,
 ) -> Reply {
     let now = runtime.clock.now();
     {
@@ -346,6 +434,7 @@ fn ptt(
                     target: pane.to_string(),
                     cwd: cwd.map(|c| c.to_string()),
                     agent: agent.map(|a| a.to_string()),
+                    tab: tab.map(|t| t.to_string()),
                     began: now,
                     last_poke: now,
                     pokes: 1,
@@ -353,7 +442,7 @@ fn ptt(
             }
         }
     }
-    match recorder.start(pane, cwd, agent) {
+    match recorder.start(pane, cwd, agent, tab) {
         Started::Began => {
             {
                 let mut state = hold_of(runtime);
@@ -368,6 +457,14 @@ fn ptt(
                     other => other,
                 };
             }
+            publish(
+                runtime,
+                Activity::Recording {
+                    target: pane.to_string(),
+                    tab: tab.map(|t| t.to_string()),
+                    since: now,
+                },
+            );
             runtime.clock.wake();
             Reply::Ok(format!("holding for {pane}"))
         }
@@ -453,6 +550,9 @@ fn finish_on_shutdown(recorder: &Recorder, runtime: &Runtime) {
     let Some(hold) = take_hold(runtime) else {
         return;
     };
+    // Abandoned is one of the ways a take ends, and the drawing thread is
+    // joined after this: its last look must not find a take still running.
+    publish(runtime, Activity::Idle);
     match recorder.stop() {
         Ok(take) => runtime.journal.write(&kept_on_shutdown_line(
             &hold.target,
@@ -521,6 +621,14 @@ fn finish_ending(runtime: &Runtime) {
 fn end_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold) {
     match recorder.stop() {
         Ok(take) => {
+            publish(
+                runtime,
+                Activity::Working {
+                    target: take.target.clone(),
+                    tab: take.tab.clone(),
+                    stage: Stage::Transcribing,
+                },
+            );
             let collected = take_bias(
                 runtime,
                 &take.target,
@@ -537,7 +645,12 @@ fn end_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold) {
                 (Reply::Ok(_), Reported::No) => {}
             }
         }
-        Err(why) => report_failure(runtime, &hold.target, &why.to_string()),
+        Err(why) => {
+            // No take to run through the pipeline, so nothing downstream will
+            // publish the end of this one.
+            publish(runtime, Activity::Idle);
+            report_failure(runtime, &hold.target, &why.to_string());
+        }
     }
 }
 
@@ -547,6 +660,9 @@ fn end_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold) {
 /// itself — a lost device, or a level under the floor — it removes the file
 /// before returning the error.
 fn discard_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold, held_ms: u64) {
+    // A tap is a take that ended; the indicator has to stop saying otherwise
+    // whichever way the recorder answers.
+    publish(runtime, Activity::Idle);
     match recorder.stop() {
         Ok(take) => {
             let _ = std::fs::remove_file(&take.path);
@@ -737,6 +853,20 @@ enum Reported {
 /// client prints the reply; the watcher reads it, because a hold has nobody
 /// waiting for a reply at all.
 fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> (Reply, Reported) {
+    let outcome = transcribe_take(runtime, take, bias);
+    // Every way out of the pipeline is a take that ended, the two that give up
+    // before delivery included. Published here rather than at each return so
+    // that a path added later cannot forget it: a take left saying TRANSCR is a
+    // token renewed forever and a tab decorated forever.
+    publish(runtime, Activity::Idle);
+    outcome
+}
+
+fn transcribe_take(
+    runtime: &Runtime,
+    take: &crate::capture::Take,
+    bias: &str,
+) -> (Reply, Reported) {
     let engine = match &runtime.recognition {
         Ok(engine) => engine,
         // The take is on disk and named, so nothing is lost by the engine being
@@ -769,6 +899,14 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> (Re
     // leave the take on the reply path below unaffected either way; only a
     // configured engine that is unavailable, or one that fails, ever calls
     // `tell_once` (`tasks/36/DESIGN_36.md`, section 2).
+    publish(
+        runtime,
+        Activity::Working {
+            target: take.target.clone(),
+            tab: take.tab.clone(),
+            stage: Stage::Fixing,
+        },
+    );
     let text = match &runtime.rewrite {
         crate::rewrite::Resolution::Off => text,
         crate::rewrite::Resolution::Unavailable(why) => {
@@ -1063,6 +1201,8 @@ pub fn start() -> Result<Outcome, TransportError> {
             min_hold_ms: loaded.config.ptt.min_hold_ms,
         },
         clock: std::sync::Arc::new(crate::ptt::SystemClock::default()),
+        activity: std::sync::Mutex::new(Activity::Idle),
+        ui: loaded.config.ui.clone(),
     };
     serve(listener, address, Arc::new(recorder), Arc::new(runtime));
     Ok(Outcome::Served)
@@ -1191,6 +1331,8 @@ mod tests {
                 min_hold_ms: 300,
             },
             clock: std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::ptt::Clock>,
+            activity: std::sync::Mutex::new(Activity::Idle),
+            ui: crate::config::Ui::default(),
         };
         (runtime, clock)
     }
@@ -1329,6 +1471,8 @@ mod tests {
                 min_hold_ms: 300,
             },
             clock: std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::ptt::Clock>,
+            activity: std::sync::Mutex::new(Activity::Idle),
+            ui: crate::config::Ui::default(),
         };
         (runtime, clock)
     }
@@ -1469,6 +1613,8 @@ mod tests {
             },
             // This test never holds a key; the real clock is the plain choice.
             clock: std::sync::Arc::new(crate::ptt::SystemClock::default()),
+            activity: std::sync::Mutex::new(Activity::Idle),
+            ui: crate::config::Ui::default(),
         };
         let request = dictate_request();
         answer(&request, &recorder, &runtime);
@@ -1518,6 +1664,7 @@ mod tests {
             target: "w1\n:p2".to_string(),
             agent: None,
             cwd: None,
+            tab: None,
         };
         let fake = crate::delivery::tests_support::FakeDeliverer::failing(
             crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
@@ -3375,5 +3522,68 @@ mod tests {
             "a repeat took {each:?}; twelve a second needs one every 83 ms"
         );
         eprintln!("repeat served in {each:?}");
+    }
+
+    #[test]
+    fn a_hold_publishes_recording_with_the_pane_and_the_tab_it_was_pinned_to() {
+        let (runtime, _clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("activity-recording");
+        answer(
+            &request("ptt", br#"{"focused_pane_id":"w1:p1","tab_id":"w1:t1"}"#),
+            &recorder,
+            &runtime,
+        );
+        let activity = runtime.activity.lock().unwrap();
+        match &*activity {
+            Activity::Recording { target, tab, .. } => {
+                assert_eq!(target, "w1:p1");
+                assert_eq!(tab.as_deref(), Some("w1:t1"));
+            }
+            other => panic!("expected Recording, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_toggle_take_publishes_the_same_states_as_a_hold() {
+        // dictate's first half publishes Recording; its second half runs the
+        // same pipeline, so the stages come from the same code.
+        let (runtime, _clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("activity-toggle");
+        let request = request(
+            "dictate",
+            br#"{"focused_pane_id":"w1:p2","tab_id":"w1:t2"}"#,
+        );
+        answer(&request, &recorder, &runtime);
+        assert!(matches!(
+            &*runtime.activity.lock().unwrap(),
+            Activity::Recording { .. }
+        ));
+        answer(&request, &recorder, &runtime);
+        assert!(
+            matches!(&*runtime.activity.lock().unwrap(), Activity::Idle),
+            "a finished take publishes Idle, or the token never lapses"
+        );
+    }
+
+    #[test]
+    fn a_take_that_fails_still_ends_at_idle() {
+        // A recognition failure must not leave the indicator saying TRANSCR
+        // forever: the token would go on being renewed by a thread that thinks
+        // work is in progress, and the tab would stay decorated.
+        let mut runtime = fake_runtime_with_clock("unused").0;
+        runtime.recognition = Err("no engine".to_string());
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = tone_recorder("activity-failed");
+        let request = request(
+            "dictate",
+            br#"{"focused_pane_id":"w1:p3","tab_id":"w1:t3"}"#,
+        );
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        let activity = runtime.activity.lock().unwrap().clone();
+        assert!(
+            matches!(activity, Activity::Idle),
+            "a take that failed is still a take that ended: {activity:?}"
+        );
     }
 }
