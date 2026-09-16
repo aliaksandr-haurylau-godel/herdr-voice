@@ -133,10 +133,25 @@ impl Default for Rewrite {
 #[serde(default)]
 pub struct Ui {
     pub toasts: bool,
+    /// The token on the pane's row in the sidebar.
+    pub sidebar_token: bool,
+    /// The suffix on the tab's label, which paints the tab bar and the
+    /// sidebar's tab row at once.
+    pub tab_indicator: bool,
+    /// How often the token is rewritten, which is also how fast it blinks. The
+    /// token's time to live is three times this and is not configurable, so the
+    /// two cannot be set into a combination that makes the token lapse between
+    /// renewals.
+    pub blink_ms: u64,
 }
 impl Default for Ui {
     fn default() -> Self {
-        Ui { toasts: true }
+        Ui {
+            toasts: true,
+            sidebar_token: true,
+            tab_indicator: true,
+            blink_ms: 600,
+        }
     }
 }
 
@@ -568,5 +583,29 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.ptt.release_ms, 1000);
         assert_eq!(config.ptt.min_hold_ms, 300);
+    }
+
+    #[test]
+    fn the_indicator_keys_have_defaults_and_are_read() {
+        let directory = scratch("indicator");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[ui]\nblink_ms = 250\ntab_indicator = false\n",
+        )
+        .unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(loaded.config.ui.blink_ms, 250);
+        assert!(!loaded.config.ui.tab_indicator);
+        // The keys the file did not name keep their defaults.
+        assert!(loaded.config.ui.sidebar_token);
+        assert!(loaded.config.ui.toasts);
+    }
+
+    #[test]
+    fn the_indicator_defaults_are_the_documented_ones() {
+        let ui = Ui::default();
+        assert!(ui.sidebar_token);
+        assert!(ui.tab_indicator);
+        assert_eq!(ui.blink_ms, 600);
     }
 }
