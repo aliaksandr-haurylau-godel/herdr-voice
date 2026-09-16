@@ -22,6 +22,7 @@ mod doctor;
 /// and a slow recogniser.
 #[cfg(test)]
 mod gate;
+mod indicator;
 mod proto;
 mod ptt;
 mod rewrite;
