@@ -136,9 +136,6 @@ pub struct Runtime {
     /// duplication is deliberate and bounded: delivery goes on reading what it
     /// already reads, and unifying the two belongs to whoever next touches
     /// `delivery::Settings`.
-    // Nothing reads it yet: the drawing thread that does arrives with the
-    // drawing loop, which removes this line.
-    #[allow(dead_code)]
     pub ui: crate::config::Ui,
 }
 
@@ -1221,6 +1218,19 @@ fn serve(
         let stop = Arc::clone(&stop);
         thread::spawn(move || watch(recorder, runtime, stop))
     };
+    // The drawing thread waits on a clock of its own. `Clock`'s contract
+    // consumes a wake with the return it causes, so two waiters on one clock
+    // steal each other's wakes — and the hold's start and this shutdown both
+    // depend on a wake reaching the watcher.
+    let drawing_clock: Arc<dyn crate::ptt::Clock> = Arc::new(crate::ptt::SystemClock::default());
+    let drawer = {
+        let painter: Arc<dyn crate::indicator::Painter> =
+            Arc::new(crate::indicator::HerdrPainter::new());
+        let runtime = Arc::clone(&runtime);
+        let clock = Arc::clone(&drawing_clock);
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || crate::indicator::draw(painter, runtime, clock, stop))
+    };
     loop {
         let connection = match listener.accept() {
             Ok(connection) => connection,
@@ -1248,6 +1258,13 @@ fn serve(
     runtime.clock.wake();
     if let Err(e) = watcher.join() {
         eprintln!("the watcher thread ended badly: {e:?}");
+    }
+    // Woken and joined for the same reason, and after the watcher: a thread
+    // that could still draw once the daemon had decided to stop would leave a
+    // decoration behind it.
+    drawing_clock.wake();
+    if let Err(e) = drawer.join() {
+        eprintln!("the drawing thread ended badly: {e:?}");
     }
 }
 
@@ -1281,7 +1298,73 @@ fn serve_one(
 }
 
 #[cfg(test)]
+pub mod tests_support {
+    use super::*;
+
+    /// A program that is certainly not there, so `bias::pane::read` misses
+    /// without a live herdr — the same fixture `bias`'s own tests use.
+    pub const MISSING_HERDR: &str = "/definitely/not/a/real/herdr-binary";
+
+    /// Records every line written, in order.
+    #[derive(Default)]
+    pub struct RecordingJournal(pub std::sync::Mutex<Vec<String>>);
+    impl Journal for RecordingJournal {
+        fn write(&self, line: &str) {
+            self.0.lock().unwrap().push(line.to_string());
+        }
+    }
+
+    /// Lets a Runtime own a Journal while the test keeps its own handle to read
+    /// what was written — the same shape FakeDeliverer::clone() gives.
+    pub struct TestJournal(pub std::sync::Arc<RecordingJournal>);
+    impl Journal for TestJournal {
+        fn write(&self, line: &str) {
+            self.0.write(line);
+        }
+    }
+
+    /// The runtime the drawing tests need: `activity` at `Idle`, the given
+    /// `[ui]`, and the take's clock as `runtime.clock`.
+    ///
+    /// The drawing thread waits on a clock of its own, which the caller builds
+    /// separately — the two count from different origins, and this one is the
+    /// one elapsed time is measured against.
+    pub fn runtime_with_clocks(
+        take_clock: &std::sync::Arc<crate::ptt::tests_support::TestClock>,
+        ui: crate::config::Ui,
+    ) -> Runtime {
+        Runtime {
+            recognition: Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+                "a transcript".to_string(),
+            )))),
+            bias_source: Ok(bias::Source::Auto),
+            transcript_root: None,
+            context: crate::config::Context::default(),
+            herdr_binary: MISSING_HERDR.to_string(),
+            deliverer: Box::new(crate::delivery::tests_support::FakeDeliverer::ok()),
+            delivery_settings: crate::delivery::Settings {
+                submit: false,
+                toasts: false,
+            },
+            journal: Box::new(StderrJournal),
+            rewrite: crate::rewrite::Resolution::Off,
+            skip_if_plain: true,
+            told: std::sync::atomic::AtomicBool::new(false),
+            hold: std::sync::Mutex::new(crate::ptt::HoldState::Idle),
+            ptt: crate::ptt::Settings {
+                release_ms: 1000,
+                min_hold_ms: 300,
+            },
+            clock: std::sync::Arc::clone(take_clock) as std::sync::Arc<dyn crate::ptt::Clock>,
+            activity: std::sync::Mutex::new(Activity::Idle),
+            ui,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::tests_support::{RecordingJournal, TestJournal, MISSING_HERDR};
     use super::*;
 
     /// A recorder that hears one quiet moment and stops. Enough for the dispatch
@@ -1686,23 +1769,6 @@ mod tests {
         assert!(text.contains("/tmp/oddly named.wav"), "got {text:?}");
     }
 
-    /// Records every line written, in order.
-    #[derive(Default)]
-    struct RecordingJournal(std::sync::Mutex<Vec<String>>);
-    impl Journal for RecordingJournal {
-        fn write(&self, line: &str) {
-            self.0.lock().unwrap().push(line.to_string());
-        }
-    }
-    /// Lets a Runtime own a Journal while the test keeps its own handle to read
-    /// what was written — the same shape FakeDeliverer::clone() gives above.
-    struct TestJournal(std::sync::Arc<RecordingJournal>);
-    impl Journal for TestJournal {
-        fn write(&self, line: &str) {
-            self.0.write(line);
-        }
-    }
-
     #[test]
     fn the_delivering_line_precedes_the_failure_line_and_names_the_reason() {
         let recorder = tone_recorder("journal-order");
@@ -2039,10 +2105,6 @@ mod tests {
             )]
         );
     }
-
-    /// A program that is certainly not there, so `bias::pane::read` misses
-    /// without a live herdr — the same fixture `bias`'s own tests use.
-    const MISSING_HERDR: &str = "/definitely/not/a/real/herdr-binary";
 
     fn bias_scratch(tag: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();

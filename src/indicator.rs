@@ -245,6 +245,261 @@ impl Painter for HerdrPainter {
     }
 }
 
+/// How many renewal intervals a token outlives. Three gives an ordinary
+/// scheduling delay room to happen without the token lapsing between renewals,
+/// and it is not configurable, so no pair of settings can make it flicker.
+const TTL_INTERVALS: u64 = 3;
+
+/// The drawing thread: it wakes on the renewal interval, reads what the take
+/// path published, and paints.
+///
+/// It never writes `Activity` and never touches the recorder, which is what
+/// keeps `herdr` off the keypress path. Everything it remembers — what it
+/// decorated, what that label said before, what it last wrote there, and
+/// whether a paint has already failed for this take — is local to this
+/// function.
+///
+/// `clock` is its own, not the daemon's: `Clock`'s contract consumes a wake
+/// with the return it causes, so two waiters on one clock steal each other's
+/// wakes, and both the start of a hold and the daemon's shutdown depend on a
+/// wake reaching the watcher. Elapsed time is measured with `runtime.clock`
+/// instead, because that is the clock `since` was stamped by, and the two count
+/// from different origins.
+pub fn draw(
+    painter: std::sync::Arc<dyn Painter>,
+    runtime: std::sync::Arc<crate::daemon::Runtime>,
+    clock: std::sync::Arc<dyn crate::ptt::Clock>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    // A configured zero would otherwise be a loop with no wait in it.
+    let interval = runtime.ui.blink_ms.max(1);
+    let mut drawn = Drawn::default();
+    // One interval after the clock's own origin, not after whenever this thread
+    // happened to be scheduled. `Stamp` counts from that origin, and reading it
+    // here instead would make the first deadline depend on how long the spawn
+    // took — which is a tick silently skipped when something moved the clock
+    // while this thread was still starting.
+    let mut next = interval;
+    loop {
+        clock.wait_until(next);
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            // The daemon is going away. A decoration it made must not outlive
+            // it, whether or not the take ever published `Idle`.
+            drawn.finish(painter.as_ref(), &runtime);
+            return;
+        }
+        // The next deadline is settled before anything is painted, and is
+        // carried forward rather than re-read from the clock afterwards: a
+        // caller drives this thread by moving the clock and then waiting for a
+        // paint, so a deadline chosen after the paint could be chosen from a
+        // time the caller had already moved past, and the next wait would never
+        // end.
+        next = next.max(clock.now()).saturating_add(interval);
+        drawn.tick(painter.as_ref(), &runtime, interval);
+    }
+}
+
+/// The tab this thread decorated, and what it needs to put it back.
+struct Decoration {
+    tab: String,
+    /// What the label said before this thread wrote anything into it. Read
+    /// once, on the first tick of the take: that is the only value that is
+    /// certainly the person's.
+    original: String,
+    /// What this thread last wrote there, or nothing when it has written
+    /// nothing yet. Both the "rename only when it would differ" rule and the
+    /// restore compare against this.
+    written: Option<String>,
+}
+
+/// What the drawing thread remembers between ticks.
+#[derive(Default)]
+struct Drawn {
+    decorated: Option<Decoration>,
+    /// Which form the next token takes. The tab never carries the blink form.
+    blink: bool,
+    /// A paint has already failed for this take and been recorded. Renewal
+    /// carries on: a token that stopped being renewed because one call failed
+    /// would say the take was over while it was still running, and the
+    /// indicator is the whole point. Recording once rather than once a tick is
+    /// what keeps a broken herdr from filling the journal.
+    reported: bool,
+}
+
+impl Drawn {
+    fn tick(&mut self, painter: &dyn Painter, runtime: &crate::daemon::Runtime, interval: u64) {
+        let activity = {
+            let held = runtime
+                .activity
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            held.clone()
+        };
+        let (target, tab, state) = match activity {
+            crate::daemon::Activity::Idle => {
+                self.finish(painter, runtime);
+                return;
+            }
+            crate::daemon::Activity::Recording { target, tab, since } => (
+                target,
+                tab,
+                State::Recording {
+                    // The take's clock, never this thread's: `since` was
+                    // stamped by that one, and subtracting across two origins
+                    // is arithmetic on two different time bases.
+                    elapsed_ms: runtime.clock.now().saturating_sub(since),
+                },
+            ),
+            crate::daemon::Activity::Working { target, tab, stage } => (
+                target,
+                tab,
+                match stage {
+                    crate::daemon::Stage::Transcribing => State::Transcribing,
+                    crate::daemon::Stage::Fixing => State::Fixing,
+                },
+            ),
+        };
+        // A take in a different tab than the one still decorated: that take is
+        // over, whether or not anything ever said so, and its tab goes back
+        // before this one is touched.
+        if self
+            .decorated
+            .as_ref()
+            .is_some_and(|held| Some(held.tab.as_str()) != tab.as_deref())
+        {
+            self.finish(painter, runtime);
+        }
+        if runtime.ui.sidebar_token {
+            let value = value(&state, self.blink);
+            let ttl = interval.saturating_mul(TTL_INTERVALS);
+            if let Err(why) = painter.token(&target, &value, ttl) {
+                self.report(runtime, &why);
+            }
+        }
+        // Flipped whether or not the token was written, so that switching the
+        // sidebar off does not also decide what the blink would have been.
+        self.blink = !self.blink;
+        if runtime.ui.tab_indicator {
+            if let Some(tab) = tab.as_deref() {
+                self.paint_tab(painter, runtime, tab, &state);
+            }
+        }
+    }
+
+    /// The tab carries the steady form, and is renamed only when that form
+    /// differs from the one last written. In `REC` that comes out as once a
+    /// second, because the clock is in the string; in the other two states as
+    /// once, on entering them.
+    fn paint_tab(
+        &mut self,
+        painter: &dyn Painter,
+        runtime: &crate::daemon::Runtime,
+        tab: &str,
+        state: &State,
+    ) {
+        if self.decorated.is_none() {
+            match painter.tabs() {
+                Ok(tabs) => {
+                    let original = tabs
+                        .iter()
+                        .find(|(id, _)| id == tab)
+                        .map(|(_, label)| label.clone())
+                        .unwrap_or_default();
+                    self.decorated = Some(Decoration {
+                        tab: tab.to_string(),
+                        original,
+                        written: None,
+                    });
+                }
+                Err(why) => {
+                    self.report(runtime, &why);
+                    return;
+                }
+            }
+        }
+        let Some(held) = self.decorated.as_ref() else {
+            return;
+        };
+        let steady = decorate(&held.original, &value(state, false));
+        if held.written.as_deref() == Some(steady.as_str()) {
+            return;
+        }
+        match painter.rename(tab, &steady) {
+            Ok(()) => {
+                if let Some(held) = self.decorated.as_mut() {
+                    held.written = Some(steady);
+                }
+            }
+            Err(why) => self.report(runtime, &why),
+        }
+    }
+
+    /// The take is over: put the tab back, and forget it.
+    ///
+    /// The label is read again and compared with what this thread last wrote
+    /// there. Equal means nothing else has touched it, so the original goes
+    /// back — an empty original included, which is a value to restore and not a
+    /// reason to skip. Different means somebody renamed the tab during the
+    /// take, so it is left alone and that is recorded.
+    ///
+    /// A paint having failed earlier does not stop this: a decoration already
+    /// made is exactly what a broken herdr would otherwise leave on a tab
+    /// forever.
+    fn finish(&mut self, painter: &dyn Painter, runtime: &crate::daemon::Runtime) {
+        self.reported = false;
+        self.blink = false;
+        let Some(held) = self.decorated.take() else {
+            return;
+        };
+        let Some(written) = held.written else {
+            return;
+        };
+        let listed = match painter.tabs() {
+            Ok(tabs) => tabs,
+            Err(why) => {
+                runtime.journal.write(&paint_failed_line(&why.to_string()));
+                return;
+            }
+        };
+        let now = listed
+            .iter()
+            .find(|(id, _)| *id == held.tab)
+            .map(|(_, label)| label.clone())
+            .unwrap_or_default();
+        if now != written {
+            runtime.journal.write(&renamed_elsewhere_line(&held.tab));
+            return;
+        }
+        if let Err(why) = painter.rename(&held.tab, &held.original) {
+            runtime.journal.write(&paint_failed_line(&why.to_string()));
+        }
+    }
+
+    /// The first failed paint of a take is recorded; the rest are not.
+    fn report(&mut self, runtime: &crate::daemon::Runtime, why: &PaintError) {
+        if self.reported {
+            return;
+        }
+        self.reported = true;
+        runtime.journal.write(&paint_failed_line(&why.to_string()));
+    }
+}
+
+fn paint_failed_line(why: &str) -> String {
+    format!(
+        "indicator: cannot draw ({}); the take itself is unaffected — check that herdr answers, \
+         or switch the indicator off with [ui] sidebar_token and tab_indicator",
+        why.replace('\n', " ")
+    )
+}
+
+fn renamed_elsewhere_line(tab: &str) -> String {
+    format!(
+        "indicator: tab {tab} was renamed while the take ran, so its label is left as it is \
+         rather than overwritten with what it said before"
+    )
+}
+
 #[cfg(test)]
 pub mod tests_support {
     use super::*;
@@ -416,6 +671,7 @@ pub mod tests_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ptt::Clock;
 
     #[test]
     fn the_three_states_read_as_the_owner_settled_them() {
@@ -528,5 +784,395 @@ mod tests {
                 tests_support::Paint::Rename("w1:t1".into(), "1 🎙️🔴 REC 0:00".into()),
             ]
         );
+    }
+
+    use super::tests_support::{Paint, RecordingPainter};
+    use crate::config::Ui;
+    use crate::daemon::tests_support::{runtime_with_clocks, RecordingJournal, TestJournal};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The drawing thread, started the way `serve` starts it, with everything a
+    /// test needs to drive it.
+    ///
+    /// Two clocks with two different jobs. Advancing `draw_clock` makes the
+    /// thread act; advancing `take_clock` makes time pass for the take. A test
+    /// that confuses them proves nothing.
+    struct Drawing {
+        painter: RecordingPainter,
+        runtime: std::sync::Arc<crate::daemon::Runtime>,
+        take_clock: std::sync::Arc<crate::ptt::tests_support::TestClock>,
+        draw_clock: std::sync::Arc<crate::ptt::tests_support::TestClock>,
+        stop: std::sync::Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drawing {
+        /// Everything defaults; the journal is the runtime's own.
+        fn start(painter: RecordingPainter) -> Drawing {
+            Drawing::build(painter, Ui::default(), None)
+        }
+
+        /// A given `[ui]`, for the test about the configuration keys.
+        fn with_ui(painter: RecordingPainter, ui: Ui) -> Drawing {
+            Drawing::build(painter, ui, None)
+        }
+
+        /// A journal the test can read, for the test about what is recorded.
+        fn with_journal(
+            painter: RecordingPainter,
+            journal: &std::sync::Arc<RecordingJournal>,
+        ) -> Drawing {
+            Drawing::build(painter, Ui::default(), Some(std::sync::Arc::clone(journal)))
+        }
+
+        fn build(
+            painter: RecordingPainter,
+            ui: Ui,
+            journal: Option<std::sync::Arc<RecordingJournal>>,
+        ) -> Drawing {
+            let take_clock = std::sync::Arc::new(crate::ptt::tests_support::TestClock::default());
+            let draw_clock = std::sync::Arc::new(crate::ptt::tests_support::TestClock::default());
+            let mut built = runtime_with_clocks(&take_clock, ui);
+            if let Some(journal) = journal {
+                built.journal = Box::new(TestJournal(journal));
+            }
+            let runtime = std::sync::Arc::new(built);
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let thread = {
+                let painter: std::sync::Arc<dyn Painter> = std::sync::Arc::new(painter.clone());
+                let runtime = std::sync::Arc::clone(&runtime);
+                let clock: std::sync::Arc<dyn crate::ptt::Clock> =
+                    std::sync::Arc::clone(&draw_clock) as _;
+                let stop = std::sync::Arc::clone(&stop);
+                std::thread::spawn(move || draw(painter, runtime, clock, stop))
+            };
+            // Wait for the thread to park before handing the harness back, so
+            // that a test's first action cannot land while it is still starting
+            // and so that `tick`'s before-and-after counts line up.
+            Drawing::settle(&draw_clock, 0);
+            Drawing {
+                painter,
+                runtime,
+                take_clock,
+                draw_clock,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        /// Spin until the thread has entered `wait_until` more than `after`
+        /// times, which is the moment it has finished the tick that woke it and
+        /// parked again. Bounded so a thread that never parks fails the test
+        /// rather than hanging the suite.
+        fn settle(clock: &std::sync::Arc<crate::ptt::tests_support::TestClock>, after: u64) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while clock.waits() <= after && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(
+                clock.waits() > after,
+                "the drawing thread did not finish a tick within the bound"
+            );
+        }
+
+        /// Advance the drawing clock by `times` intervals and wait until the
+        /// thread has actually acted on each and gone back to waiting, so no
+        /// test ever sleeps for a duration or races the thread it is driving.
+        ///
+        /// Waiting for the whole tick rather than for its first paint is what
+        /// lets a test change what the thread reads — a painter that starts
+        /// failing, a label somebody else renamed — without that change landing
+        /// halfway through a tick.
+        fn tick(&self, times: u64) {
+            for _ in 0..times {
+                let painted = self.painter.total_calls();
+                let parked = self.draw_clock.waits();
+                self.draw_clock.advance(self.runtime.ui.blink_ms);
+                Drawing::settle(&self.draw_clock, parked);
+                assert!(
+                    self.painter.total_calls() != painted,
+                    "the thread painted nothing on a tick, so the tick proved \
+                     nothing: {:?}",
+                    self.painter.calls()
+                );
+            }
+        }
+
+        fn set(&self, activity: crate::daemon::Activity) {
+            *self.runtime.activity.lock().unwrap() = activity;
+        }
+
+        fn stop(mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            self.draw_clock.wake();
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("the drawing thread ended badly");
+            }
+        }
+    }
+
+    fn recording(target: &str, tab: &str, since: u64) -> crate::daemon::Activity {
+        crate::daemon::Activity::Recording {
+            target: target.to_string(),
+            tab: Some(tab.to_string()),
+            since,
+        }
+    }
+
+    #[test]
+    fn the_token_is_renewed_every_tick_and_alternates() {
+        let d = Drawing::start(RecordingPainter::ok());
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(4);
+        let values: Vec<String> = d
+            .painter
+            .calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                Paint::Token(_, value, _) => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values.len(), 4, "one token per tick: {values:?}");
+        assert!(
+            values[0].contains('🔴') != values[1].contains('🔴'),
+            "it alternates: {values:?}"
+        );
+        assert!(
+            values[0].contains('🔴') == values[2].contains('🔴'),
+            "and alternates back: {values:?}"
+        );
+        for value in &values {
+            assert!(
+                value.starts_with(MARKER),
+                "every form carries the marker: {value:?}"
+            );
+        }
+        d.stop();
+    }
+
+    #[test]
+    fn the_token_carries_a_time_to_live_longer_than_the_interval() {
+        let d = Drawing::start(RecordingPainter::ok());
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(1);
+        match d.painter.calls().first() {
+            Some(Paint::Token(_, _, ttl)) => assert!(
+                *ttl > Ui::default().blink_ms,
+                "a token that lapses between renewals flickers: {ttl}"
+            ),
+            other => panic!("expected a token, got {other:?}"),
+        }
+        d.stop();
+    }
+
+    #[test]
+    fn the_tab_is_renamed_once_a_second_while_recording_and_not_on_a_blink() {
+        let d = Drawing::start(RecordingPainter::with_tabs(&[("w1:t1", "1")]));
+        d.set(recording("w1:p1", "w1:t1", 0));
+        // Two ticks inside the same second: one rename, not two.
+        d.tick(1);
+        d.take_clock.advance(300);
+        d.tick(1);
+        assert_eq!(
+            d.painter.renames().len(),
+            1,
+            "the blink must not rename: {:?}",
+            d.painter.renames()
+        );
+        // Past the second boundary: a second rename, carrying the new clock.
+        d.take_clock.advance(800);
+        d.tick(1);
+        let renames = d.painter.renames();
+        assert_eq!(renames.len(), 2, "{renames:?}");
+        assert!(
+            renames[1].1.ends_with("REC 0:01"),
+            "the clock moved: {:?}",
+            renames[1].1
+        );
+        assert!(
+            renames[1].1.starts_with("1 🎙️🔴"),
+            "steady form, and a suffix: {:?}",
+            renames[1].1
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn a_state_with_no_clock_renames_the_tab_once_and_then_leaves_it() {
+        let d = Drawing::start(RecordingPainter::with_tabs(&[("w1:t1", "1")]));
+        d.set(crate::daemon::Activity::Working {
+            target: "w1:p1".into(),
+            tab: Some("w1:t1".into()),
+            stage: crate::daemon::Stage::Transcribing,
+        });
+        d.tick(5);
+        let renames = d.painter.renames();
+        assert_eq!(renames.len(), 1, "nothing in TRANSCR changes: {renames:?}");
+        assert_eq!(renames[0].1, "1 🎙️📝 TRANSCR");
+        d.stop();
+    }
+
+    #[test]
+    fn the_restore_puts_the_original_back() {
+        let d = Drawing::start(RecordingPainter::with_tabs(&[("w1:t1", "1")]));
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(2);
+        d.set(crate::daemon::Activity::Idle);
+        d.tick(1);
+        assert_eq!(
+            d.painter.renames().last().map(|r| r.1.clone()),
+            Some("1".to_string()),
+            "the tab goes back to what it was: {:?}",
+            d.painter.renames()
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn a_tab_renamed_by_somebody_else_during_a_take_is_left_alone() {
+        let painter = RecordingPainter::with_tabs(&[("w1:t1", "1")]);
+        let d = Drawing::start(painter);
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(2);
+        // Somebody renames the tab themselves, to something that is not ours.
+        d.painter.set_label("w1:t1", "mine now");
+        d.set(crate::daemon::Activity::Idle);
+        d.tick(1);
+        assert!(
+            !d.painter.renames().iter().any(|r| r.1 == "1"),
+            "restoring over somebody's own rename is the defect: {:?}",
+            d.painter.renames()
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn an_empty_original_label_is_restored_as_empty() {
+        let d = Drawing::start(RecordingPainter::with_tabs(&[("w1:t1", "")]));
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(1);
+        assert_eq!(
+            d.painter.renames()[0].1,
+            "🎙️🔴 REC 0:00",
+            "no leading space"
+        );
+        d.set(crate::daemon::Activity::Idle);
+        d.tick(1);
+        assert_eq!(
+            d.painter.renames().last().map(|r| r.1.clone()),
+            Some(String::new()),
+            "empty is a value to restore, not a reason to skip: {:?}",
+            d.painter.renames()
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn a_failed_paint_is_recorded_once_and_does_not_fail_the_take() {
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let d = Drawing::with_journal(RecordingPainter::failing(), &journal);
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(5);
+        let lines = journal.0.lock().unwrap();
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("indicator")).count(),
+            1,
+            "once per take, not once per tick: {lines:?}"
+        );
+        drop(lines);
+        d.stop();
+    }
+
+    #[test]
+    fn a_failed_paint_does_not_disable_the_restore() {
+        // The paints fail only after the tab has been decorated, so there is a
+        // decoration to put back and a disabled painter to put it back with.
+        let painter = RecordingPainter::with_tabs(&[("w1:t1", "1")]);
+        let d = Drawing::start(painter);
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(1);
+        d.painter.start_failing();
+        d.tick(2);
+        d.painter.stop_failing();
+        d.set(crate::daemon::Activity::Idle);
+        d.tick(1);
+        assert_eq!(
+            d.painter.renames().last().map(|r| r.1.clone()),
+            Some("1".to_string()),
+            "a broken painter must not leave a tab decorated forever: {:?}",
+            d.painter.renames()
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn elapsed_comes_from_the_takes_clock_not_the_drawing_clock() {
+        let d = Drawing::start(RecordingPainter::ok());
+        d.set(recording("w1:p1", "w1:t1", 0));
+        // Five drawing ticks, no time passing for the take: the number must not move.
+        d.tick(5);
+        for call in d.painter.tokens() {
+            assert!(
+                call.contains("0:00"),
+                "the drawing clock must not be the elapsed clock: {call:?}"
+            );
+        }
+        // Time passes for the take, one more tick: now it moves.
+        d.take_clock.advance(7_000);
+        d.tick(1);
+        assert!(
+            d.painter.tokens().last().unwrap().contains("0:07"),
+            "and the take's clock must be: {:?}",
+            d.painter.tokens().last()
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn neither_half_is_painted_when_its_configuration_key_is_off() {
+        let d = Drawing::with_ui(
+            RecordingPainter::with_tabs(&[("w1:t1", "1")]),
+            Ui {
+                sidebar_token: false,
+                tab_indicator: true,
+                ..Ui::default()
+            },
+        );
+        d.set(recording("w1:p1", "w1:t1", 0));
+        // The take's clock moves between the ticks so that each of the three
+        // has a rename to make: with the token off, a tick whose label would
+        // not change paints nothing at all, and `tick` would then have nothing
+        // to wait for.
+        d.tick(1);
+        d.take_clock.advance(1_000);
+        d.tick(1);
+        d.take_clock.advance(1_000);
+        d.tick(1);
+        assert!(
+            d.painter.tokens().is_empty(),
+            "sidebar_token off: {:?}",
+            d.painter.tokens()
+        );
+        assert!(!d.painter.renames().is_empty(), "tab_indicator on");
+        d.stop();
+
+        let d = Drawing::with_ui(
+            RecordingPainter::with_tabs(&[("w1:t1", "1")]),
+            Ui {
+                sidebar_token: true,
+                tab_indicator: false,
+                ..Ui::default()
+            },
+        );
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(3);
+        assert!(!d.painter.tokens().is_empty(), "sidebar_token on");
+        assert!(
+            d.painter.renames().is_empty(),
+            "tab_indicator off: {:?}",
+            d.painter.renames()
+        );
+        d.stop();
     }
 }
