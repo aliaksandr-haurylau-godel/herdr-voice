@@ -9,10 +9,6 @@
 //! Every form begins with `MARKER`, which is what the start-up sweep cuts from
 //! when a previous daemon was killed with a tab still decorated.
 
-// Nothing outside this module's own tests calls any of it yet: the painter
-// arrives in Task 2 and the drawing loop in Task 5, which removes this line.
-#![allow(dead_code)]
-
 /// The glyph every value begins with, and the one the sweep looks for. Not
 /// something a person types into a tab name by accident — which matters,
 /// because the sweep renames every tab whose label contains it.
@@ -312,10 +308,33 @@ struct Decoration {
     written: Option<String>,
 }
 
+/// How far the start-up sweep has got.
+///
+/// The sweep takes this plugin's own suffix off any tab a daemon that was
+/// killed left decorated. It is the only recovery from that, so a failure is
+/// worth one more attempt — and exactly one, because a retry with no bound is a
+/// subprocess every interval for the life of a daemon whose herdr never answers.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+enum Sweep {
+    /// Not attempted yet: the daemon has only just started.
+    #[default]
+    Due,
+    /// Attempted, and it failed. One more attempt is owed.
+    Owed,
+    /// Nothing further to do: it succeeded, or its one retry is spent.
+    Settled,
+}
+
 /// What the drawing thread remembers between ticks.
 #[derive(Default)]
 struct Drawn {
     decorated: Option<Decoration>,
+    sweep: Sweep,
+    /// Some call to herdr has come back successfully since the daemon started.
+    /// The sweep's retry waits for this: without it, a daemon started where
+    /// herdr does not answer would spend its second attempt immediately and on
+    /// nothing.
+    answered: bool,
     /// Which form the next token takes. The tab never carries the blink form.
     blink: bool,
     /// A paint has already failed for this take and been recorded. Renewal
@@ -328,6 +347,13 @@ struct Drawn {
 
 impl Drawn {
     fn tick(&mut self, painter: &dyn Painter, runtime: &crate::daemon::Runtime, interval: u64) {
+        if self.sweep == Sweep::Due {
+            // Before this tick reads the activity or paints anything: whatever
+            // is on the tabs now was left by a previous daemon, because this
+            // one has decorated nothing yet. Nothing of its own can be stripped
+            // by mistake, however early in the daemon's life a take begins.
+            self.sweep_once(painter, runtime, false);
+        }
         let activity = {
             let held = runtime
                 .activity
@@ -338,6 +364,14 @@ impl Drawn {
         let (target, tab, state) = match activity {
             crate::daemon::Activity::Idle => {
                 self.finish(painter, runtime);
+                // Nothing is being recorded and, after the restore, nothing is
+                // decorated: the one tick a failed sweep may be retried on.
+                // During a take it would strip a decoration this thread had
+                // just written, and the restore would then find a label it did
+                // not write and leave the tab alone.
+                if self.sweep == Sweep::Owed && self.decorated.is_none() && self.answered {
+                    self.sweep_once(painter, runtime, true);
+                }
                 return;
             }
             crate::daemon::Activity::Recording { target, tab, since } => (
@@ -372,7 +406,7 @@ impl Drawn {
         if runtime.ui.sidebar_token {
             let value = value(&state, self.blink);
             let ttl = interval.saturating_mul(TTL_INTERVALS);
-            if let Err(why) = painter.token(&target, &value, ttl) {
+            if let Err(why) = self.answered(painter.token(&target, &value, ttl)) {
                 self.report(runtime, &why);
             }
         }
@@ -398,7 +432,7 @@ impl Drawn {
         state: &State,
     ) {
         if self.decorated.is_none() {
-            match painter.tabs() {
+            match self.answered(painter.tabs()) {
                 Ok(tabs) => {
                     let original = tabs
                         .iter()
@@ -424,7 +458,7 @@ impl Drawn {
         if held.written.as_deref() == Some(steady.as_str()) {
             return;
         }
-        match painter.rename(tab, &steady) {
+        match self.answered(painter.rename(tab, &steady)) {
             Ok(()) => {
                 if let Some(held) = self.decorated.as_mut() {
                     held.written = Some(steady);
@@ -454,7 +488,7 @@ impl Drawn {
         let Some(written) = held.written else {
             return;
         };
-        let listed = match painter.tabs() {
+        let listed = match self.answered(painter.tabs()) {
             Ok(tabs) => tabs,
             Err(why) => {
                 runtime.journal.write(&paint_failed_line(&why.to_string()));
@@ -470,9 +504,54 @@ impl Drawn {
             runtime.journal.write(&renamed_elsewhere_line(&held.tab));
             return;
         }
-        if let Err(why) = painter.rename(&held.tab, &held.original) {
+        if let Err(why) = self.answered(painter.rename(&held.tab, &held.original)) {
             runtime.journal.write(&paint_failed_line(&why.to_string()));
         }
+    }
+
+    /// Take the suffix off every tab that still carries the marker, and settle
+    /// what becomes of the attempt that is owed after this one.
+    ///
+    /// `retry` says which of the two attempts this is. It changes nothing about
+    /// the work, only what the journal says when the work fails: the first
+    /// attempt says another is coming, the second says none is.
+    fn sweep_once(&mut self, painter: &dyn Painter, runtime: &crate::daemon::Runtime, retry: bool) {
+        match self.sweep_tabs(painter) {
+            Ok(()) => self.sweep = Sweep::Settled,
+            Err(why) => {
+                runtime
+                    .journal
+                    .write(&sweep_failed_line(&why.to_string(), retry));
+                self.sweep = if retry { Sweep::Settled } else { Sweep::Owed };
+            }
+        }
+    }
+
+    /// One pass over every tab herdr knows about. A tab herdr refuses to rename
+    /// does not cost the rest of the list its sweep, so the pass runs to the
+    /// end and answers with the first refusal it met.
+    fn sweep_tabs(&mut self, painter: &dyn Painter) -> Result<(), PaintError> {
+        let mut refused = None;
+        for (tab, label) in self.answered(painter.tabs())? {
+            if !label.contains(MARKER) {
+                continue;
+            }
+            if let Err(why) = self.answered(painter.rename(&tab, &strip(&label))) {
+                refused.get_or_insert(why);
+            }
+        }
+        match refused {
+            None => Ok(()),
+            Some(why) => Err(why),
+        }
+    }
+
+    /// Pass a call's outcome through, noting whether herdr answered at all.
+    fn answered<T>(&mut self, outcome: Result<T, PaintError>) -> Result<T, PaintError> {
+        if outcome.is_ok() {
+            self.answered = true;
+        }
+        outcome
     }
 
     /// The first failed paint of a take is recorded; the rest are not.
@@ -489,6 +568,19 @@ fn paint_failed_line(why: &str) -> String {
     format!(
         "indicator: cannot draw ({}); the take itself is unaffected — check that herdr answers, \
          or switch the indicator off with [ui] sidebar_token and tab_indicator",
+        why.replace('\n', " ")
+    )
+}
+
+fn sweep_failed_line(why: &str, last: bool) -> String {
+    let next = if last {
+        "it will not be tried again, so a tab that still reads as though a take were running \
+         has to be renamed by hand or the daemon restarted"
+    } else {
+        "it will be tried once more, at the first moment nothing is being recorded"
+    };
+    format!(
+        "indicator: cannot take off what an earlier run left on the tab labels ({}); {next}",
         why.replace('\n', " ")
     )
 }
@@ -886,15 +978,25 @@ mod tests {
         fn tick(&self, times: u64) {
             for _ in 0..times {
                 let painted = self.painter.total_calls();
-                let parked = self.draw_clock.waits();
-                self.draw_clock.advance(self.runtime.ui.blink_ms);
-                Drawing::settle(&self.draw_clock, parked);
+                self.tick_quiet(1);
                 assert!(
                     self.painter.total_calls() != painted,
                     "the thread painted nothing on a tick, so the tick proved \
                      nothing: {:?}",
                     self.painter.calls()
                 );
+            }
+        }
+
+        /// The same, for the ticks on which the thread is meant to paint
+        /// nothing at all. An idle daemon whose sweep has already run touches
+        /// herdr on no tick, and the sweep's tests spend ticks there precisely
+        /// to prove that nothing happens on them.
+        fn tick_quiet(&self, times: u64) {
+            for _ in 0..times {
+                let parked = self.draw_clock.waits();
+                self.draw_clock.advance(self.runtime.ui.blink_ms);
+                Drawing::settle(&self.draw_clock, parked);
             }
         }
 
@@ -956,9 +1058,16 @@ mod tests {
         let d = Drawing::start(RecordingPainter::ok());
         d.set(recording("w1:p1", "w1:t1", 0));
         d.tick(1);
-        match d.painter.calls().first() {
+        // The first call of all is the start-up sweep's listing, so it is the
+        // first token that is looked for rather than the first call.
+        match d
+            .painter
+            .calls()
+            .into_iter()
+            .find(|call| matches!(call, Paint::Token(..)))
+        {
             Some(Paint::Token(_, _, ttl)) => assert!(
-                *ttl > Ui::default().blink_ms,
+                ttl > Ui::default().blink_ms,
                 "a token that lapses between renewals flickers: {ttl}"
             ),
             other => panic!("expected a token, got {other:?}"),
@@ -1076,7 +1185,7 @@ mod tests {
         d.tick(5);
         let lines = journal.0.lock().unwrap();
         assert_eq!(
-            lines.iter().filter(|l| l.contains("indicator")).count(),
+            lines.iter().filter(|l| l.contains("cannot draw")).count(),
             1,
             "once per take, not once per tick: {lines:?}"
         );
@@ -1171,6 +1280,143 @@ mod tests {
         assert!(
             d.painter.renames().is_empty(),
             "tab_indicator off: {:?}",
+            d.painter.renames()
+        );
+        d.stop();
+    }
+
+    /// Every label this thread wrote onto one tab, in order.
+    fn renames_of(painter: &RecordingPainter, tab: &str) -> Vec<String> {
+        painter
+            .renames()
+            .into_iter()
+            .filter(|(id, _)| id == tab)
+            .map(|(_, label)| label)
+            .collect()
+    }
+
+    #[test]
+    fn the_sweep_strips_what_a_previous_daemon_left() {
+        let d = Drawing::start(RecordingPainter::with_tabs(&[
+            ("w1:t1", "1 🎙️🔴 REC 0:12"),
+            ("w1:t2", "review 🎙️📝 TRANSCR"),
+            ("w1:t3", "🎙️🪄 FIX"),
+        ]));
+        d.tick(1);
+        let renames = d.painter.renames();
+        assert_eq!(renames.len(), 3, "every decorated tab: {renames:?}");
+        assert!(
+            renames.contains(&("w1:t1".to_string(), "1".to_string())),
+            "{renames:?}"
+        );
+        assert!(
+            renames.contains(&("w1:t2".to_string(), "review".to_string())),
+            "{renames:?}"
+        );
+        assert!(
+            renames.contains(&("w1:t3".to_string(), String::new())),
+            "{renames:?}"
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn the_sweep_leaves_tabs_nobody_decorated_alone() {
+        let d = Drawing::start(RecordingPainter::with_tabs(&[
+            ("w1:t1", "1"),
+            ("w1:t2", "[thing] name"),
+            ("w1:t3", ""),
+        ]));
+        d.tick(1);
+        assert!(
+            d.painter.renames().is_empty(),
+            "nothing to strip: {:?}",
+            d.painter.renames()
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn the_sweep_runs_with_the_tab_indicator_off() {
+        let d = Drawing::with_ui(
+            RecordingPainter::with_tabs(&[("w1:t1", "1 🎙️🔴 REC 0:12")]),
+            Ui {
+                tab_indicator: false,
+                ..Ui::default()
+            },
+        );
+        d.tick(1);
+        assert_eq!(
+            d.painter.renames(),
+            vec![("w1:t1".to_string(), "1".to_string())],
+            "switching the indicator off is when its leftovers go, not when they are frozen"
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn a_failed_sweep_is_retried_once_and_only_once() {
+        // The take runs in a tab of its own, so that every rename of `w1:t1` is
+        // the sweep's and none of them is the decoration's.
+        let painter = RecordingPainter::with_tabs(&[("w1:t1", "1 🎙️🔴 REC 0:12"), ("w1:t9", "9")]);
+        painter.fail_tabs();
+        let d = Drawing::start(painter);
+        d.tick(1);
+        assert_eq!(d.painter.tab_listings(), 1, "attempted at start");
+        assert!(renames_of(&d.painter, "w1:t1").is_empty(), "and it failed");
+        // No paint has succeeded yet, so no retry however many ticks pass. With
+        // nothing recording and nothing decorated there is also nothing else
+        // the thread could call, so the listing count is the sweep's alone.
+        d.tick_quiet(5);
+        assert_eq!(
+            d.painter.tab_listings(),
+            1,
+            "no retry without evidence herdr answers"
+        );
+        // A take paints successfully, then ends: now the one retry may run.
+        d.painter.stop_failing();
+        d.set(recording("w1:p9", "w1:t9", 0));
+        d.tick(2);
+        assert!(
+            renames_of(&d.painter, "w1:t1").is_empty(),
+            "not while the take runs"
+        );
+        d.set(crate::daemon::Activity::Idle);
+        d.tick(1);
+        assert_eq!(
+            renames_of(&d.painter, "w1:t1"),
+            vec!["1".to_string()],
+            "retried once: {:?}",
+            d.painter.renames()
+        );
+        d.tick_quiet(10);
+        assert_eq!(
+            renames_of(&d.painter, "w1:t1"),
+            vec!["1".to_string()],
+            "and only once, whatever happens after: {:?}",
+            d.painter.renames()
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn the_retry_never_runs_during_a_take() {
+        let painter = RecordingPainter::with_tabs(&[("w1:t1", "1")]);
+        painter.fail_tabs();
+        let d = Drawing::start(painter);
+        d.tick(1);
+        d.painter.stop_failing();
+        // A take is running and the thread holds a decoration: the retry must
+        // wait, or it strips the decoration it just wrote — and the restore
+        // would then find a label it did not write and leave the tab alone.
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(4);
+        assert!(
+            d.painter
+                .renames()
+                .iter()
+                .all(|(_, label)| label.contains(MARKER)),
+            "a sweep during a take strips its own fresh decoration: {:?}",
             d.painter.renames()
         );
         d.stop();
