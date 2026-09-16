@@ -218,16 +218,63 @@ worse than pressing it twice.
 
 ## 6. Indicators
 
-While recording, an indicator blinks in two places at once: the custom token on
-the agent's row in the sidebar, and the tab label. Two places because the sidebar
-can be collapsed, and then only the tab bar remains visible. The indicator carries
-elapsed time, so a stuck recording is distinguishable from a working one.
+While a take runs, three surfaces say what it is doing. Three because the
+sidebar can be collapsed, and then only the tab bar is left; two mechanisms,
+because one rename paints two of them.
 
-After release the blinking stops and the same two places show the current stage.
-When the run ends — successfully, with an error, or by cancellation — the tab
-label is restored and the token is cleared. Restoring on every exit path is a
-requirement, not a nicety: a renamed tab otherwise keeps a stale recording prefix
+| surface | painted by |
+|---|---|
+| the tab bar at the top | the tab's label |
+| the sidebar's tab row | the tab's label — the same rename paints both |
+| the sidebar's agent row | a token on the pane |
+
+There are three states, and their text is fixed:
+
+| state | steady form | blink form |
+|---|---|---|
+| recording | `🎙️🔴 REC 0:05` | `🎙️ REC 0:05` |
+| transcribing | `🎙️📝 TRANSCR` | `🎙️ TRANSCR` |
+| fixing | `🎙️🪄 FIX` | `🎙️ FIX` |
+
+The clock is minutes and seconds with the minutes uncapped, so a take nobody
+ended reads as `43:11` instead of reading as though it had just begun. The blink
+form is the steady form with its second glyph removed: the token alternates
+between the two forms on every renewal, and that alternation is the blink. The
+tab label always carries the steady form, because a tab bar that flashes a
+character twice a second is noise where nobody chose to look.
+
+A thread of its own does all the drawing. It wakes every `blink_ms`, reads what
+the take path published, and paints; nothing that runs herdr sits between the
+key and the recording. The token is written on every tick. The tab is renamed
+only when its steady form differs from the one last written there — once a
+second while a clock is running in it, once on entering a state that has none.
+
+**The token is never cleared.** It is written with a time to live of three
+renewals and stays alive only because it keeps being renewed, so when a take
+ends the thread stops renewing and the token is gone within 1.8 seconds at the
+default. A daemon that finishes, wedges or is killed leaves no token behind, and
+there is no exit path on which a clearing call could be missed.
+
+**The tab label is the half that has to be put back.** A rename has no time to
+live, so the thread reads the label before it decorates anything, keeps that
+value, and writes it back when the take ends. If the label is by then not what
+the thread last wrote, somebody renamed the tab during the take: it is left as
+it is, and that is recorded.
+
+A daemon that was killed puts nothing back, and the label would otherwise keep a
+recording prefix forever. The decoration is a suffix and every form begins with
+`🎙️`, so at start the next daemon lists every tab and cuts that marker, and
+everything after it, off any label that carries one. The start-up sweep runs
+whether or not the tab indicator is switched on: the key says that this plugin
+does not decorate, and it cannot mean that decorations it left earlier stay
 forever.
+
+A draw that fails — herdr absent, slow, or refusing — is recorded once per take,
+and drawing carries on being attempted; the take itself is untouched, and the
+restore at the end is attempted regardless. Giving up for the rest of the take
+would be worse than a missing indicator: the token lives by being renewed, so a
+thread that stopped renewing would let it lapse and the sidebar would say the
+take was over while the person was still speaking.
 
 Toasts announce completion and errors. A run journal and a preview step before
 insertion are available and off by default.
@@ -269,12 +316,10 @@ release_ms = 1000
 min_hold_ms = 300
 
 [ui]
-blink_ms = 600
-sidebar_token = true
-tab_indicator = true
+sidebar_token = true      # the token on the sidebar's agent row
+tab_indicator = true      # the suffix on the tab label
+blink_ms = 600            # the renewal interval, and so the blink rate
 toasts = true
-preview = false
-journal = false
 
 [delivery]
 submit = false
