@@ -186,6 +186,224 @@ pub fn decide(existing: &Existing) -> Decision {
     decision
 }
 
+use std::path::Path;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HerdrError {
+    /// herdr could not be started at all.
+    NotFound { binary: String, path: String },
+    /// herdr ran and refused. The string is what it said.
+    Rejected(String),
+}
+
+impl std::fmt::Display for HerdrError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HerdrError::Rejected(why) => write!(f, "{why}"),
+            HerdrError::NotFound { binary, path } => write!(
+                f,
+                "cannot run {binary:?}: it is not on the PATH this process has, which is \
+                 {path:?}. Set HERDR_BIN_PATH to herdr's location, or start herdr from a \
+                 shell where it is on the PATH"
+            ),
+        }
+    }
+}
+
+/// herdr's verdict on a configuration file. `ok` is the exit status — measured,
+/// not guessed: 0 with `config: ok`, 1 with `config: issues found`. `output` is
+/// what it printed, shown to the person verbatim and never parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    pub ok: bool,
+    pub output: String,
+}
+
+impl Check {
+    pub fn from_status(code: i32, output: String) -> Self {
+        Check {
+            ok: code == 0,
+            output,
+        }
+    }
+}
+
+pub fn open_pane_args() -> Vec<&'static str> {
+    vec![
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        PLUGIN_ID,
+        "--entrypoint",
+        "setup",
+    ]
+}
+
+/// `herdr config check` judges whatever `HERDR_CONFIG_PATH` names, so the file
+/// travels in the environment of the child rather than in its arguments.
+pub fn check_config_args(_path: &Path) -> Vec<&'static str> {
+    vec!["config", "check"]
+}
+
+pub trait Herdr {
+    fn open_pane(&self) -> Result<(), HerdrError>;
+    fn check_config(&self, path: &Path) -> Result<Check, HerdrError>;
+    fn notify(&self, title: &str, body: &str) -> Result<(), HerdrError>;
+}
+
+pub struct HerdrCli {
+    binary: String,
+}
+
+impl HerdrCli {
+    pub fn new() -> Self {
+        HerdrCli {
+            binary: crate::delivery::herdr_binary(),
+        }
+    }
+
+    fn not_found(&self) -> HerdrError {
+        HerdrError::NotFound {
+            binary: self.binary.clone(),
+            path: std::env::var("PATH").unwrap_or_default(),
+        }
+    }
+}
+
+impl Default for HerdrCli {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Herdr for HerdrCli {
+    fn open_pane(&self) -> Result<(), HerdrError> {
+        match std::process::Command::new(&self.binary)
+            .args(open_pane_args())
+            .output()
+        {
+            Err(_) => Err(self.not_found()),
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(HerdrError::Rejected(
+                String::from_utf8_lossy(if out.stdout.is_empty() {
+                    &out.stderr
+                } else {
+                    &out.stdout
+                })
+                .trim()
+                .to_string(),
+            )),
+        }
+    }
+
+    fn check_config(&self, path: &Path) -> Result<Check, HerdrError> {
+        match std::process::Command::new(&self.binary)
+            .args(check_config_args(path))
+            .env("HERDR_CONFIG_PATH", path)
+            .output()
+        {
+            Err(_) => Err(self.not_found()),
+            Ok(out) => {
+                let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+                text.push_str(&String::from_utf8_lossy(&out.stderr));
+                Ok(Check::from_status(
+                    out.status.code().unwrap_or(1),
+                    text.trim_end().to_string(),
+                ))
+            }
+        }
+    }
+
+    fn notify(&self, title: &str, body: &str) -> Result<(), HerdrError> {
+        match std::process::Command::new(&self.binary)
+            .args(crate::delivery::notify_args(title, body))
+            .output()
+        {
+            Err(_) => Err(self.not_found()),
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(HerdrError::Rejected(
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+pub mod tests_support {
+    use super::{Check, Herdr, HerdrError};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Call {
+        OpenPane,
+        CheckConfig(String),
+        Notify(String, String),
+    }
+
+    /// Records every call in order and answers with a fixed verdict, so the
+    /// argument lists and both exit statuses are asserted without a live herdr.
+    #[derive(Clone)]
+    pub struct FakeHerdr {
+        calls: Arc<Mutex<Vec<Call>>>,
+        verdicts: Arc<Mutex<Vec<Check>>>,
+    }
+
+    impl FakeHerdr {
+        /// Answers `config: ok` to every check.
+        pub fn clean() -> Self {
+            FakeHerdr {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                verdicts: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        /// Answers the given verdicts in order, then `config: ok` after them.
+        pub fn answering(verdicts: Vec<Check>) -> Self {
+            FakeHerdr {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                verdicts: Arc::new(Mutex::new(verdicts)),
+            }
+        }
+
+        pub fn calls(&self) -> Vec<Call> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Herdr for FakeHerdr {
+        fn open_pane(&self) -> Result<(), HerdrError> {
+            self.calls.lock().unwrap().push(Call::OpenPane);
+            Ok(())
+        }
+
+        fn check_config(&self, path: &Path) -> Result<Check, HerdrError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(Call::CheckConfig(path.display().to_string()));
+            let mut verdicts = self.verdicts.lock().unwrap();
+            if verdicts.is_empty() {
+                Ok(Check {
+                    ok: true,
+                    output: "config: ok".to_string(),
+                })
+            } else {
+                Ok(verdicts.remove(0))
+            }
+        }
+
+        fn notify(&self, title: &str, body: &str) -> Result<(), HerdrError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(Call::Notify(title.to_string(), body.to_string()));
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +441,51 @@ mod tests {
             .expect("the snippet this action prints must itself be valid TOML");
         let commands = parsed["keys"]["command"].as_array().unwrap();
         assert_eq!(commands.len(), 3);
+    }
+
+    #[test]
+    fn opening_the_pane_asks_herdr_for_this_plugin_s_setup_entrypoint() {
+        assert_eq!(
+            open_pane_args(),
+            vec![
+                "plugin",
+                "pane",
+                "open",
+                "--plugin",
+                "haurylau.voice",
+                "--entrypoint",
+                "setup",
+            ]
+        );
+    }
+
+    /// The file travels in the child's environment rather than in its argument
+    /// list, so the arguments are the bare subcommand and name no path.
+    #[test]
+    fn checking_a_configuration_is_config_check_with_no_path_among_the_arguments() {
+        let args = check_config_args(std::path::Path::new("/tmp/candidate.toml"));
+        assert_eq!(args, vec!["config", "check"]);
+        assert!(!args.iter().any(|a| a.contains("candidate")), "{args:?}");
+    }
+
+    #[test]
+    fn a_zero_exit_is_a_clean_verdict_and_a_one_exit_is_not() {
+        // Measured against herdr 0.9.0: `config: ok` exits 0,
+        // `config: issues found` exits 1. See DESIGN_41.md, the appendix.
+        assert!(Check::from_status(0, "config: ok\n".into()).ok);
+        assert!(!Check::from_status(1, "config: issues found\n".into()).ok);
+    }
+
+    #[test]
+    fn the_fake_records_what_it_was_asked_to_do() {
+        use tests_support::{Call, FakeHerdr};
+        let herdr = FakeHerdr::clean();
+        herdr.open_pane().unwrap();
+        herdr.notify("title", "body").unwrap();
+        assert_eq!(
+            herdr.calls(),
+            vec![Call::OpenPane, Call::Notify("title".into(), "body".into())]
+        );
     }
 
     #[test]
