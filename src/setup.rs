@@ -280,6 +280,19 @@ impl HerdrCli {
         }
     }
 
+    /// Points at an arbitrary program instead of at what `HERDR_BIN_PATH`
+    /// names, so a test can pin the argument lists, the environment the child
+    /// is given and both exit statuses against a small recorder script —
+    /// without mutating an environment variable a parallel suite shares. The
+    /// released build has one way to resolve the binary, `new()`, and a second
+    /// constructor nothing calls there would trip `dead_code`.
+    #[cfg(test)]
+    pub fn with_binary(binary: impl Into<String>) -> Self {
+        HerdrCli {
+            binary: binary.into(),
+        }
+    }
+
     fn not_found(&self) -> HerdrError {
         HerdrError::NotFound {
             binary: self.binary.clone(),
@@ -1129,6 +1142,184 @@ mod tests {
             herdr.calls(),
             vec![Call::OpenPane, Call::Notify("title".into(), "body".into())]
         );
+    }
+
+    /// The whole chain from the trait method to the process: the argument
+    /// list, the environment the child is given, and the exit status coming
+    /// back as a verdict. A shell script, so these run on unix only; the
+    /// released binary's own behaviour here is platform-independent, and what
+    /// is platform-specific is the recorder, not the call.
+    #[cfg(unix)]
+    mod herdr_cli {
+        use super::super::*;
+
+        /// Writes the argv it was given, one line each, and the value of
+        /// `HERDR_CONFIG_PATH` it inherited, to a file next to it; then prints
+        /// `text` and exits with `code`. The pattern and the reasoning are
+        /// `src/delivery.rs`'s, which records argv the same way.
+        struct Recorder {
+            dir: std::path::PathBuf,
+            script: std::path::PathBuf,
+            out: std::path::PathBuf,
+        }
+
+        /// The scratch directory is unique per process and per tag, so runs
+        /// never collide; nothing else would remove it.
+        impl Drop for Recorder {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        impl Recorder {
+            fn new(tag: &str, text: &str, code: i32) -> Self {
+                use std::os::unix::fs::PermissionsExt;
+                let dir = std::env::temp_dir().join(format!(
+                    "herdr-voice-setup-recorder-{tag}-{}",
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).expect("scratch dir");
+                let recorder = Recorder {
+                    script: dir.join("record.sh"),
+                    out: dir.join("record.out"),
+                    dir,
+                };
+                std::fs::write(
+                    &recorder.script,
+                    format!(
+                        "#!/bin/sh\n\
+                         {{ printf '%s\\n' \"$@\"; \
+                         printf 'HERDR_CONFIG_PATH=%s\\n' \"${{HERDR_CONFIG_PATH-unset}}\"; \
+                         }} > {out:?}\n\
+                         echo {text:?}\n\
+                         exit {code}\n",
+                        out = recorder.out,
+                        text = text,
+                        code = code,
+                    ),
+                )
+                .expect("write the recorder script");
+                let mut perms = std::fs::metadata(&recorder.script)
+                    .expect("stat")
+                    .permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&recorder.script, perms).expect("chmod");
+                recorder
+            }
+
+            fn cli(&self) -> HerdrCli {
+                HerdrCli::with_binary(self.script.to_string_lossy().into_owned())
+            }
+
+            fn recorded(&self) -> Vec<String> {
+                std::fs::read_to_string(&self.out)
+                    .expect("the recorder must have run and written what it was given")
+                    .lines()
+                    .map(|l| l.to_string())
+                    .collect()
+            }
+        }
+
+        /// The file to judge travels in the child's environment, because that
+        /// is where `herdr config check` looks for it. Without it the check
+        /// judges the user's real configuration and answers about the wrong
+        /// file.
+        #[test]
+        fn check_config_points_herdr_at_the_file_it_is_judging() {
+            let recorder = Recorder::new("check-ok", "config: ok", 0);
+            let judged = recorder.dir.join("candidate.toml");
+            let verdict = recorder
+                .cli()
+                .check_config(&judged)
+                .expect("the recorder always runs");
+            let recorded = recorder.recorded();
+            assert_eq!(recorded[..2], ["config".to_string(), "check".to_string()]);
+            assert_eq!(
+                recorded.last().unwrap(),
+                &format!("HERDR_CONFIG_PATH={}", judged.display()),
+                "got {recorded:?}"
+            );
+            assert!(verdict.ok, "{verdict:?}");
+            assert_eq!(verdict.output, "config: ok");
+        }
+
+        #[test]
+        fn a_non_zero_exit_from_the_check_is_a_refusal_carrying_what_herdr_said() {
+            let recorder = Recorder::new("check-bad", "config: issues found", 1);
+            let verdict = recorder
+                .cli()
+                .check_config(&recorder.dir.join("candidate.toml"))
+                .expect("the recorder always runs");
+            assert!(!verdict.ok, "{verdict:?}");
+            assert_eq!(verdict.output, "config: issues found");
+        }
+
+        #[test]
+        fn open_pane_asks_herdr_for_this_plugin_s_setup_entrypoint() {
+            let recorder = Recorder::new("open-pane", "ok", 0);
+            recorder.cli().open_pane().expect("the recorder succeeds");
+            assert_eq!(
+                recorder.recorded()[..7],
+                [
+                    "plugin",
+                    "pane",
+                    "open",
+                    "--plugin",
+                    "haurylau.voice",
+                    "--entrypoint",
+                    "setup",
+                ]
+            );
+        }
+
+        #[test]
+        fn a_refused_pane_is_reported_with_what_herdr_said() {
+            let recorder = Recorder::new("open-pane-busy", "a popup pane is already open", 1);
+            let err = recorder.cli().open_pane().unwrap_err();
+            assert_eq!(
+                err,
+                HerdrError::Rejected("a popup pane is already open".to_string())
+            );
+        }
+
+        #[test]
+        fn notify_runs_notification_show_with_a_body_flag() {
+            let recorder = Recorder::new("notify", "ok", 0);
+            recorder
+                .cli()
+                .notify("Dictation: setup", "could not open the setup pane")
+                .expect("the recorder succeeds");
+            assert_eq!(
+                recorder.recorded()[..5],
+                [
+                    "notification",
+                    "show",
+                    "Dictation: setup",
+                    "--body",
+                    "could not open the setup pane",
+                ]
+            );
+        }
+
+        /// herdr starts plugin commands with a minimal PATH, so "not on the
+        /// PATH" is a case that happens, and the message has to name the
+        /// binary and the PATH the process actually had.
+        #[test]
+        fn a_binary_that_cannot_be_started_is_reported_as_not_found() {
+            let cli = HerdrCli::with_binary("herdr-voice-no-such-program");
+            let err = cli
+                .check_config(std::path::Path::new("config.toml"))
+                .unwrap_err();
+            match err {
+                HerdrError::NotFound { binary, .. } => {
+                    assert_eq!(binary, "herdr-voice-no-such-program")
+                }
+                other => panic!("expected a not-found failure, got {other:?}"),
+            }
+            assert!(format!("{}", cli.open_pane().unwrap_err()).contains("HERDR_BIN_PATH"));
+            assert!(cli.notify("t", "b").is_err());
+        }
     }
 
     #[test]
