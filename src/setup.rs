@@ -329,6 +329,116 @@ impl Herdr for HerdrCli {
     }
 }
 
+#[derive(Debug)]
+pub enum WriteError {
+    /// The file, or its directory, would not cooperate. Names the path it
+    /// happened on and what the system said.
+    Io { path: String, reason: String },
+    /// herdr already reports issues with the file as it stands.
+    OriginalRejected { path: String, output: String },
+    /// herdr rejects the file this action would have produced.
+    CandidateRejected { path: String, output: String },
+    /// herdr could not be asked.
+    Herdr(HerdrError),
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteError::Io { path, reason } => {
+                write!(f, "cannot write {path}: {reason}")
+            }
+            WriteError::OriginalRejected { path, output } => write!(
+                f,
+                "herdr already reports issues with {path}, so nothing was added — a \
+                 configuration it is ignoring would swallow the binding silently. Fix \
+                 what it names and run this again.\n{output}"
+            ),
+            WriteError::CandidateRejected { path, output } => write!(
+                f,
+                "herdr refused the configuration this would have written, so {path} is \
+                 unchanged.\n{output}"
+            ),
+            WriteError::Herdr(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Appends `addition` to the file at `path`, with herdr's approval and nobody
+/// else's bytes lost.
+///
+/// The original is checked first: a configuration herdr already complains about
+/// is one it is ignoring, wholly or in part, and a binding appended to it would
+/// do nothing when pressed — a failure that would look like this action's.
+///
+/// The write is a candidate beside the real file plus a rename, so the only
+/// moment the real file changes is the rename, and an interrupted run cannot
+/// leave a half-written configuration. The candidate takes the original's
+/// permissions first, so replacing a file does not change its mode.
+pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), WriteError> {
+    let io = |path: &Path, e: std::io::Error| WriteError::Io {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    };
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+    }
+
+    let original = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io(path, e)),
+    };
+
+    if original.is_some() {
+        let verdict = herdr.check_config(path).map_err(WriteError::Herdr)?;
+        if !verdict.ok {
+            return Err(WriteError::OriginalRejected {
+                path: path.display().to_string(),
+                output: verdict.output,
+            });
+        }
+    }
+
+    let mut candidate_text = original.clone().unwrap_or_default();
+    if !candidate_text.is_empty() && !candidate_text.ends_with('\n') {
+        candidate_text.push('\n');
+    }
+    candidate_text.push('\n');
+    candidate_text.push_str(addition);
+
+    let candidate = path.with_extension("toml.herdr-voice-candidate");
+    std::fs::write(&candidate, &candidate_text).map_err(|e| io(&candidate, e))?;
+    // The original exists, so carry its mode onto the candidate: the rename
+    // must not silently change the file's permissions.
+    if original.is_some() {
+        if let Ok(meta) = std::fs::metadata(path) {
+            let _ = std::fs::set_permissions(&candidate, meta.permissions());
+        }
+    }
+
+    let verdict = match herdr.check_config(&candidate) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_file(&candidate);
+            return Err(WriteError::Herdr(e));
+        }
+    };
+    if !verdict.ok {
+        let _ = std::fs::remove_file(&candidate);
+        return Err(WriteError::CandidateRejected {
+            path: path.display().to_string(),
+            output: verdict.output,
+        });
+    }
+
+    std::fs::rename(&candidate, path).map_err(|e| {
+        let _ = std::fs::remove_file(&candidate);
+        io(path, e)
+    })
+}
+
 #[cfg(test)]
 pub mod tests_support {
     use super::{Check, Herdr, HerdrError};
@@ -441,6 +551,112 @@ mod tests {
             .expect("the snippet this action prints must itself be valid TOML");
         let commands = parsed["keys"]["command"].as_array().unwrap();
         assert_eq!(commands.len(), 3);
+    }
+
+    use tests_support::FakeHerdr;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("herdr-voice-setup-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("config.toml")
+    }
+
+    #[test]
+    fn a_clean_append_lands_and_keeps_every_byte_that_was_there() {
+        let path = scratch("clean");
+        std::fs::write(&path, "[theme]\nname = \"something\"\n").unwrap();
+        append(
+            &FakeHerdr::clean(),
+            &path,
+            "[[keys.command]]\nkey = \"ctrl+g\"\n",
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with("[theme]\nname = \"something\"\n"));
+        assert!(after.contains("key = \"ctrl+g\""));
+    }
+
+    #[test]
+    fn a_file_that_does_not_exist_is_created_with_its_directory() {
+        let path = scratch("absent")
+            .parent()
+            .unwrap()
+            .join("deeper/config.toml");
+        append(&FakeHerdr::clean(), &path, "[[keys.command]]\n").unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn an_original_herdr_already_complains_about_is_left_alone() {
+        let path = scratch("dirty-original");
+        std::fs::write(&path, "[nonsense]\nfoo = 1\n").unwrap();
+        let herdr = FakeHerdr::answering(vec![Check {
+            ok: false,
+            output: "config: issues found\nunknown config section [nonsense]".into(),
+        }]);
+        let err = append(&herdr, &path, "[[keys.command]]\n").unwrap_err();
+        assert!(
+            matches!(err, WriteError::OriginalRejected { .. }),
+            "{err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[nonsense]\nfoo = 1\n",
+            "nothing may be written into a configuration herdr is already unhappy with"
+        );
+    }
+
+    #[test]
+    fn a_candidate_herdr_rejects_leaves_the_original_untouched() {
+        let path = scratch("dirty-candidate");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let herdr = FakeHerdr::answering(vec![
+            Check {
+                ok: true,
+                output: "config: ok".into(),
+            },
+            Check {
+                ok: false,
+                output: "config: issues found\nctrl+g: disabled".into(),
+            },
+        ]);
+        let err = append(&herdr, &path, "[[keys.command]]\n").unwrap_err();
+        assert!(
+            matches!(err, WriteError::CandidateRejected { .. }),
+            "{err:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[theme]\n");
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            leftovers.len(),
+            1,
+            "the candidate must be removed: {leftovers:?}"
+        );
+    }
+
+    /// The fixture is a directory that cannot be written, not a file: renaming
+    /// over a read-only file succeeds while its parent is writable, so that
+    /// fixture would prove nothing.
+    #[test]
+    #[cfg(unix)]
+    fn a_directory_that_cannot_be_written_is_reported_with_its_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = scratch("readonly-dir");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let dir = path.parent().unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let err = append(&FakeHerdr::clean(), &path, "[[keys.command]]\n").unwrap_err();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        match err {
+            WriteError::Io { path: ref p, .. } => {
+                assert!(p.contains("herdr-voice-setup-readonly-dir"), "{p}")
+            }
+            other => panic!("expected an io failure naming the path, got {other:?}"),
+        }
     }
 
     #[test]
