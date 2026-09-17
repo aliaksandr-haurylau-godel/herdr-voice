@@ -99,14 +99,112 @@ hv_fetch() {
 }
 
 # ---------------------------------------------------------------------------
+# Verifying
+# ---------------------------------------------------------------------------
+
+hv_digest() {
+    # $1 = file. macOS has shasum and not sha256sum; Linux has both or the
+    # first. .github/workflows/release.yml makes the same choice when it writes
+    # the sidecar this is compared against.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# How this ends
+#
+# A non-zero exit from a build command aborts the install and registers no
+# plugin, so a person reading any of these messages has a machine with nothing
+# new on it. Each one says that, and says what to do next.
+# ---------------------------------------------------------------------------
+
+hv_die() {
+    # $1 = what went wrong, $2 = what to do about it.
+    printf '%s: %s\n' "${HV_NAME}" "$1" >&2
+    printf '%s: nothing was installed. %s\n' "${HV_NAME}" "$2" >&2
+    exit 1
+}
+
+hv_have_cargo() {
+    # A function rather than an inline `command -v` so the suite can answer it
+    # without emptying PATH, which would also take away the mktemp and tar this
+    # script needs before it ever reaches the fallback.
+    command -v cargo >/dev/null 2>&1
+}
+
+hv_fallback() {
+    # $1 = why there is no archive to use.
+    printf '%s: %s\n' "${HV_NAME}" "$1" >&2
+    printf '%s: building from source instead, which compiles the candle crates and takes a while.\n' \
+        "${HV_NAME}" >&2
+    if ! hv_have_cargo; then
+        hv_die "there is no archive for this platform and no cargo to build one" \
+               "install a Rust toolchain from https://rustup.rs and run the install again, or install on a platform a release archive is published for."
+    fi
+    cargo build --release
+}
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 hv_main() {
     root="$(hv_root)"
+    cd "${root}"
     version="$(hv_manifest_version "${root}")"
     tag="v${version}"
-    printf '%s: %s wants the release %s\n' "${HV_NAME}" "${root}" "${tag}"
+
+    if ! target="$(hv_target "$(uname -s)" "$(uname -m)")"; then
+        hv_fallback "no release archive is built for $(uname -s) $(uname -m)"
+        return 0
+    fi
+
+    archive="${HV_NAME}-${tag}-${target}.tar.gz"
+    base="https://github.com/${HV_REPO}/releases/download/${tag}"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' EXIT
+
+    case "$(hv_fetch "${base}/${archive}" "${tmp}/${archive}")" in
+        ok) ;;
+        missing)
+            # A 404 here is what a missing release and a missing target both look
+            # like, and nothing else fetched tells them apart. Telling them apart
+            # needs a release-level API request, which brings its own retry, its
+            # own failure mode and a rate limit a shared address can exhaust — a
+            # fifth way to fail, bought for one clause. So the message names both.
+            hv_fallback "no archive at ${base}/${archive} — either no release is tagged ${tag}, or that release has no build for ${target}"
+            return 0 ;;
+        error)
+            hv_die "could not reach ${base}/${archive} after ${HV_RETRY_ATTEMPTS} attempts" \
+                   "check the network and run the install again." ;;
+    esac
+
+    case "$(hv_fetch "${base}/${archive}.sha256" "${tmp}/${archive}.sha256")" in
+        ok) ;;
+        missing)
+            hv_die "the release ${tag} publishes ${archive} but no ${archive}.sha256, so its bytes cannot be checked" \
+                   "report it against the release; an unverified archive is not installed." ;;
+        error)
+            hv_die "could not reach ${base}/${archive}.sha256 after ${HV_RETRY_ATTEMPTS} attempts" \
+                   "check the network and run the install again." ;;
+    esac
+
+    expected="$(cut -d' ' -f1 <"${tmp}/${archive}.sha256")"
+    actual="$(hv_digest "${tmp}/${archive}")"
+    if [ "${expected}" != "${actual}" ]; then
+        hv_die "${archive} does not match the digest published with it (expected ${expected}, got ${actual})" \
+               "the download is damaged or the release was changed after it was published; run the install again, and report it if it repeats."
+    fi
+
+    tar -xzf "${tmp}/${archive}" -C "${tmp}"
+    mkdir -p "${root}/target/release"
+    cp "${tmp}/${HV_NAME}-${tag}-${target}/${HV_NAME}" "${root}/target/release/${HV_NAME}"
+    chmod 0755 "${root}/target/release/${HV_NAME}"
+    printf '%s: installed %s from %s, verified against its published digest\n' \
+        "${HV_NAME}" "target/release/${HV_NAME}" "${tag}"
 }
 
 if [ "${HERDR_VOICE_INSTALL_LIB:-0}" != 1 ]; then
