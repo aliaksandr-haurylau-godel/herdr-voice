@@ -481,6 +481,16 @@ pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), Writ
     })
 }
 
+/// "1 binding" or "2 bindings" — the count belongs in the question, because the
+/// question sits under a wall of TOML and has to say what answering it does.
+fn plural_bindings(count: usize) -> String {
+    if count == 1 {
+        "1 binding".to_string()
+    } else {
+        format!("{count} bindings")
+    }
+}
+
 /// The whole action. `interactive` decides which half runs, and it is a fact
 /// about the process rather than a flag: a pane has a terminal, the action herdr
 /// starts does not.
@@ -575,7 +585,18 @@ pub fn run(
 
     let snippet = render(&decision.to_add);
     let _ = writeln!(out, "\nthese go into {}:\n\n{snippet}", path.display());
-    let _ = write!(out, "append them? [y/N] ");
+    let _ = write!(
+        out,
+        "append these {} to the file named above? [y/N] ",
+        plural_bindings(decision.to_add.len())
+    );
+    // The question has no newline of its own, and standard output is line
+    // buffered: without this flush it sits in the buffer while the process
+    // blocks on the answer, and the person is looking at a cursor on an empty
+    // line with nothing to tell them what it wants. Found by looking at the
+    // pane, after 492 tests, four gate rounds and a mutation review had all
+    // passed — every one of them writes into a buffer that needs no flushing.
+    let _ = out.flush();
 
     let said = answer().unwrap_or_default();
     if !matches!(said.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
@@ -733,6 +754,67 @@ mod tests {
     }
 
     use tests_support::FakeHerdr;
+
+    /// A writer that records whether it has been flushed, shared with the
+    /// closure that answers the question, so a test can ask what the person
+    /// could actually see at the moment the process began waiting for them.
+    #[derive(Clone, Default)]
+    struct FlushWatcher {
+        written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        flushed_bytes: std::sync::Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl std::io::Write for FlushWatcher {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            *self.flushed_bytes.lock().unwrap() = self.written.lock().unwrap().len();
+            Ok(())
+        }
+    }
+
+    /// Standard output is line buffered and the question ends without a
+    /// newline, so a question that is written and not flushed never reaches the
+    /// screen while the process waits for the answer. In the pane this showed as
+    /// a cursor sitting on an empty line with nothing above it to answer.
+    #[test]
+    fn the_question_has_reached_the_screen_before_the_answer_is_waited_for() {
+        let path = scratch("flush");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let watcher = FlushWatcher::default();
+        let seen = watcher.clone();
+        let mut writer = watcher.clone();
+        let visible_when_asked = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let record = visible_when_asked.clone();
+
+        let code = run(
+            &FakeHerdr::clean(),
+            Some(path),
+            true,
+            &mut || {
+                let flushed = *seen.flushed_bytes.lock().unwrap();
+                let written = seen.written.lock().unwrap().clone();
+                *record.lock().unwrap() = String::from_utf8_lossy(&written[..flushed]).to_string();
+                Some("n".to_string())
+            },
+            &mut writer,
+        );
+
+        assert_eq!(code, 0);
+        let on_screen = visible_when_asked.lock().unwrap().clone();
+        assert!(
+            on_screen.contains("[y/N]"),
+            "the question had not reached the screen when the process started \
+             waiting for the answer; all that was flushed was: {on_screen:?}"
+        );
+        assert!(
+            on_screen.contains("3 bindings"),
+            "the question must say what answering it does: {on_screen:?}"
+        );
+    }
 
     fn capture(
         herdr: &dyn Herdr,
