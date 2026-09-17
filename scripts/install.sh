@@ -53,6 +53,52 @@ hv_target() {
 }
 
 # ---------------------------------------------------------------------------
+# Fetching
+#
+# Two rules, not one, and they answer different questions.
+#
+# The retry decides whether we know: GitHub's content delivery network answers
+# 404 for some minutes after a release publishes, so a single 404 is not evidence
+# that a target is missing.
+#
+# The three words below decide what we do once we know, and the caller acts on
+# them: `missing` is the source build, `error` is a stop. Collapsing the two puts
+# a machine whose network hiccupped into an hour of compiling nobody asked for.
+# ---------------------------------------------------------------------------
+
+HV_RETRY_ATTEMPTS="${HV_RETRY_ATTEMPTS:-5}"
+HV_RETRY_DELAY="${HV_RETRY_DELAY:-3}"
+
+hv_fetch_once() {
+    # $1 = url, $2 = destination. Prints ok, missing or error. Always exits 0:
+    # the answer is the word, not the status, so that `set -e` cannot turn a
+    # 404 into an abort before the caller has decided what it means.
+    if ! http="$(curl -sSL -o "$2" -w '%{http_code}' "$1" 2>/dev/null)"; then
+        echo error
+        return 0
+    fi
+    case "${http}" in
+        200) echo ok ;;
+        404) echo missing ;;
+        *)   echo error ;;
+    esac
+}
+
+hv_fetch() {
+    # $1 = url, $2 = destination. Prints the settled answer.
+    attempt=1
+    while :; do
+        outcome="$(hv_fetch_once "$1" "$2")"
+        if [ "${outcome}" = ok ] || [ "${attempt}" -ge "${HV_RETRY_ATTEMPTS}" ]; then
+            echo "${outcome}"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep "${HV_RETRY_DELAY}"
+    done
+}
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

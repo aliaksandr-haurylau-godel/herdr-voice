@@ -72,6 +72,47 @@ else
     printf 'ok    the repository manifest yields %s\n' "$(hv_manifest_version "${ROOT}")"
 fi
 
+# --- the retry, and what settles it -----------------------------------------
+# hv_fetch_once is replaced so no network is touched. It reads its answers from
+# HV_TEST_ANSWERS, one per attempt.
+#
+# The call count lives in a FILE, not a variable. hv_fetch calls hv_fetch_once
+# inside `$( )`, and the suite calls hv_fetch inside `$( )` again, so each runs
+# in its own subshell and an incremented variable never reaches either caller.
+# A variable here does not fail loudly: every attempt would read answer 1, so
+# "a 404 that later succeeds" would settle on `missing` and the suite would
+# assert the opposite of the rule it is there to protect.
+HV_TEST_COUNT="${fixture}/calls"
+hv_fetch_once() {
+    n=$(( $(cat "${HV_TEST_COUNT}") + 1 ))
+    echo "${n}" >"${HV_TEST_COUNT}"
+    echo "${HV_TEST_ANSWERS}" | cut -d' ' -f"${n}"
+}
+
+HV_RETRY_ATTEMPTS=3
+HV_RETRY_DELAY=0
+
+echo 0 >"${HV_TEST_COUNT}"; HV_TEST_ANSWERS="ok ok ok"
+check "a first-attempt success settles at once" "$(hv_fetch u d)" ok
+check "and it asked only once" "$(cat "${HV_TEST_COUNT}")" 1
+
+# GitHub answers 404 for some minutes after a release publishes. A 404 that
+# later succeeds is the CDN catching up, not a missing target, and treating it
+# as one would start the compile this whole change exists to avoid.
+echo 0 >"${HV_TEST_COUNT}"; HV_TEST_ANSWERS="missing missing ok"
+check "a 404 that later succeeds is not missing" "$(hv_fetch u d)" ok
+
+echo 0 >"${HV_TEST_COUNT}"; HV_TEST_ANSWERS="missing missing missing"
+check "a 404 through every attempt is missing" "$(hv_fetch u d)" missing
+# It must stop after the budget rather than looping.
+check "it stops after the budget" "$(cat "${HV_TEST_COUNT}")" 3
+
+echo 0 >"${HV_TEST_COUNT}"; HV_TEST_ANSWERS="error error error"
+check "a transport failure throughout is an error" "$(hv_fetch u d)" error
+
+echo 0 >"${HV_TEST_COUNT}"; HV_TEST_ANSWERS="error error ok"
+check "a transport failure that recovers is ok" "$(hv_fetch u d)" ok
+
 if [ "${failures}" -ne 0 ]; then
     printf '\n%s assertion(s) failed\n' "${failures}" >&2
     exit 1
