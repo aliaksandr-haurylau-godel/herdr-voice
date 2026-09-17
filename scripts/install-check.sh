@@ -133,26 +133,10 @@ fi
 record "install" "0" "installed ${REPO} at ${REF}"
 
 # ---------------------------------------------------------------------------
-# Step 5: it fetched rather than compiled
+# Step 5: the plugin is registered
 #
-# With no toolchain present a compile could not have happened, so this is a
-# second, cheaper witness rather than the proof: it catches a build entry that
-# quietly fell back and somehow succeeded.
-# ---------------------------------------------------------------------------
-
-printf '\n== step: no-compile ==\n'
-if grep -qiE '^[[:space:]]*(Compiling|Downloaded) |cargo build' "${LOGS}/install.log"; then
-    fail "no-compile" "-" "the install log shows a source build" \
-        "read ${LOGS}/install.log; the fetch path did not run, and the fallback's message says why"
-fi
-if ! grep -q "verified against its published digest" "${LOGS}/install.log"; then
-    fail "no-compile" "-" "the install log does not say an archive was verified" \
-        "read ${LOGS}/install.log; the build entry may not have run at all"
-fi
-record "no-compile" "0" "fetched and verified, nothing compiled"
-
-# ---------------------------------------------------------------------------
-# Step 6: the plugin is registered
+# herdr registers a plugin only after every build command has succeeded, so this
+# is the first statement that the build entry ran and was accepted.
 # ---------------------------------------------------------------------------
 
 printf '\n== step: registered ==\n'
@@ -167,7 +151,43 @@ grep -E "${PLUGIN_ID}.*enabled" "${LOGS}/list.log" >/dev/null \
 record "registered" "0" "${PLUGIN_ID} installed and enabled"
 
 # ---------------------------------------------------------------------------
+# Step 6: it fetched rather than compiled
+#
+# The witness is the file scripts/install.sh writes next to the binary, not the
+# install log. herdr reports a build command's output when the build FAILS, and
+# nothing establishes that it echoes a successful one — so a check that grepped
+# the log would fail a working install on a herdr that simply stays quiet, and
+# would then tell the person the build entry had not run.
+#
+# With no toolchain present a compile could not have happened anyway, so this is
+# a second witness rather than the proof. What it adds is catching a build entry
+# that fell back and somehow succeeded.
+# ---------------------------------------------------------------------------
+
+printf '\n== step: no-compile ==\n'
+PLUGIN_ROOT="$(find "${HOME}/.config/herdr/plugins/github" \
+    -maxdepth 1 -type d -name "${PLUGIN_ID}-*" 2>/dev/null | head -n 1)"
+if [ -z "${PLUGIN_ROOT}" ]; then
+    fail "no-compile" "-" "the installed plugin directory could not be found" \
+        "look under ${HOME}/.config/herdr/plugins/github for a directory named ${PLUGIN_ID}-*"
+fi
+MARKER="${PLUGIN_ROOT}/target/release/.herdr-voice-install"
+if [ ! -f "${MARKER}" ]; then
+    fail "no-compile" "-" "the build entry left no install record at ${MARKER}" \
+        "the build entry may not have run; read ${LOGS}/install.log"
+fi
+cat "${MARKER}"
+if ! grep -q "verified sha256" "${MARKER}"; then
+    fail "no-compile" "-" "the install record does not say an archive was fetched and verified: $(cat "${MARKER}")" \
+        "the build entry fell back to a source build; its message in ${LOGS}/install.log says why"
+fi
+record "no-compile" "0" "$(cat "${MARKER}")"
+
+# ---------------------------------------------------------------------------
 # Step 7: the binary it fetched actually runs
+#
+# PLUGIN_ROOT was found in step 6: herdr stores a GitHub-installed plugin under a
+# directory named for the plugin id plus a hash, so the name is found, not known.
 #
 # A binary built for the wrong architecture is the failure this catches, and it
 # fails by saying nothing at all rather than by exiting non-zero, so the check is
@@ -175,11 +195,7 @@ record "registered" "0" "${PLUGIN_ID} installed and enabled"
 # ---------------------------------------------------------------------------
 
 printf '\n== step: runs ==\n'
-# herdr stores a GitHub-installed plugin under a directory named for the plugin
-# id plus a hash, so the name is found rather than known.
-PLUGIN_ROOT="$(find "${HOME}/.config/herdr/plugins/github" \
-    -maxdepth 1 -type d -name "${PLUGIN_ID}-*" 2>/dev/null | head -n 1)"
-if [ -z "${PLUGIN_ROOT}" ] || [ ! -x "${PLUGIN_ROOT}/target/release/herdr-voice" ]; then
+if [ ! -x "${PLUGIN_ROOT}/target/release/herdr-voice" ]; then
     fail "runs" "-" "no executable at target/release/herdr-voice under the installed plugin" \
         "look under ${HOME}/.config/herdr/plugins/github for the plugin directory"
 fi
