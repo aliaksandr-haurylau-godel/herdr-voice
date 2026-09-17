@@ -912,7 +912,14 @@ mod tests {
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("herdr-voice-setup-{name}"));
+        // The process id belongs in the name. Without it two test binaries
+        // running at once — `cargo test` builds and runs more than one — share
+        // the directory, and the `remove_dir_all` below deletes a fixture the
+        // other one is still using. This repository fixed the same defect once
+        // already, recorded in 9ca95d5: "wav_path() named its file by pid
+        // alone, shared across every test".
+        let dir =
+            std::env::temp_dir().join(format!("herdr-voice-setup-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("config.toml")
