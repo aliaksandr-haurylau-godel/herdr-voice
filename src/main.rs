@@ -26,6 +26,7 @@ mod indicator;
 mod proto;
 mod ptt;
 mod rewrite;
+mod setup;
 mod stt;
 mod transport;
 
