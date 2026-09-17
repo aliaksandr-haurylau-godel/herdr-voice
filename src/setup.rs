@@ -64,6 +64,44 @@ pub fn render(bindings: &[&Binding]) -> String {
     out
 }
 
+use std::path::PathBuf;
+
+/// herdr's own order, stated by its binary: `HERDR_CONFIG_PATH overrides config
+/// file path`, otherwise `herdr/config.toml` under `XDG_CONFIG_HOME`, otherwise
+/// the same under `~/.config`.
+///
+/// Takes the three values rather than reading them, so the tests do not mutate
+/// an environment the parallel suite shares — the reason `src/delivery.rs:171`
+/// gives for the same split.
+pub fn config_path_from(
+    config_path_var: Option<String>,
+    xdg: Option<String>,
+    home: Option<String>,
+) -> Option<PathBuf> {
+    let non_empty = |v: Option<String>| v.filter(|s| !s.is_empty());
+    if let Some(explicit) = non_empty(config_path_var) {
+        return Some(PathBuf::from(explicit));
+    }
+    if let Some(dir) = non_empty(xdg) {
+        return Some(PathBuf::from(dir).join("herdr").join("config.toml"));
+    }
+    let home = non_empty(home)?;
+    Some(
+        PathBuf::from(home)
+            .join(".config")
+            .join("herdr")
+            .join("config.toml"),
+    )
+}
+
+pub fn config_path() -> Option<PathBuf> {
+    config_path_from(
+        std::env::var("HERDR_CONFIG_PATH").ok(),
+        std::env::var("XDG_CONFIG_HOME").ok(),
+        std::env::var("HOME").ok(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +139,51 @@ mod tests {
             .expect("the snippet this action prints must itself be valid TOML");
         let commands = parsed["keys"]["command"].as_array().unwrap();
         assert_eq!(commands.len(), 3);
+    }
+
+    #[test]
+    fn the_override_wins_over_everything() {
+        let p = config_path_from(
+            Some("/tmp/somewhere/other.toml".into()),
+            Some("/tmp/xdg".into()),
+            Some("/tmp/home".into()),
+        );
+        assert_eq!(
+            p.unwrap(),
+            std::path::Path::new("/tmp/somewhere/other.toml")
+        );
+    }
+
+    #[test]
+    fn without_the_override_it_is_herdr_config_toml_under_xdg() {
+        let p = config_path_from(None, Some("/tmp/xdg".into()), Some("/tmp/home".into()));
+        assert_eq!(
+            p.unwrap(),
+            std::path::Path::new("/tmp/xdg/herdr/config.toml")
+        );
+    }
+
+    #[test]
+    fn without_xdg_it_is_dot_config_under_the_home_directory() {
+        let p = config_path_from(None, None, Some("/tmp/home".into()));
+        assert_eq!(
+            p.unwrap(),
+            std::path::Path::new("/tmp/home/.config/herdr/config.toml")
+        );
+    }
+
+    #[test]
+    fn with_nothing_to_resolve_against_there_is_no_path() {
+        assert!(config_path_from(None, None, None).is_none());
+    }
+
+    #[test]
+    fn an_empty_variable_counts_as_unset() {
+        let p = config_path_from(Some(String::new()), None, Some("/tmp/home".into()));
+        assert_eq!(
+            p.unwrap(),
+            std::path::Path::new("/tmp/home/.config/herdr/config.toml")
+        );
     }
 
     /// The manifest is the only contract with herdr: a snippet naming an action
