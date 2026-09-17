@@ -286,7 +286,13 @@ impl HerdrCli {
     /// without mutating an environment variable a parallel suite shares. The
     /// released build has one way to resolve the binary, `new()`, and a second
     /// constructor nothing calls there would trip `dead_code`.
-    #[cfg(test)]
+    ///
+    /// `unix` as well as `test`, and not `test` alone: the only caller is the
+    /// `herdr_cli` module below, which drives a recorder written as a shell
+    /// script and is therefore unix-only. Gated on `test` alone this is dead
+    /// code in the Windows test build, and CI compiles with `-D warnings`.
+    /// It passed on macOS and failed on `windows-latest`.
+    #[cfg(all(test, unix))]
     pub fn with_binary(binary: impl Into<String>) -> Self {
         HerdrCli {
             binary: binary.into(),
