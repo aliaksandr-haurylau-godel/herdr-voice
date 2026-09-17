@@ -949,3 +949,72 @@ renderer lays those cells out by the same rule the fix assumed.
 
 **What this does not establish.** Any platform but macOS — the width a blank
 occupies is the renderer's business, and only this one has been looked at.
+
+## `setup`, by hand on macOS
+
+Run on 2026-09-17 on macOS 25.6, Apple silicon, herdr 0.9.0, with the release
+build of the plugin linked from a checkout of `feat/41-setup`. Three criteria
+rest on a live herdr and cannot be reached by any test: that herdr accepts the
+snippet this action prints, that the pane it opens is real, and that a person can
+answer the question in it.
+
+Everything else about the action is covered by tests, and all three of the
+defects below were found by looking at the screen while 493 of them passed.
+
+### The pane opens, and the question in it was invisible
+
+Invoking `herdr plugin action invoke haurylau.voice.setup` opened the popup pane
+and the three blocks appeared in it. **The question did not.** The cursor sat on
+an empty line below the snippet with nothing saying what it was waiting for.
+
+The question is written without a newline of its own, and standard output is line
+buffered, so it stayed in the buffer while the process blocked on the answer. It
+had been through 492 tests, four gate rounds and a mutation review, and none of
+them could see it: every one of them writes into a buffer that needs no flushing.
+Fixed by flushing before waiting, and the test now asks what had reached the
+screen at the moment the process began to wait rather than what had been written.
+
+### Answering it with one keystroke looked like answering it
+
+With the question visible, the answer `y` was pressed twice, on two separate
+runs, and nothing was written either time.
+
+The answer is read a line at a time: nothing arrives until Enter does. Meanwhile
+the terminal echoes the keystroke, so the screen shows `[y/N] y` and the run
+standing still — which reads as an answer that has been given. Confirmed by
+sending `y` with no newline to the binary over a pseudoterminal: the process stays
+alive, the character is on the screen, the file is untouched.
+
+Fixed by saying so: the question now ends `[y/N] then Enter:`. A single keypress
+without a line discipline would need raw-mode terminal control, which is a
+dependency this plugin does not have and does not need for one question.
+
+### What was verified once both were fixed
+
+Driven over a pseudoterminal against the owner's own configuration, and separately
+through the pane by hand:
+
+| claim | how it was established |
+|---|---|
+| The snippet is one herdr accepts | `herdr config check` on the resulting file: `config: ok`, exit 0 |
+| The pane is real and takes an answer | the popup opened, the question was read, `y` and Enter were pressed in it |
+| The two missing bindings were appended | the file grew from 3736 to 4017 bytes, and both blocks are in it |
+| The binding that was already there was not added again | `ctrl+g` already carried `haurylau.voice.ptt`; the run reported it as present and offered the other two |
+| Nothing was left behind | no candidate file remained in the configuration's directory |
+
+### What herdr says about a configuration, measured
+
+`herdr config check` exits 0 with `config: ok` and exits 1 with
+`config: issues found`; a file that does not exist also answers `config: ok`,
+exit 0. All four were measured. A `[[keys.command]]` block on a key another block
+already uses is reported by herdr as
+`kept keys.command[9].key, disabled keys.command[10].key`, while a block that
+shadows one of herdr's own defaults — `prefix+c`, its default for `new_tab` —
+produces no diagnostic at all. That second case is invisible to herdr and to this
+action alike, and the three keys were checked against the defaults of herdr 0.9.0
+by hand instead.
+
+A configuration file that is a symbolic link is followed rather than replaced.
+Renaming over the link would have left a regular file in its place and the file
+it pointed at unchanged, while the run reported success — checked directly with a
+link and a rename before the code was changed to resolve the path first.

@@ -56,6 +56,14 @@ contexts = ["global"]
 command = ["target/release/herdr-voice", "setup"]
 
 [[panes]]
+id = "setup"
+title = "Dictation: setup"
+placement = "popup"
+width = "70%"
+height = 20
+command = ["target/release/herdr-voice", "setup"]
+
+[[panes]]
 id = "status"
 title = "Dictation status"
 placement = "popup"

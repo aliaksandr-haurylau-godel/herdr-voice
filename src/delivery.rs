@@ -219,7 +219,7 @@ fn submit_args<'a>(pane: &'a str, text: &'a str) -> Vec<&'a str> {
 }
 
 /// The argument list for `herdr notification show ... --body ...`.
-fn notify_args<'a>(title: &'a str, body: &'a str) -> Vec<&'a str> {
+pub(crate) fn notify_args<'a>(title: &'a str, body: &'a str) -> Vec<&'a str> {
     vec!["notification", "show", title, "--body", body]
 }
 

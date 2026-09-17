@@ -41,8 +41,11 @@ Not yet installable. When the first release is tagged:
 herdr plugin install aliaksandr-haurylau-godel/herdr-voice
 ```
 
-herdr plugin manifests cannot declare keybindings, so two lines go into your herdr
-configuration. The plugin's `setup` action prints them and offers to append them.
+herdr plugin manifests cannot declare keybindings, so three blocks go into your
+herdr configuration. Invoke the plugin's `setup` action — from a terminal,
+`herdr plugin action invoke haurylau.voice.setup` — and it opens a pane that
+shows the exact blocks, offers to append them, and says what it changed. Running
+it twice changes nothing the second time.
 
 Speech recognition has three engines. The default is `command`: give
 `[stt] command` the program and arguments to run — for example a local
