@@ -102,6 +102,49 @@ pub fn config_path() -> Option<PathBuf> {
     )
 }
 
+/// What the user's configuration already binds. Two lists, because the two
+/// questions this action asks have different answers: is one of our own
+/// bindings already present, and is one of our keys already taken by something
+/// else.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Existing {
+    /// `(key, command)` for every `[[keys.command]]` block.
+    pub commands: Vec<(String, String)>,
+    /// Every key named by a string assignment directly under `[keys]` —
+    /// `prefix`, `goto`, `new_tab` and the rest. herdr's own defaults are not
+    /// visible here: only what the user wrote down is.
+    pub reserved_keys: Vec<String>,
+}
+
+pub fn inspect(text: &str) -> Result<Existing, String> {
+    let parsed: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
+    let mut existing = Existing::default();
+    let Some(keys) = parsed.get("keys").and_then(|k| k.as_table()) else {
+        return Ok(existing);
+    };
+    for (name, value) in keys {
+        if name == "command" {
+            let Some(blocks) = value.as_array() else {
+                continue;
+            };
+            for block in blocks {
+                let key = block.get("key").and_then(|v| v.as_str());
+                let command = block.get("command").and_then(|v| v.as_str());
+                if let (Some(key), Some(command)) = (key, command) {
+                    existing
+                        .commands
+                        .push((key.to_string(), command.to_string()));
+                }
+            }
+        } else if let Some(bound) = value.as_str() {
+            if !bound.is_empty() {
+                existing.reserved_keys.push(bound.to_string());
+            }
+        }
+    }
+    Ok(existing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +182,55 @@ mod tests {
             .expect("the snippet this action prints must itself be valid TOML");
         let commands = parsed["keys"]["command"].as_array().unwrap();
         assert_eq!(commands.len(), 3);
+    }
+
+    const SAMPLE: &str = r#"
+[keys]
+prefix = "ctrl+b"
+goto = "prefix+g"
+
+[[keys.command]]
+key = "prefix+d"
+type = "plugin_action"
+command = "someone.else.toggle"
+description = "not ours"
+
+[[keys.command]]
+key = "ctrl+g"
+type = "plugin_action"
+command = "haurylau.voice.ptt"
+description = "ours, already here"
+"#;
+
+    #[test]
+    fn it_reads_every_command_binding_as_a_key_and_a_command() {
+        let existing = inspect(SAMPLE).unwrap();
+        assert!(existing
+            .commands
+            .contains(&("ctrl+g".to_string(), "haurylau.voice.ptt".to_string())));
+        assert!(existing
+            .commands
+            .contains(&("prefix+d".to_string(), "someone.else.toggle".to_string())));
+    }
+
+    #[test]
+    fn it_reads_the_keys_herdr_s_own_actions_are_bound_to() {
+        let existing = inspect(SAMPLE).unwrap();
+        assert!(existing.reserved_keys.contains(&"prefix+g".to_string()));
+        assert!(existing.reserved_keys.contains(&"ctrl+b".to_string()));
+    }
+
+    #[test]
+    fn an_empty_configuration_is_a_valid_one() {
+        let existing = inspect("").unwrap();
+        assert!(existing.commands.is_empty());
+        assert!(existing.reserved_keys.is_empty());
+    }
+
+    #[test]
+    fn an_unparseable_configuration_is_reported_and_not_guessed_at() {
+        let why = inspect("this is not toml [[[").unwrap_err();
+        assert!(!why.is_empty(), "the reason must carry herdr's own words");
     }
 
     #[test]
