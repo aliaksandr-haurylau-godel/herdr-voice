@@ -62,6 +62,40 @@ jobs:
       - name: the manifest must parse and name commands that exist
         run: python3 scripts/check_manifest.py
 
+  scripts:
+    name: shell scripts
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: the release-kind rule
+        run: sh scripts/test-release-kind.sh
+      - name: the install script's decisions
+        run: sh scripts/test-install.sh
+
+  scripts-windows:
+    name: the Windows install script
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # Both interpreters, and the second is the one that matters: the manifest's
+      # build entry runs `powershell`, which is Windows PowerShell 5.1, while
+      # `pwsh` is PowerShell 7. They differ in exactly the code nothing else
+      # covers — Invoke-WebRequest raises WebException in 5.1 and
+      # HttpResponseException in 7, so the status extraction the fetch depends on
+      # is a different type in each.
+      - name: PowerShell 7
+        shell: pwsh
+        run: ./scripts/test-install.ps1
+      - name: Windows PowerShell 5.1, which is what the manifest runs
+        shell: powershell
+        run: ./scripts/test-install.ps1
+
   debris:
     name: editing debris
     runs-on: ubuntu-latest

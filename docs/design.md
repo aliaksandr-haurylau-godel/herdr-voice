@@ -345,8 +345,27 @@ the exact snippet and offers to append it.
 
 Installed with `herdr plugin install aliaksandr-haurylau-godel/herdr-voice`. A
 tagged release publishes archives for macOS on arm64 and x86_64, Linux on x86_64
-and arm64, and Windows on x86_64; the manifest's `build` entries fetch the archive
-that matches the platform.
+and arm64, and Windows on x86_64, each with a `.sha256` beside it. The manifest's
+`build` entries call `scripts/install.sh` on macOS and Linux and
+`scripts/install.ps1` on Windows, which work out the archive for the running
+platform from the manifest's own `version`, fetch it, refuse it if its bytes do
+not match the published digest, and unpack it to `target/release`. Where no
+archive is published for the platform they compile instead, saying so; where the
+archive cannot be reached at all they stop rather than compiling unasked. A tag
+`vX.Y.Z` therefore has to be cut from a commit whose manifest says `X.Y.Z`: the
+installed checkout is a shallow clone with no tags, so the manifest is the only
+place the script can learn what to ask for.
+
+The digest comes from the same release as the archive, so it establishes that
+what arrived is what was published — a truncated download, a damaged one, an
+archive swapped in transit. It does not establish who published it: anyone able
+to rewrite a release asset can rewrite the digest beside it. Signing is what
+would carry that, and it is out of scope here.
+
+A fork installs the upstream archives. Both scripts name this repository, so
+`herdr plugin install <fork>/herdr-voice` fetches from here for the matching tag
+rather than from the fork. A fork that publishes its own releases has to change
+that constant.
 
 The repository is public, and the author works on client projects. A leak gate
 runs in two places on the same rule set: a pre-commit hook and a CI job. It blocks

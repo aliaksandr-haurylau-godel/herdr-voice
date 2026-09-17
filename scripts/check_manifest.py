@@ -73,6 +73,19 @@ def main() -> None:
                 f"which src/main.rs does not accept (known: {sorted(known)})"
             )
 
+    # Every script a command names must exist in the tree. This check exists for
+    # the same reason as the one above: a command naming something that is not
+    # there produces a plugin which installs and then does nothing — or, for a
+    # build entry, aborts the install on a stranger's machine with `sh:
+    # scripts/instal.sh: No such file`. The subcommand check above skips these
+    # entries entirely, because they do not name the binary.
+    for section, entry in entries:
+        for part in entry["command"]:
+            if not part.startswith("scripts/"):
+                continue
+            if not (ROOT / part).is_file():
+                fail(f"{section}: the manifest names {part}, which is not in the repository")
+
     print(f"manifest: {len(entries)} entries, all commands known")
 
 if __name__ == "__main__":
