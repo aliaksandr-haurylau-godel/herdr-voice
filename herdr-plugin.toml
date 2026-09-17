@@ -5,16 +5,19 @@ min_herdr_version = "0.8.0"
 description = "Hold a key, speak, and the text lands in your agent's input box"
 platforms = ["macos", "linux", "windows"]
 
-# From a checkout the binary is built locally; a released copy fetches the
-# archive for the platform instead. Both leave the binary at the same path, so
-# every entry below is platform-independent.
+# Installing from GitHub fetches the release archive built for this platform and
+# checks it against the digest published beside it; only when there is no such
+# archive does it compile. The archive is the one tagged `v` plus the `version`
+# above, so a release tag and that version have to agree — nothing enforces it,
+# and the fetch is what breaks if they drift. `herdr plugin link` runs neither
+# entry: a local checkout is built with `cargo build --release` by hand.
 [[build]]
 platforms = ["macos", "linux"]
-command = ["sh", "-c", "cargo build --release"]
+command = ["sh", "scripts/install.sh"]
 
 [[build]]
 platforms = ["windows"]
-command = ["cmd", "/c", "cargo build --release"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/install.ps1"]
 
 [[startup]]
 platforms = ["macos", "linux"]
