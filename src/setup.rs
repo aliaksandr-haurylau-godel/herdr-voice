@@ -107,10 +107,16 @@ pub fn config_path() -> Option<PathBuf> {
 pub struct Existing {
     /// `(key, command)` for every `[[keys.command]]` block.
     pub commands: Vec<(String, String)>,
-    /// Every key named by a string assignment directly under `[keys]` —
-    /// `prefix`, `goto`, `new_tab` and the rest. herdr's own defaults are not
+    /// `(key, action)` for every string assignment directly under `[keys]` —
+    /// `prefix`, `goto`, `new_tab` and the rest. The action's name travels with
+    /// the key because a report that says only "some herdr action" leaves the
+    /// person with nothing to go and look at. herdr's own defaults are not
     /// visible here: only what the user wrote down is.
-    pub reserved_keys: Vec<String>,
+    pub reserved_keys: Vec<(String, String)>,
+    /// Every key carried by a `[[keys.command]]` block whose command could not
+    /// be read. herdr honours the block regardless, so the key is taken, and
+    /// nothing in the file says by what.
+    pub unnamed_command_keys: Vec<String>,
 }
 
 pub fn inspect(text: &str) -> Result<Existing, String> {
@@ -125,17 +131,21 @@ pub fn inspect(text: &str) -> Result<Existing, String> {
                 continue;
             };
             for block in blocks {
-                let key = block.get("key").and_then(|v| v.as_str());
-                let command = block.get("command").and_then(|v| v.as_str());
-                if let (Some(key), Some(command)) = (key, command) {
-                    existing
+                let Some(key) = block.get("key").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                match block.get("command").and_then(|v| v.as_str()) {
+                    Some(command) => existing
                         .commands
-                        .push((key.to_string(), command.to_string()));
+                        .push((key.to_string(), command.to_string())),
+                    None => existing.unnamed_command_keys.push(key.to_string()),
                 }
             }
         } else if let Some(bound) = value.as_str() {
             if !bound.is_empty() {
-                existing.reserved_keys.push(bound.to_string());
+                existing
+                    .reserved_keys
+                    .push((bound.to_string(), name.to_string()));
             }
         }
     }
@@ -171,8 +181,19 @@ pub fn decide(existing: &Existing) -> Decision {
                 existing
                     .reserved_keys
                     .iter()
+                    .find(|(k, _)| k == binding.key)
+                    .map(|(_, action)| format!("the herdr action {action:?}"))
+            })
+            .or_else(|| {
+                existing
+                    .unnamed_command_keys
+                    .iter()
                     .find(|k| *k == binding.key)
-                    .map(|_| "a herdr action in your [keys] block".to_string())
+                    .map(|_| {
+                        "a [[keys.command]] block that names no command, so the run \
+                         cannot say what it does"
+                            .to_string()
+                    })
             });
         match holder {
             Some(what) => decision.blocked.push((binding, what)),
@@ -515,16 +536,27 @@ pub fn run(
     for (binding, holder) in &decision.blocked {
         let _ = writeln!(
             out,
-            "not added: {} is already held by {holder}, so {} keeps its key. Bind \
-             {} to a key of your choosing by hand.",
+            "not added: {} is already held by {holder} in {}. Bind {} to a key of \
+             your choosing by hand.",
             binding.key,
-            holder,
+            path.display(),
             binding.command()
         );
     }
 
     if decision.to_add.is_empty() {
-        let _ = writeln!(out, "nothing to add to {}.", path.display());
+        if decision.blocked.is_empty() {
+            let _ = writeln!(out, "nothing to add to {}.", path.display());
+        } else {
+            let _ = writeln!(
+                out,
+                "\nnothing was added to {}: {} of the three bindings are on keys \
+                 something else already holds, named above. Free those keys and run \
+                 this again, or bind the actions to keys of your choosing by hand.",
+                path.display(),
+                decision.blocked.len()
+            );
+        }
         return 0;
     }
 
@@ -977,7 +1009,7 @@ mod tests {
     fn a_binding_of_ours_that_is_already_there_is_not_added_again() {
         let existing = Existing {
             commands: vec![("ctrl+z".into(), "haurylau.voice.ptt".into())],
-            reserved_keys: vec![],
+            ..Existing::default()
         };
         let d = decide(&existing);
         assert_eq!(d.to_add.len(), 2);
@@ -991,7 +1023,7 @@ mod tests {
     fn a_key_held_by_something_else_blocks_that_block_and_no_other() {
         let existing = Existing {
             commands: vec![("ctrl+g".into(), "someone.else.thing".into())],
-            reserved_keys: vec![],
+            ..Existing::default()
         };
         let d = decide(&existing);
         assert_eq!(d.to_add.len(), 2, "the other two are still added");
@@ -1003,8 +1035,8 @@ mod tests {
     #[test]
     fn a_key_the_user_gave_to_a_herdr_action_also_blocks() {
         let existing = Existing {
-            commands: vec![],
-            reserved_keys: vec!["prefix+i".into()],
+            reserved_keys: vec![("prefix+i".into(), "goto".into())],
+            ..Existing::default()
         };
         let d = decide(&existing);
         assert_eq!(d.blocked.len(), 1);
@@ -1015,11 +1047,100 @@ mod tests {
     fn our_own_binding_on_our_own_key_counts_as_present_not_as_a_collision() {
         let existing = Existing {
             commands: vec![("ctrl+g".into(), "haurylau.voice.ptt".into())],
-            reserved_keys: vec![],
+            ..Existing::default()
         };
         let d = decide(&existing);
         assert_eq!(d.already.len(), 1);
         assert!(d.blocked.is_empty(), "it is ours; it is not in the way");
+    }
+
+    /// AC-7 asks what the key is bound to, and the value of the answer is that
+    /// the person can go and look at the thing that is in the way.
+    #[test]
+    fn a_key_held_by_a_herdr_action_is_reported_with_that_action_s_name() {
+        let existing = inspect("[keys]\ngoto = \"prefix+i\"\n").unwrap();
+        let d = decide(&existing);
+        assert_eq!(d.blocked.len(), 1);
+        assert_eq!(d.blocked[0].0.action, "dictate");
+        assert!(
+            d.blocked[0].1.contains("goto"),
+            "it must name the action holding the key, got {:?}",
+            d.blocked[0].1
+        );
+    }
+
+    #[test]
+    fn the_run_names_the_herdr_action_that_holds_the_key() {
+        let path = scratch("run-herdr-action");
+        std::fs::write(&path, "[keys]\ngoto = \"prefix+i\"\n").unwrap();
+        let (code, said) = capture(&FakeHerdr::clean(), Some(path.clone()), true, vec!["y"]);
+        assert_eq!(code, 0, "{said}");
+        assert!(
+            said.contains("goto"),
+            "the report must name the herdr action holding prefix+i: {said}"
+        );
+    }
+
+    /// A block herdr will honour whatever else it is missing. Offering a second
+    /// binding on its key would produce an opaque refusal from
+    /// `herdr config check` instead of the diagnosis this action exists to give.
+    #[test]
+    fn a_command_block_with_a_key_and_no_command_still_reserves_that_key() {
+        let existing = inspect("[[keys.command]]\nkey = \"ctrl+g\"\ntype = \"shell\"\n").unwrap();
+        let d = decide(&existing);
+        assert_eq!(d.to_add.len(), 2, "the other two are still added");
+        assert_eq!(d.blocked.len(), 1);
+        assert_eq!(d.blocked[0].0.action, "ptt");
+        assert!(
+            d.blocked[0].1.contains("names no command"),
+            "it must say plainly that the run cannot identify what holds the key, got {:?}",
+            d.blocked[0].1
+        );
+    }
+
+    #[test]
+    fn a_command_block_that_cannot_be_identified_is_reported_and_not_shadowed() {
+        let path = scratch("run-unnamed-block");
+        std::fs::write(
+            &path,
+            "[[keys.command]]\nkey = \"ctrl+g\"\ntype = \"shell\"\n",
+        )
+        .unwrap();
+        let (code, said) = capture(&FakeHerdr::clean(), Some(path.clone()), true, vec!["y"]);
+        assert_eq!(code, 0, "{said}");
+        assert!(said.contains("ctrl+g"), "{said}");
+        assert!(said.contains("names no command"), "{said}");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !after.contains("haurylau.voice.ptt"),
+            "the key is taken, so nothing of ours goes on it: {after}"
+        );
+        assert!(after.contains("prefix+i"), "the other two still land");
+    }
+
+    /// Nothing was added at all, and the closing line has to say that rather
+    /// than read like a run that had nothing left to do.
+    #[test]
+    fn with_every_key_taken_it_says_nothing_was_added_rather_than_nothing_to_add() {
+        let path = scratch("run-all-taken");
+        std::fs::write(
+            &path,
+            "[[keys.command]]\nkey = \"ctrl+g\"\ntype = \"shell\"\ncommand = \"one\"\n\n\
+             [[keys.command]]\nkey = \"prefix+i\"\ntype = \"shell\"\ncommand = \"two\"\n\n\
+             [[keys.command]]\nkey = \"ctrl+shift+g\"\ntype = \"shell\"\ncommand = \"three\"\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let (code, said) = capture(&FakeHerdr::clean(), Some(path.clone()), true, vec!["y"]);
+        assert_eq!(code, 0, "{said}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        for holder in ["one", "two", "three"] {
+            assert!(said.contains(holder), "every holder is named: {said}");
+        }
+        assert!(
+            said.contains("nothing was added"),
+            "three refusals must not close on a line that reads like success: {said}"
+        );
     }
 
     const SAMPLE: &str = r#"
@@ -1054,8 +1175,12 @@ description = "ours, already here"
     #[test]
     fn it_reads_the_keys_herdr_s_own_actions_are_bound_to() {
         let existing = inspect(SAMPLE).unwrap();
-        assert!(existing.reserved_keys.contains(&"prefix+g".to_string()));
-        assert!(existing.reserved_keys.contains(&"ctrl+b".to_string()));
+        assert!(existing
+            .reserved_keys
+            .contains(&("prefix+g".to_string(), "goto".to_string())));
+        assert!(existing
+            .reserved_keys
+            .contains(&("ctrl+b".to_string(), "prefix".to_string())));
     }
 
     #[test]
