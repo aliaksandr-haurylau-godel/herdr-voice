@@ -371,6 +371,9 @@ impl std::fmt::Display for WriteError {
 /// moment the real file changes is the rename, and an interrupted run cannot
 /// leave a half-written configuration. The candidate takes the original's
 /// permissions first, so replacing a file does not change its mode.
+///
+/// A path that is a symbolic link is resolved first, and the file it points at
+/// is the one that is read, written beside and renamed over.
 pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), WriteError> {
     let io = |path: &Path, e: std::io::Error| WriteError::Io {
         path: path.display().to_string(),
@@ -381,14 +384,23 @@ pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), Writ
         std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
     }
 
-    let original = match std::fs::read_to_string(path) {
+    // A configuration file is often a symbolic link into a dotfiles
+    // repository. The file that is read, written beside and renamed over is the
+    // one the link points at, so the link survives and the real file is the one
+    // that gains the bindings. Renaming over the link itself would leave a
+    // regular file in its place and the real file unchanged, while the run
+    // reported success. A path that does not exist resolves to itself.
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = target.as_path();
+
+    let original = match std::fs::read_to_string(target) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(io(path, e)),
     };
 
     if original.is_some() {
-        let verdict = herdr.check_config(path).map_err(WriteError::Herdr)?;
+        let verdict = herdr.check_config(target).map_err(WriteError::Herdr)?;
         if !verdict.ok {
             return Err(WriteError::OriginalRejected {
                 path: path.display().to_string(),
@@ -404,12 +416,12 @@ pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), Writ
     candidate_text.push('\n');
     candidate_text.push_str(addition);
 
-    let candidate = path.with_extension("toml.herdr-voice-candidate");
+    let candidate = target.with_extension("toml.herdr-voice-candidate");
     std::fs::write(&candidate, &candidate_text).map_err(|e| io(&candidate, e))?;
     // The original exists, so carry its mode onto the candidate: the rename
     // must not silently change the file's permissions.
     if original.is_some() {
-        if let Ok(meta) = std::fs::metadata(path) {
+        if let Ok(meta) = std::fs::metadata(target) {
             let _ = std::fs::set_permissions(&candidate, meta.permissions());
         }
     }
@@ -429,7 +441,7 @@ pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), Writ
         });
     }
 
-    std::fs::rename(&candidate, path).map_err(|e| {
+    std::fs::rename(&candidate, target).map_err(|e| {
         let _ = std::fs::remove_file(&candidate);
         io(path, e)
     })
@@ -792,6 +804,38 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.starts_with("[theme]\nname = \"something\"\n"));
         assert!(after.contains("key = \"ctrl+g\""));
+    }
+
+    /// A configuration file kept in a dotfiles repository and linked into place
+    /// is the arrangement this must survive: renaming over the link would leave
+    /// a regular file in its place and the real file without the bindings,
+    /// while the run reported success.
+    #[test]
+    #[cfg(unix)]
+    fn a_configuration_that_is_a_link_keeps_the_link_and_changes_what_it_points_at() {
+        let path = scratch("symlink");
+        let target = path.parent().unwrap().join("real-config.toml");
+        std::fs::write(&target, "[theme]\n").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        append(
+            &FakeHerdr::clean(),
+            &path,
+            "[[keys.command]]\nkey = \"ctrl+g\"\n",
+        )
+        .unwrap();
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself must still be a link"
+        );
+        let after = std::fs::read_to_string(&target).unwrap();
+        assert!(after.starts_with("[theme]\n"), "{after}");
+        assert!(
+            after.contains("key = \"ctrl+g\""),
+            "the file the link points at is the one that gains the bindings: {after}"
+        );
     }
 
     #[test]
