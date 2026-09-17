@@ -62,6 +62,19 @@ jobs:
       - name: the manifest must parse and name commands that exist
         run: python3 scripts/check_manifest.py
 
+  scripts:
+    name: shell scripts
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: the release-kind rule
+        run: sh scripts/test-release-kind.sh
+
   debris:
     name: editing debris
     runs-on: ubuntu-latest
