@@ -2,10 +2,6 @@
 //! herdr configuration. A herdr plugin manifest cannot declare keys — see
 //! `docs/design.md` section 7 — so this action bridges the gap.
 
-// Nothing calls this module until the `setup` subcommand is routed to it; the
-// allowance goes away with that wiring.
-#![allow(dead_code)]
-
 /// The plugin id, as `herdr-plugin.toml` declares it. A binding addresses an
 /// action as `<plugin id>.<action id>`. Re-exported rather than written out a
 /// second time: two copies of the id could drift apart, and the id is already
@@ -439,6 +435,132 @@ pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), Writ
     })
 }
 
+/// The whole action. `interactive` decides which half runs, and it is a fact
+/// about the process rather than a flag: a pane has a terminal, the action herdr
+/// starts does not.
+pub fn run(
+    herdr: &dyn Herdr,
+    path: Option<PathBuf>,
+    interactive: bool,
+    answer: &mut dyn FnMut() -> Option<String>,
+    out: &mut dyn std::io::Write,
+) -> u8 {
+    if !interactive {
+        return match herdr.open_pane() {
+            Ok(()) => 0,
+            Err(e) => {
+                let body = format!(
+                    "could not open the setup pane: {e}. Close any popup that is open, \
+                     or run `herdr-voice setup` in a terminal."
+                );
+                let _ = herdr.notify("Dictation: setup", &body);
+                let _ = writeln!(out, "{body}");
+                1
+            }
+        };
+    }
+
+    let Some(path) = path else {
+        let _ = writeln!(
+            out,
+            "cannot tell where your herdr configuration is: neither \
+             HERDR_CONFIG_PATH, XDG_CONFIG_HOME nor HOME is set. Set \
+             HERDR_CONFIG_PATH to the file and run this again."
+        );
+        return 1;
+    };
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            let _ = writeln!(out, "cannot read {}: {e}", path.display());
+            return 1;
+        }
+    };
+
+    let existing = match inspect(&text) {
+        Ok(existing) => existing,
+        Err(why) => {
+            let _ = writeln!(
+                out,
+                "cannot read {} as TOML, so nothing was changed: {why}",
+                path.display()
+            );
+            return 1;
+        }
+    };
+
+    let decision = decide(&existing);
+
+    for (binding, key) in &decision.already {
+        let _ = writeln!(
+            out,
+            "already there: {} is bound to {key}",
+            binding.command()
+        );
+    }
+    for (binding, holder) in &decision.blocked {
+        let _ = writeln!(
+            out,
+            "not added: {} is already held by {holder}, so {} keeps its key. Bind \
+             {} to a key of your choosing by hand.",
+            binding.key,
+            holder,
+            binding.command()
+        );
+    }
+
+    if decision.to_add.is_empty() {
+        let _ = writeln!(out, "nothing to add to {}.", path.display());
+        return 0;
+    }
+
+    let snippet = render(&decision.to_add);
+    let _ = writeln!(out, "\nthese go into {}:\n\n{snippet}", path.display());
+    let _ = write!(out, "append them? [y/N] ");
+
+    let said = answer().unwrap_or_default();
+    if !matches!(said.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        let _ = writeln!(out, "\nnothing was changed.");
+        return 0;
+    }
+
+    match append(herdr, &path, &snippet) {
+        Ok(()) => {
+            let _ = writeln!(out, "\nadded to {}:", path.display());
+            for binding in &decision.to_add {
+                let _ = writeln!(out, "  {} on {}", binding.command(), binding.key);
+            }
+            let _ = writeln!(
+                out,
+                "\nthe running herdr does not see this until you run \
+                 `herdr server reload-config`, or press prefix+shift+r."
+            );
+            0
+        }
+        Err(e) => {
+            let _ = writeln!(out, "\n{e}");
+            1
+        }
+    }
+}
+
+/// What `src/main.rs` calls: resolves the path, asks the process whether it has
+/// a terminal, and reads the answer from standard input.
+pub fn main() -> u8 {
+    use std::io::{BufRead, IsTerminal};
+    let herdr = HerdrCli::new();
+    let interactive = std::io::stdin().is_terminal();
+    let mut answer = || {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).ok()?;
+        Some(line)
+    };
+    let mut out = std::io::stdout();
+    run(&herdr, config_path(), interactive, &mut answer, &mut out)
+}
+
 #[cfg(test)]
 pub mod tests_support {
     use super::{Check, Herdr, HerdrError};
@@ -554,6 +676,101 @@ mod tests {
     }
 
     use tests_support::FakeHerdr;
+
+    fn capture(
+        herdr: &dyn Herdr,
+        path: Option<std::path::PathBuf>,
+        interactive: bool,
+        answers: Vec<&str>,
+    ) -> (u8, String) {
+        let mut answers: Vec<String> = answers.into_iter().map(String::from).collect();
+        let mut out: Vec<u8> = Vec::new();
+        let code = run(
+            herdr,
+            path,
+            interactive,
+            &mut || {
+                if answers.is_empty() {
+                    None
+                } else {
+                    Some(answers.remove(0))
+                }
+            },
+            &mut out,
+        );
+        (code, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn without_a_terminal_it_opens_the_pane_and_says_nothing_else() {
+        let herdr = FakeHerdr::clean();
+        let (code, _) = capture(&herdr, None, false, vec![]);
+        assert_eq!(code, 0);
+        assert_eq!(herdr.calls(), vec![tests_support::Call::OpenPane]);
+    }
+
+    #[test]
+    fn a_yes_appends_and_names_the_file_and_what_it_added() {
+        let path = scratch("run-yes");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let (code, said) = capture(&FakeHerdr::clean(), Some(path.clone()), true, vec!["y"]);
+        assert_eq!(code, 0, "{said}");
+        assert!(said.contains(&path.display().to_string()), "{said}");
+        assert!(said.contains("ctrl+g"), "{said}");
+        assert!(
+            said.contains("herdr server reload-config"),
+            "a binding in a file the running server has not reread does nothing: {said}"
+        );
+        assert!(std::fs::read_to_string(&path).unwrap().contains("prefix+i"));
+    }
+
+    #[test]
+    fn a_declined_offer_changes_nothing_and_is_not_a_failure() {
+        let path = scratch("run-no");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let (code, _) = capture(&FakeHerdr::clean(), Some(path.clone()), true, vec!["n"]);
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[theme]\n");
+    }
+
+    #[test]
+    fn a_second_run_adds_nothing_and_says_they_are_already_there() {
+        let path = scratch("run-twice");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        capture(&FakeHerdr::clean(), Some(path.clone()), true, vec!["y"]);
+        let before = std::fs::read_to_string(&path).unwrap();
+        let (code, said) = capture(&FakeHerdr::clean(), Some(path.clone()), true, vec!["y"]);
+        assert_eq!(code, 0, "{said}");
+        assert!(said.contains("already"), "{said}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_key_held_by_something_else_is_named_and_the_rest_still_land() {
+        let path = scratch("run-collision");
+        std::fs::write(
+            &path,
+            "[[keys.command]]\nkey = \"ctrl+g\"\ntype = \"shell\"\ncommand = \"echo hi\"\n",
+        )
+        .unwrap();
+        let (code, said) = capture(&FakeHerdr::clean(), Some(path.clone()), true, vec!["y"]);
+        assert_eq!(code, 0, "{said}");
+        assert!(said.contains("ctrl+g"), "{said}");
+        assert!(
+            said.contains("echo hi"),
+            "it must name what holds the key: {said}"
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("prefix+i"), "the other two still land");
+        assert!(!after.contains("haurylau.voice.ptt"));
+    }
+
+    #[test]
+    fn with_no_path_to_resolve_it_says_so_rather_than_guessing() {
+        let (code, said) = capture(&FakeHerdr::clean(), None, true, vec!["y"]);
+        assert_eq!(code, 1);
+        assert!(said.contains("HERDR_CONFIG_PATH"), "{said}");
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("herdr-voice-setup-{name}"));
