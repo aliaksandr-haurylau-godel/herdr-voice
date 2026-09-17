@@ -12,6 +12,7 @@
 /// the one `src/transport.rs:18` names.
 pub use crate::transport::PLUGIN_ID;
 
+#[derive(Debug)]
 pub struct Binding {
     pub action: &'static str,
     pub key: &'static str,
@@ -145,6 +146,46 @@ pub fn inspect(text: &str) -> Result<Existing, String> {
     Ok(existing)
 }
 
+#[derive(Debug, Default)]
+pub struct Decision {
+    pub to_add: Vec<&'static Binding>,
+    /// Ours, already bound — with the key it is bound to, which may not be ours.
+    pub already: Vec<(&'static Binding, String)>,
+    /// Our key, held by something else — with what holds it.
+    pub blocked: Vec<(&'static Binding, String)>,
+}
+
+/// Present beats blocked: a binding of ours that already exists is reported as
+/// present whatever key it sits on, and its key is never treated as somebody
+/// else's.
+pub fn decide(existing: &Existing) -> Decision {
+    let mut decision = Decision::default();
+    for binding in BINDINGS.iter() {
+        let command = binding.command();
+        if let Some((key, _)) = existing.commands.iter().find(|(_, c)| *c == command) {
+            decision.already.push((binding, key.clone()));
+            continue;
+        }
+        let holder = existing
+            .commands
+            .iter()
+            .find(|(k, _)| *k == binding.key)
+            .map(|(_, c)| c.clone())
+            .or_else(|| {
+                existing
+                    .reserved_keys
+                    .iter()
+                    .find(|k| *k == binding.key)
+                    .map(|_| "a herdr action in your [keys] block".to_string())
+            });
+        match holder {
+            Some(what) => decision.blocked.push((binding, what)),
+            None => decision.to_add.push(binding),
+        }
+    }
+    decision
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +223,63 @@ mod tests {
             .expect("the snippet this action prints must itself be valid TOML");
         let commands = parsed["keys"]["command"].as_array().unwrap();
         assert_eq!(commands.len(), 3);
+    }
+
+    #[test]
+    fn a_clean_configuration_takes_all_three() {
+        let d = decide(&Existing::default());
+        assert_eq!(d.to_add.len(), 3);
+        assert!(d.already.is_empty());
+        assert!(d.blocked.is_empty());
+    }
+
+    #[test]
+    fn a_binding_of_ours_that_is_already_there_is_not_added_again() {
+        let existing = Existing {
+            commands: vec![("ctrl+z".into(), "haurylau.voice.ptt".into())],
+            reserved_keys: vec![],
+        };
+        let d = decide(&existing);
+        assert_eq!(d.to_add.len(), 2);
+        assert_eq!(d.already.len(), 1);
+        // It says which key it is on, which is not the key we would have used.
+        assert_eq!(d.already[0].0.action, "ptt");
+        assert_eq!(d.already[0].1, "ctrl+z");
+    }
+
+    #[test]
+    fn a_key_held_by_something_else_blocks_that_block_and_no_other() {
+        let existing = Existing {
+            commands: vec![("ctrl+g".into(), "someone.else.thing".into())],
+            reserved_keys: vec![],
+        };
+        let d = decide(&existing);
+        assert_eq!(d.to_add.len(), 2, "the other two are still added");
+        assert_eq!(d.blocked.len(), 1);
+        assert_eq!(d.blocked[0].0.action, "ptt");
+        assert_eq!(d.blocked[0].1, "someone.else.thing");
+    }
+
+    #[test]
+    fn a_key_the_user_gave_to_a_herdr_action_also_blocks() {
+        let existing = Existing {
+            commands: vec![],
+            reserved_keys: vec!["prefix+i".into()],
+        };
+        let d = decide(&existing);
+        assert_eq!(d.blocked.len(), 1);
+        assert_eq!(d.blocked[0].0.action, "dictate");
+    }
+
+    #[test]
+    fn our_own_binding_on_our_own_key_counts_as_present_not_as_a_collision() {
+        let existing = Existing {
+            commands: vec![("ctrl+g".into(), "haurylau.voice.ptt".into())],
+            reserved_keys: vec![],
+        };
+        let d = decide(&existing);
+        assert_eq!(d.already.len(), 1);
+        assert!(d.blocked.is_empty(), "it is ours; it is not in the way");
     }
 
     const SAMPLE: &str = r#"
