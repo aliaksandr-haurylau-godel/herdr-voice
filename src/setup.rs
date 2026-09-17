@@ -587,9 +587,16 @@ pub fn run(
     let _ = writeln!(out, "\nthese go into {}:\n\n{snippet}", path.display());
     let _ = write!(
         out,
-        "append these {} to the file named above? [y/N] ",
+        "append these {} to the file named above? [y/N] then Enter: ",
         plural_bindings(decision.to_add.len())
     );
+    // "then Enter" is not decoration. The answer is read with `read_line`, which
+    // returns nothing until a newline arrives, while the terminal echoes the
+    // keystroke — so a person who presses `y` alone sees their answer on the
+    // screen and the run standing still, and reads that as done. It happened
+    // twice to the first person who used this, and both times nothing was
+    // written and nothing said why.
+    //
     // The question has no newline of its own, and standard output is line
     // buffered: without this flush it sits in the buffer while the process
     // blocks on the answer, and the person is looking at a cursor on an empty
@@ -813,6 +820,11 @@ mod tests {
         assert!(
             on_screen.contains("3 bindings"),
             "the question must say what answering it does: {on_screen:?}"
+        );
+        assert!(
+            on_screen.contains("Enter"),
+            "the answer is read a line at a time, so the question must say that a \
+             keystroke alone is not an answer: {on_screen:?}"
         );
     }
 
