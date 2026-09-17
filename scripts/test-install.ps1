@@ -184,3 +184,9 @@ CheckContains 'it says where to get a toolchain' $LastSaid 'rustup.rs'
 
 if ($failures -gt 0) { Write-Host "`n$failures assertion(s) failed"; exit 1 }
 Write-Host "`nall install.ps1 assertions passed"
+# Explicit, and not redundant. RunMain drives a child PowerShell whose last case
+# exits 1 on purpose, so $LASTEXITCODE is 1 when the suite finishes even though
+# every assertion passed. `pwsh -File` ignores that and returns the script's own
+# code, which is why this passed locally; GitHub's `shell: pwsh` appends
+# `exit $LASTEXITCODE`, which turned a green suite into a red job.
+exit 0
