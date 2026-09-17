@@ -870,6 +870,128 @@ mod tests {
         );
     }
 
+    /// The one path by which the offer reaches a person who has no keybinding
+    /// yet: the action opens this pane, and the pane runs the interactive half.
+    /// A renamed or removed entry leaves the feature installed and unreachable,
+    /// and `scripts/check_manifest.py` cannot see it — it checks that every
+    /// command named is one the binary accepts, not that this entry exists.
+    #[test]
+    fn the_manifest_declares_the_pane_the_action_asks_herdr_to_open() {
+        let manifest: toml::Value =
+            toml::from_str(&std::fs::read_to_string("herdr-plugin.toml").unwrap()).unwrap();
+        let args = open_pane_args();
+        let entrypoint = args[args.iter().position(|a| *a == "--entrypoint").unwrap() + 1];
+        let panes = manifest["panes"].as_array().unwrap();
+        let pane = panes
+            .iter()
+            .find(|p| p["id"].as_str() == Some(entrypoint))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the manifest declares no pane with the id {entrypoint:?}, which is \
+                        the entrypoint this action asks herdr to open"
+                )
+            });
+        let command: Vec<&str> = pane["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            command.get(1),
+            Some(&"setup"),
+            "the pane must run the setup subcommand, got {command:?}"
+        );
+    }
+
+    /// The design rests on the write being one rename: an interrupted copy
+    /// would leave a half-written configuration, which herdr answers with a
+    /// parse error and a fall back to its defaults. A copy in place keeps the
+    /// inode; a rename does not.
+    #[test]
+    #[cfg(unix)]
+    fn the_file_is_replaced_by_a_rename_rather_than_written_in_place() {
+        use std::os::unix::fs::MetadataExt;
+        let path = scratch("rename");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let before = std::fs::metadata(&path).unwrap().ino();
+        append(&FakeHerdr::clean(), &path, "[[keys.command]]\n").unwrap();
+        let after = std::fs::metadata(&path).unwrap().ino();
+        assert_ne!(
+            before, after,
+            "the configuration must arrive by a rename, not by being written over"
+        );
+    }
+
+    /// The file this edits is hand-written and commented, and the bindings in
+    /// it carry the reasons their keys were chosen.
+    #[test]
+    fn a_commented_hand_written_file_keeps_every_byte_it_had() {
+        let path = scratch("hand-written");
+        let original = "# my herdr configuration\n\
+                        # the prefix stays on ctrl+b — ctrl+a belongs to the shell\n\
+                        \n\
+                        [keys]\n\
+                        prefix = \"ctrl+b\"\n\
+                        \n\
+                        [[keys.command]]\n\
+                        \tkey = \"prefix+t\"\n\
+                        \ttype = \"shell\"\n\
+                        \tcommand = \"echo hello\"  # a naïve chord: alt+g typed © here\n";
+        std::fs::write(&path, original).unwrap();
+        append(
+            &FakeHerdr::clean(),
+            &path,
+            "[[keys.command]]\nkey = \"ctrl+g\"\n",
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.starts_with(original),
+            "nobody's bytes may be lost, got:\n{after}"
+        );
+        assert!(after.contains("key = \"ctrl+g\""), "{after}");
+    }
+
+    /// The last line of a file with no trailing newline would otherwise have
+    /// the first line of the block glued onto it, and the parse error that
+    /// makes drops the whole configuration.
+    #[test]
+    fn a_file_that_does_not_end_in_a_newline_is_not_glued_to_the_block() {
+        let path = scratch("no-trailing-newline");
+        std::fs::write(&path, "[theme]\nname = \"something\"").unwrap();
+        append(
+            &FakeHerdr::clean(),
+            &path,
+            "[[keys.command]]\nkey = \"ctrl+g\"\n",
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("name = \"something\"\n\n[[keys.command]]"),
+            "the last line must keep a line of its own, with a blank line before \
+             the block: {after:?}"
+        );
+        let parsed: toml::Value = toml::from_str(&after)
+            .unwrap_or_else(|e| panic!("the result must still parse as TOML: {e}\n{after}"));
+        assert_eq!(parsed["theme"]["name"].as_str(), Some("something"));
+        assert_eq!(parsed["keys"]["command"].as_array().unwrap().len(), 1);
+    }
+
+    /// A configuration is a file people keep private, and the rename must not
+    /// hand it the candidate's fresh permissions.
+    #[test]
+    #[cfg(unix)]
+    fn the_mode_the_original_had_is_the_mode_the_result_has() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = scratch("mode");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        append(&FakeHerdr::clean(), &path, "[[keys.command]]\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "got {mode:o}");
+    }
+
     #[test]
     fn a_file_that_does_not_exist_is_created_with_its_directory() {
         let path = scratch("absent")
@@ -897,6 +1019,18 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "[nonsense]\nfoo = 1\n",
             "nothing may be written into a configuration herdr is already unhappy with"
+        );
+        // Not only unchanged: untouched. The original is judged before the
+        // candidate is written, so no candidate is left beside it.
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            leftovers.len(),
+            1,
+            "a candidate must never be written next to a configuration that was \
+             rejected before it: {leftovers:?}"
         );
     }
 
