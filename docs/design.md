@@ -356,6 +356,17 @@ archive cannot be reached at all they stop rather than compiling unasked. A tag
 installed checkout is a shallow clone with no tags, so the manifest is the only
 place the script can learn what to ask for.
 
+The digest comes from the same release as the archive, so it establishes that
+what arrived is what was published — a truncated download, a damaged one, an
+archive swapped in transit. It does not establish who published it: anyone able
+to rewrite a release asset can rewrite the digest beside it. Signing is what
+would carry that, and it is out of scope here.
+
+A fork installs the upstream archives. Both scripts name this repository, so
+`herdr plugin install <fork>/herdr-voice` fetches from here for the matching tag
+rather than from the fork. A fork that publishes its own releases has to change
+that constant.
+
 The repository is public, and the author works on client projects. A leak gate
 runs in two places on the same rule set: a pre-commit hook and a CI job. It blocks
 ordinary secrets plus employer, client and internal-system identifiers, and

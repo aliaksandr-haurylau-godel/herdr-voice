@@ -453,3 +453,13 @@ pull request lands second rebases.
   `v0.0.0` archives. A revision whose manifest names a version nobody released
   gets the fallback, correctly.
 - **It does not add a musl target**, so the archives stay unusable on Alpine.
+- **It does not authenticate the publisher.** The digest is fetched from the same
+  release as the archive, so it catches a damaged or truncated download and not a
+  rewritten release: whoever can replace the asset can replace the digest. Signing
+  is what would carry that, and the issue puts it out of bounds. `docs/design.md`
+  section 8 says so too, so a later reader does not mistake this for supply-chain
+  verification.
+- **It does not make a fork install the fork's own archives.** Both scripts name
+  this repository, so an install from a fork fetches from here. Stated in
+  `docs/design.md` section 8 rather than handled, because a fork that publishes
+  its own releases is a different piece of work.
