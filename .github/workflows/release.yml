@@ -27,6 +27,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - name: audio headers (Linux)
+        # cpal builds against ALSA on Linux, and alsa-sys's build script fails
+        # without these headers, so neither Linux target compiles at all. The
+        # same step has been in check.yml since the beginning; this workflow
+        # never had it and had never been run, so the gap first appeared when
+        # the v0.0.0 tag was pushed and both Linux jobs died on alsa-sys.
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: build
         run: cargo build --release --target ${{ matrix.target }}
       - name: package
