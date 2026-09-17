@@ -404,6 +404,93 @@ That is why the two defects above were found before the gate reported them. A
 plan whose central risk is shell semantics can be run, and running it is cheaper
 than reasoning about it and more reliable than either.
 
+### S4 Implement
+
+- produced: code, in eight commits on `feat/42-install`
+- date: 2026-09-17
+
+All seven tasks executed as planned, the four gates green before each commit, and
+the shell suites run under `sh`, `dash` and `bash`, because `dash` is what the
+Linux runner uses.
+
+Two deviations, both deliberate. `install.ps1` asks through a `Test-HvCargo`
+function rather than an inline `Get-Command`, mirroring the `hv_have_cargo` seam
+the shell script has. And the Windows CI job runs the suite under `shell: pwsh`
+directly rather than the plan's `pwsh -File` nested inside `shell: pwsh`, which
+would have started a second PowerShell for nothing. `pwsh` turned out to be on
+this machine, so the Windows tests were run rather than deferred to CI as the
+plan allowed.
+
+#### The review of the diff
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff c64697c..2b1b5d0
+  reviewer: code
+  verdict: QUESTIONS
+  date: 2026-09-17
+  findings: 7 important, 0 critical
+```
+
+No finding was a wrong answer. Most were a right answer that could not be relied
+on, which is the shape worth recording.
+
+**`curl` had no transfer timeout.** The design promises that a timeout stops the
+install, and curl has no maximum transfer time by default — so a connection that
+opens and then stalls would hang the build entry indefinitely with nothing on
+screen. Everything about that rule was right except that it was not implemented.
+`--connect-timeout 20 --speed-limit 1024 --speed-time 30` ends a stalled transfer
+without capping a slow but living one.
+
+**The container check rested on something nobody had established.** It read the
+install log for "verified against its published digest". herdr reports a build
+command's output when the build *fails*, and nothing in the contract says it
+echoes a successful one — so against a herdr that stays quiet, the check would
+have failed a working install and told the person the build entry had not run.
+Rather than establish herdr's behaviour and depend on it, both scripts now write
+what they did to `target/release/.herdr-voice-install` and the check reads that.
+
+**The Windows script was tested under the wrong interpreter, and barely tested.**
+The manifest runs `powershell`, which is Windows PowerShell 5.1; CI ran `pwsh`,
+which is PowerShell 7. They differ in exactly the uncovered code:
+`Invoke-WebRequest` raises `WebException` in one and `HttpResponseException` in
+the other, so the status extraction the fetch depends on is a different type in
+each. CI now runs both. Of the five outcomes, the shell script covered all five
+and the PowerShell script covered none.
+
+Writing that suite found a defect, which is the argument for having written it:
+**PowerShell resolves a variable a function does not define from its caller's
+scope**, so the test's fetch stub was silently reading `Invoke-HvMain`'s own
+`$archivePath` and copying the wrong file. The locals are now named so they
+cannot collide. Building paths per segment with `Join-Path` rather than as a
+literal `target\release` fixed the other half and made the suite runnable off
+Windows.
+
+The rest: the temporary directory is removed on Windows as it already was on
+Unix; a verified archive that will not unpack says so rather than ending on
+`tar`'s own complaint; a failed source build says nothing was installed; digests
+compare case-insensitively; and `scripts/check_manifest.py` now fails when a
+build entry names a script that is not in the tree — the same class of defect
+that script exists to catch, verified by introducing a typo and watching it fail.
+
+Two documentation points from the same review. `docs/design.md` section 8 said
+the entries "refuse it if its bytes do not match the published digest" without
+saying what that buys: a digest fetched from the release it verifies proves the
+archive arrived intact, not who published it. And a fork installs the upstream
+archives, because both scripts name this repository.
+
+After the fixes: 39 shell assertions, 23 PowerShell assertions, 6 for the release
+rule, and the 440 Rust tests, all passing.
+
+### S5 Verify
+
+Not started. It needs the `v0.0.0` prerelease published, which is outward-facing
+and the owner's to authorise. AC-6, AC-6a and AC-6b are open until then; every
+other criterion is met and tested.
+
+## Notes
+
 The four local gates for every commit on this branch: `cargo test`,
 `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`,
 `python3 scripts/check_manifest.py`.
