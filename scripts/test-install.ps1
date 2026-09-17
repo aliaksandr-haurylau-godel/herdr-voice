@@ -123,7 +123,19 @@ Invoke-HvMain
     Set-Content -Path $file -Value $overrides
     $out = Join-Path $fixture 'out.txt'
     $exe = (Get-Process -Id $PID).Path
-    & $exe -NoProfile -ExecutionPolicy Bypass -File $file *> $out
+    # Windows PowerShell 5.1 turns anything a native command writes to stderr
+    # into a terminating error while $ErrorActionPreference is 'Stop'. Every
+    # failing case here writes its message to stderr on purpose, so under 5.1 the
+    # child's correct behaviour would kill this suite — and it did, on the first
+    # run that ever executed on Windows. PowerShell 7 does not do this, which is
+    # why the pwsh step stayed green. Relaxed for the call and put back after.
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $exe -NoProfile -ExecutionPolicy Bypass -File $file *> $out
+    } finally {
+        $ErrorActionPreference = $saved
+    }
     $script:LastSaid = (Get-Content $out -Raw)
     return $LASTEXITCODE
 }
