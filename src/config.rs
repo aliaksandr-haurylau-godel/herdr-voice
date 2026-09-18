@@ -3,7 +3,7 @@
 //! Only the keys this issue needs are read: `doctor` reports on the model and the
 //! rewrite engine. Keys belonging to later stages are ignored rather than refused,
 //! so a file written for a later version does not stop the daemon. The location is
-//! the directory herdr itself computes — `herdr plugin config-dir haurylau.voice`
+//! the directory herdr itself computes — `herdr plugin config-dir herdr-voice`
 //! prints it even for a plugin that is not installed. See `tasks/3/DESIGN_3.md`,
 //! section 4, and `docs/design.md`, section 7.
 
@@ -573,7 +573,7 @@ mod tests {
         };
         assert_eq!(
             directory(&xdg).unwrap(),
-            PathBuf::from("/tmp/xdg/herdr/plugins/config/haurylau.voice")
+            PathBuf::from("/tmp/xdg/herdr/plugins/config/herdr-voice")
         );
 
         let home = Vars {
@@ -583,7 +583,7 @@ mod tests {
         };
         assert_eq!(
             directory(&home).unwrap(),
-            PathBuf::from("/tmp/home/.config/herdr/plugins/config/haurylau.voice")
+            PathBuf::from("/tmp/home/.config/herdr/plugins/config/herdr-voice")
         );
 
         let nothing = Vars {

@@ -27,7 +27,7 @@
 
 set -eu
 
-PLUGIN_ID="haurylau.voice"
+PLUGIN_ID="herdr-voice"
 REPO="${HERDR_VOICE_REPO:-aliaksandr-haurylau-godel/herdr-voice}"
 REF="${HERDR_VOICE_REF:-v0.0.0}"
 WORK="${HERDR_VOICE_WORK:-/tmp/herdr-voice-install-check}"

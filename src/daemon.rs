@@ -992,7 +992,7 @@ pub fn context_note(request: &Request) -> Option<String> {
 }
 
 /// One line per accepted request, on standard error. herdr captures a plugin's
-/// standard error, so `herdr plugin log list --plugin haurylau.voice` shows it.
+/// standard error, so `herdr plugin log list --plugin herdr-voice` shows it.
 pub fn request_line(request: &Request) -> String {
     format!(
         "request command={} entrypoint={} context={} bytes",

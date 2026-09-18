@@ -738,10 +738,14 @@ mod tests {
         assert!(rendered.contains("key = \"ctrl+g\""), "{rendered}");
         assert!(rendered.contains("type = \"plugin_action\""), "{rendered}");
         assert!(
-            rendered.contains("command = \"haurylau.voice.ptt\""),
+            rendered.contains("command = \"herdr-voice.ptt\""),
             "{rendered}"
         );
         assert!(rendered.contains("description = "), "{rendered}");
+        assert!(
+            !rendered.contains("haurylau"),
+            "the snippet is what a person pastes into their configuration: {rendered}"
+        );
     }
 
     #[test]
@@ -919,7 +923,7 @@ mod tests {
         );
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("prefix+i"), "the other two still land");
-        assert!(!after.contains("haurylau.voice.ptt"));
+        assert!(!after.contains("herdr-voice.ptt"));
     }
 
     #[test]
@@ -1215,7 +1219,7 @@ mod tests {
                 "pane",
                 "open",
                 "--plugin",
-                "haurylau.voice",
+                "herdr-voice",
                 "--entrypoint",
                 "setup",
             ]
@@ -1373,7 +1377,7 @@ mod tests {
                     "pane",
                     "open",
                     "--plugin",
-                    "haurylau.voice",
+                    "herdr-voice",
                     "--entrypoint",
                     "setup",
                 ]
@@ -1440,7 +1444,7 @@ mod tests {
     #[test]
     fn a_binding_of_ours_that_is_already_there_is_not_added_again() {
         let existing = Existing {
-            commands: vec![("ctrl+z".into(), "haurylau.voice.ptt".into())],
+            commands: vec![("ctrl+z".into(), "herdr-voice.ptt".into())],
             ..Existing::default()
         };
         let d = decide(&existing);
@@ -1478,7 +1482,7 @@ mod tests {
     #[test]
     fn our_own_binding_on_our_own_key_counts_as_present_not_as_a_collision() {
         let existing = Existing {
-            commands: vec![("ctrl+g".into(), "haurylau.voice.ptt".into())],
+            commands: vec![("ctrl+g".into(), "herdr-voice.ptt".into())],
             ..Existing::default()
         };
         let d = decide(&existing);
@@ -1544,7 +1548,7 @@ mod tests {
         assert!(said.contains("names no command"), "{said}");
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
-            !after.contains("haurylau.voice.ptt"),
+            !after.contains("herdr-voice.ptt"),
             "the key is taken, so nothing of ours goes on it: {after}"
         );
         assert!(after.contains("prefix+i"), "the other two still land");
@@ -1589,7 +1593,7 @@ description = "not ours"
 [[keys.command]]
 key = "ctrl+g"
 type = "plugin_action"
-command = "haurylau.voice.ptt"
+command = "herdr-voice.ptt"
 description = "ours, already here"
 "#;
 
@@ -1598,7 +1602,7 @@ description = "ours, already here"
         let existing = inspect(SAMPLE).unwrap();
         assert!(existing
             .commands
-            .contains(&("ctrl+g".to_string(), "haurylau.voice.ptt".to_string())));
+            .contains(&("ctrl+g".to_string(), "herdr-voice.ptt".to_string())));
         assert!(existing
             .commands
             .contains(&("prefix+d".to_string(), "someone.else.toggle".to_string())));

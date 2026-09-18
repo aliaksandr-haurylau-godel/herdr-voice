@@ -119,7 +119,7 @@ fn with_standard_input_a_pipe_it_opens_the_pane_and_writes_nothing() {
             "pane",
             "open",
             "--plugin",
-            "haurylau.voice",
+            "herdr-voice",
             "--entrypoint",
             "setup",
         ]

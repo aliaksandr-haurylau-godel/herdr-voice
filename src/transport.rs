@@ -15,7 +15,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 /// The plugin id, which is also the last component of every derived path.
-pub const PLUGIN_ID: &str = "haurylau.voice";
+pub const PLUGIN_ID: &str = "herdr-voice";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Address {
@@ -266,7 +266,7 @@ mod tests {
         };
         assert_eq!(
             address(&vars).unwrap().display(),
-            "/tmp/xdg/herdr/plugins/haurylau.voice/voice.sock"
+            "/tmp/xdg/herdr/plugins/herdr-voice/voice.sock"
         );
 
         let vars = Vars {
@@ -276,7 +276,7 @@ mod tests {
         };
         assert_eq!(
             address(&vars).unwrap().display(),
-            "/tmp/home/.local/state/herdr/plugins/haurylau.voice/voice.sock"
+            "/tmp/home/.local/state/herdr/plugins/herdr-voice/voice.sock"
         );
     }
 

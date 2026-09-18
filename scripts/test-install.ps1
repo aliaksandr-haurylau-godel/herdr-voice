@@ -46,7 +46,7 @@ New-Item -ItemType Directory -Path $fixture | Out-Null
 try {
 
 @'
-id = "haurylau.voice"
+id = "herdr-voice"
 name = "Voice"
 version = "0.4.2"
 min_herdr_version = "0.8.0"

@@ -75,7 +75,7 @@ pub fn outcome(result: Result<Reply, ClientError>) -> Outcome {
             code: 1,
             message: Some(format!(
                 "the daemon did not answer within {} seconds; \
-                 check `herdr plugin log list --plugin haurylau.voice`",
+                 check `herdr plugin log list --plugin herdr-voice`",
                 waited.as_secs()
             )),
         },
