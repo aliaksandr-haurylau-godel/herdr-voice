@@ -964,13 +964,27 @@ fn transcribe_take(
         &take.target,
         &text,
     ) {
-        Ok(()) => (
-            Reply::Ok(format!(
-                "delivered to {} [{:.1} dB]",
-                take.target, take.level_dbfs
-            )),
-            Reported::No,
-        ),
+        Ok(()) => {
+            // A take that was read is a take nobody needs to find — the other
+            // half of the rule `capture::discard` states. Only here: every other
+            // ending names this path to somebody, in a reply or in the journal,
+            // and deleting there would turn a promise into a pointer at nothing.
+            if runtime.records.is_none() {
+                if let Err(why) = std::fs::remove_file(&take.path) {
+                    runtime.journal.write(&recording_kept_line(
+                        &take.path.display().to_string().replace('\n', " "),
+                        &why.to_string().replace('\n', " "),
+                    ));
+                }
+            }
+            (
+                Reply::Ok(format!(
+                    "delivered to {} [{:.1} dB]",
+                    take.target, take.level_dbfs
+                )),
+                Reported::No,
+            )
+        }
         Err(why) => {
             // Whether a pane id or a path can carry a newline was never
             // established either way, and both sit ahead of the transcript in
@@ -1097,6 +1111,17 @@ pub fn record_failed_line(directory: &str, why: &str) -> String {
         "record failed: directory={directory} reason={why}; dictation is \
          unaffected — make that directory writable, or set [record] transcripts \
          = false to stop recording"
+    )
+}
+
+/// Written when a delivered take's recording could not be removed. The take
+/// succeeded and the reply says so; this says the recording is still on disk,
+/// why, and what to do about it.
+pub fn recording_kept_line(path: &str, why: &str) -> String {
+    format!(
+        "recording kept: {path} reason={why}; the text was delivered — remove the \
+         file by hand, or set [record] transcripts = true to keep recordings on \
+         purpose"
     )
 }
 
@@ -1809,6 +1834,85 @@ mod tests {
         assert_eq!(found.len(), 1, "exactly one record: {found:?}");
         serde_json::from_str(&std::fs::read_to_string(&found[0]).expect("read record"))
             .expect("valid json")
+    }
+
+    #[test]
+    fn a_delivered_take_leaves_no_recording_when_the_key_is_off() {
+        let (mut runtime, _journal, dir) =
+            runtime_recording("fix the worklog entry", Some("Fix it."), "gone");
+        runtime.records = None;
+        runtime.takes = dir.clone();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let take = take_for_recording("gone");
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Ok(_)), "{reply:?}");
+        assert!(!take.path.exists(), "the recording goes with the take");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_delivered_take_keeps_its_recording_when_the_key_is_on() {
+        let (mut runtime, _journal, dir) =
+            runtime_recording("fix the worklog entry", Some("Fix it."), "kept");
+        runtime.takes = dir.clone();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let take = take_for_recording("kept");
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Ok(_)), "{reply:?}");
+        assert!(
+            take.path.exists(),
+            "the recording is kept beside its record"
+        );
+        assert!(
+            take.path.with_extension("json").exists(),
+            "and the record is there"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_take_whose_delivery_was_refused_keeps_its_recording_with_the_key_off() {
+        let dir = records_dir("refused");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        );
+        let (mut runtime, _journal) = runtime_reading_back(fake, false);
+        runtime.recognition = Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+            "fix the worklog entry".to_string(),
+        ))));
+        runtime.records = None;
+        runtime.takes = dir.clone();
+        let take = take_for_recording("refused");
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Error(_)), "{reply:?}");
+        assert!(
+            take.path.exists(),
+            "the reply names this path; deleting it would point at nothing"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_take_that_failed_recognition_keeps_its_recording_with_the_key_off() {
+        let (mut runtime, _journal, dir) = runtime_recording("unused", Some("unused"), "no-engine");
+        runtime.records = None;
+        runtime.recognition = Err("no engine is configured".to_string());
+        runtime.takes = dir.clone();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let take = take_for_recording("no-engine");
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Error(_)), "{reply:?}");
+        assert!(
+            take.path.exists(),
+            "the reply names this path; deleting it would point at nothing"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
