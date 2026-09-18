@@ -329,6 +329,28 @@ mod tests {
         }
     }
 
+    /// The daemon, the recorder and `doctor` all take the takes directory from
+    /// this one function, so what it answers is the whole of where a take's files
+    /// live. Both branches are pinned: the state directory when there is one, and
+    /// the relative fallback when the environment names none — the daemon records
+    /// there rather than refusing, so `doctor` has to name the same place.
+    #[test]
+    fn the_takes_directory_sits_under_the_state_directory_and_falls_back_to_a_relative_one() {
+        let named = Vars {
+            state_dir: Some("/tmp/herdr-state".into()),
+            xdg_state_home: None,
+            home: None,
+        };
+        assert_eq!(
+            takes_directory(&named),
+            std::path::Path::new("/tmp/herdr-state/takes")
+        );
+        assert_eq!(
+            takes_directory(&Vars::default()),
+            std::path::Path::new("takes")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_state_directory_from_herdr_wins() {

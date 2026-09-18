@@ -1892,6 +1892,13 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create the directory");
         let take = take_for_recording("stuck");
         std::fs::write(&take.path, b"audio").expect("write the recording");
+        // Enough older takes that the bound has removals to attempt as well, so
+        // that this one fixture covers both journal lines: the recording that
+        // could not be removed, and the bound that could not do its own work.
+        for n in 0..=crate::record::KEEP {
+            let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
+            std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
+        }
         let mut locked = std::fs::metadata(&dir).expect("metadata").permissions();
         locked.set_mode(0o500);
         std::fs::set_permissions(&dir, locked).expect("lock the directory");
@@ -1917,6 +1924,14 @@ mod tests {
             "and it names the file: {kept}"
         );
         assert!(kept.contains("remove the"), "and what to do next: {kept}");
+        let stuck = lines
+            .iter()
+            .find(|line| line.starts_with("take not removed:"))
+            .unwrap_or_else(|| panic!("the bound's own failure is reported too: {lines:?}"));
+        assert!(
+            stuck.contains("takes could not be removed"),
+            "one line naming how many: {stuck}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

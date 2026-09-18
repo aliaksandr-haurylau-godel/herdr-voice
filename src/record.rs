@@ -361,12 +361,25 @@ mod tests {
             let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
             std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
         }
+        // Something else's file, sorting first so that only the extension filter
+        // keeps it out of the fifty. Nothing here writes a `.tmp`; the filter is
+        // there for what somebody else leaves behind.
+        let stray = dir.join("0000000000000-1-0.tmp");
+        std::fs::write(&stray, b"not ours").expect("stray");
         let failure = bound(&dir, Path::new("/nowhere/none.wav"));
         assert!(failure.is_none(), "{failure:?}");
         let kept = std::fs::read_dir(&dir).expect("read dir").flatten().count();
-        assert_eq!(kept, KEEP);
+        assert_eq!(
+            kept,
+            KEEP + 1,
+            "the fifty takes, and the file that is not one"
+        );
         assert!(!dir.join("1000000000000-1-0.wav").exists());
         assert!(dir.join("1000000000051-1-51.wav").exists());
+        assert!(
+            stray.exists(),
+            "a file with another extension is not a take"
+        );
     }
 
     #[test]
