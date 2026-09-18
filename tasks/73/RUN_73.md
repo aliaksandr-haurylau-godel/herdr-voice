@@ -782,3 +782,32 @@ id may still appear: `LEGACY_PLUGIN_ID`, the tests, `tasks/` and
 and what a rename leaves behind. The criterion was written before that section
 existed, and a document explaining a rename cannot do it without naming what was
 renamed. Recorded rather than quietly allowed.
+
+### Rebased a second time, onto `98a6073`
+
+#79 landed — the record of the corrected notes of `v0.1.0-beta.1` — and appends to
+`docs/evidence.md` as this branch does. One conflict, in that file again.
+
+Resolved by taking both sides exactly as they were, in the order they landed, with
+nothing reordered, reflowed or normalised: `main`'s copy of the file is a byte-for-byte
+prefix of the result, and #79's section inside it is byte-for-byte what it is on
+`main`. Both were asserted rather than eyeballed. A rebase that reformats somebody
+else's evidence makes the next conflict worse and hides what actually changed —
+and #80 is appending to the same file.
+
+The first rebase was checked the same way afterwards: against the base it landed on,
+this branch's `docs/evidence.md` is 109 lines added and nothing removed or altered.
+
+Four gates again from scratch on the rebased tree — 527 + 2 tests, clippy,
+`fmt --check`, `check_manifest.py` — plus `test-release-notes.sh` and
+`test-release-kind.sh`, and the Windows dead-code approximation with the windows
+arms enabled, because `main` has moved twice since the last pass.
+
+### AC-11 is not met, and the merge does not change that
+
+The owner decided to merge without the by-hand check. What `docs/evidence.md` says
+about it stands exactly as written: that the toast reaches the screen when herdr
+itself starts the daemon from the manifest's `[[startup]]` entry is the one claim
+nothing has measured. It is now a statement about something merged rather than
+about something proposed, which makes it matter more, not less. AC-11 stays unmet
+until somebody runs it.
