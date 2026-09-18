@@ -132,6 +132,21 @@ pub fn state_directory(vars: &Vars) -> Option<PathBuf> {
     })
 }
 
+/// Where a take's recording, and its record when `[record] transcripts` is on,
+/// are written. One function because the daemon and `doctor` have to name the
+/// same directory: `doctor` saying there is nowhere to write while the daemon
+/// writes is worse than either answer on its own.
+///
+/// The fallback is relative on purpose. It is the daemon's own working
+/// directory, which is where the recorder has always put takes when the
+/// environment names no state directory; refusing to record there would be a
+/// change to capture, not to this.
+pub fn takes_directory(vars: &Vars) -> PathBuf {
+    state_directory(vars)
+        .map(|state| state.join("takes"))
+        .unwrap_or_else(|| PathBuf::from("takes"))
+}
+
 /// The socket's file name inside the state directory. Named once: `setup` builds
 /// the previous id's socket path too, and two spellings could drift apart.
 ///
@@ -312,6 +327,28 @@ mod tests {
         ] {
             assert_eq!(legacy_sibling(Path::new(given)), None, "{given}");
         }
+    }
+
+    /// The daemon, the recorder and `doctor` all take the takes directory from
+    /// this one function, so what it answers is the whole of where a take's files
+    /// live. Both branches are pinned: the state directory when there is one, and
+    /// the relative fallback when the environment names none — the daemon records
+    /// there rather than refusing, so `doctor` has to name the same place.
+    #[test]
+    fn the_takes_directory_sits_under_the_state_directory_and_falls_back_to_a_relative_one() {
+        let named = Vars {
+            state_dir: Some("/tmp/herdr-state".into()),
+            xdg_state_home: None,
+            home: None,
+        };
+        assert_eq!(
+            takes_directory(&named),
+            std::path::Path::new("/tmp/herdr-state/takes")
+        );
+        assert_eq!(
+            takes_directory(&Vars::default()),
+            std::path::Path::new("takes")
+        );
     }
 
     #[cfg(unix)]

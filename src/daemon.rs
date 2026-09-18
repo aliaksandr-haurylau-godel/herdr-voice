@@ -137,6 +137,14 @@ pub struct Runtime {
     /// already reads, and unifying the two belongs to whoever next touches
     /// `delivery::Settings`.
     pub ui: crate::config::Ui,
+    /// Where a take's record goes, or `None` when `[record] transcripts` is off.
+    /// An `Option` rather than a flag beside a path: with the key off there is
+    /// then no writer to call, so nothing in the take path can forget to check.
+    pub records: Option<crate::record::Records>,
+    /// The directory a take's files live in. Held separately from `records`
+    /// because the bound on what accumulates there runs whether or not
+    /// `[record] transcripts` is on.
+    pub takes: std::path::PathBuf,
 }
 
 /// The two context fields `Runtime` holds, resolved from the loaded
@@ -867,6 +875,15 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> (Re
     // that a path added later cannot forget it: a take left saying TRANSCR is a
     // token renewed forever and a tab decorated forever.
     publish(runtime, Activity::Idle);
+    // The bound on what the takes directory holds, here for the same reason and
+    // not inside the pipeline: a daemon with no recognition engine takes the
+    // first exit on every take, and a bound placed after delivery would never
+    // run while those recordings accumulated.
+    if let Some(why) = crate::record::bound(&runtime.takes, &take.path) {
+        runtime
+            .journal
+            .write(&take_not_removed_line(&why.replace('\n', " ")));
+    }
     outcome
 }
 
@@ -915,26 +932,26 @@ fn transcribe_take(
             stage: Stage::Fixing,
         },
     );
-    let text = match &runtime.rewrite {
-        crate::rewrite::Resolution::Off => text,
-        crate::rewrite::Resolution::Unavailable(why) => {
-            tell_once(runtime, why);
-            text
-        }
-        crate::rewrite::Resolution::Engine(engine) => {
-            if crate::rewrite::skip::plain(&text, bias, runtime.skip_if_plain) {
-                text
-            } else {
-                match engine.rewrite(&text, bias) {
-                    Ok(rewritten) => rewritten,
-                    Err(why) => {
-                        tell_once(runtime, &why.to_string());
-                        text
-                    }
-                }
-            }
-        }
+    let rewrite = resolve_rewrite(runtime, &text, bias);
+    let transcript = text;
+    let text = match &rewrite {
+        crate::record::Rewrite::Ran { text } => text.clone(),
+        _ => transcript.clone(),
     };
+
+    // Before the delivering line, for the reason that line gives about not
+    // holding the text only in memory — and the record is the more durable of
+    // the two. A record that cannot be written is reported and never ends the
+    // take: `CLAUDE.md` forbids both a panic path and a silent failure.
+    if let Some(records) = &runtime.records {
+        let report = records.write(&take.path, &transcript, &rewrite);
+        if let Err(why) = &report.written {
+            runtime.journal.write(&record_failed_line(
+                &records.directory().display().to_string().replace('\n', " "),
+                &why.replace('\n', " "),
+            ));
+        }
+    }
 
     // Written before the delivery attempt: the text must not be held only
     // in memory while the outward call to herdr runs.
@@ -947,13 +964,33 @@ fn transcribe_take(
         &take.target,
         &text,
     ) {
-        Ok(()) => (
-            Reply::Ok(format!(
-                "delivered to {} [{:.1} dB]",
-                take.target, take.level_dbfs
-            )),
-            Reported::No,
-        ),
+        Ok(()) => {
+            // A take that was read is a take nobody needs to find — the other
+            // half of the rule `capture::discard` states. Only here: every other
+            // ending names this path to somebody, in a reply or in the journal,
+            // and deleting there would turn a promise into a pointer at nothing.
+            if runtime.records.is_none() {
+                // A recording that is already gone is the outcome this wanted,
+                // not a failure: somebody cleared the directory, or a second
+                // pipeline's bound reached it first. Saying "recording kept"
+                // about a file that is not there would be worse than silence.
+                if let Err(why) = std::fs::remove_file(&take.path) {
+                    if why.kind() != std::io::ErrorKind::NotFound {
+                        runtime.journal.write(&recording_kept_line(
+                            &take.path.display().to_string().replace('\n', " "),
+                            &why.to_string().replace('\n', " "),
+                        ));
+                    }
+                }
+            }
+            (
+                Reply::Ok(format!(
+                    "delivered to {} [{:.1} dB]",
+                    take.target, take.level_dbfs
+                )),
+                Reported::No,
+            )
+        }
         Err(why) => {
             // Whether a pane id or a path can carry a newline was never
             // established either way, and both sit ahead of the transcript in
@@ -985,6 +1022,40 @@ fn transcribe_take(
                 // report; a caller that reported again would double it.
                 Reported::Yes,
             )
+        }
+    }
+}
+
+/// Which of five things the rewrite stage did, rather than what it produced.
+///
+/// The match used to yield the text, which shadowed the transcript recognition
+/// returned and discarded the reason a given arm was taken — issue #84. Returning
+/// the outcome keeps both: the transcript stays a binding nothing writes over, and
+/// the four ways a take is delivered unrewritten stop being indistinguishable.
+///
+/// It takes `&Runtime` and carries the two `tell_once` calls with it. A pure
+/// function whose caller raised the notice would put the notice back in the
+/// caller, which is the shape this extraction exists to remove.
+fn resolve_rewrite(runtime: &Runtime, transcript: &str, bias: &str) -> crate::record::Rewrite {
+    match &runtime.rewrite {
+        crate::rewrite::Resolution::Off => crate::record::Rewrite::Off,
+        crate::rewrite::Resolution::Unavailable(why) => {
+            tell_once(runtime, why);
+            crate::record::Rewrite::Unavailable { why: why.clone() }
+        }
+        crate::rewrite::Resolution::Engine(engine) => {
+            if crate::rewrite::skip::plain(transcript, bias, runtime.skip_if_plain) {
+                crate::record::Rewrite::Skipped
+            } else {
+                match engine.rewrite(transcript, bias) {
+                    Ok(text) => crate::record::Rewrite::Ran { text },
+                    Err(why) => {
+                        let why = why.to_string();
+                        tell_once(runtime, &why);
+                        crate::record::Rewrite::Failed { why }
+                    }
+                }
+            }
         }
     }
 }
@@ -1036,6 +1107,35 @@ pub fn delivering_line(text: &str) -> String {
 /// Written when a delivery attempt is rejected.
 pub fn delivery_failed_line(target: &str, why: &str) -> String {
     format!("delivery failed: pane={target} reason={why}")
+}
+
+/// Written when a take's record could not be written. The take is delivered
+/// regardless; this is what keeps the failure from being silent, and it names
+/// the next action rather than only the fault.
+pub fn record_failed_line(directory: &str, why: &str) -> String {
+    format!(
+        "record failed: directory={directory} reason={why}; dictation is \
+         unaffected — make that directory writable, or set [record] transcripts \
+         = false to stop recording"
+    )
+}
+
+/// Written when a delivered take's recording could not be removed. The take
+/// succeeded and the reply says so; this says the recording is still on disk,
+/// why, and what to do about it.
+pub fn recording_kept_line(path: &str, why: &str) -> String {
+    format!(
+        "recording kept: {path} reason={why}; the text was delivered — remove the \
+         file by hand, or set [record] transcripts = true to keep recordings on \
+         purpose"
+    )
+}
+
+/// Written when the bound could not remove a take's file — a record or a
+/// recording. Nothing else happens: a file that outstays its turn is not a reason
+/// to end a take.
+pub fn take_not_removed_line(why: &str) -> String {
+    format!("take not removed: {why}; remove it by hand if the directory is growing")
 }
 
 /// `ctrl+g, prefix+i and ctrl+shift+g` — a list read in a toast rather than
@@ -1200,9 +1300,8 @@ pub fn start() -> Result<Outcome, TransportError> {
     // while somebody is speaking.
     let vars = config::Vars::from_env();
     let loaded = config::load(config::directory(&vars).as_deref());
-    let takes = transport::state_directory(&transport::Vars::from_env())
-        .map(|state| state.join("takes"))
-        .unwrap_or_else(|| std::path::PathBuf::from("takes"));
+    let takes = transport::takes_directory(&transport::Vars::from_env());
+    let records = crate::record::records_for(&loaded.config.record, &takes);
     let models = transport::state_directory(&transport::Vars::from_env())
         .map(|state| state.join("models"))
         .unwrap_or_else(|| std::path::PathBuf::from("models"));
@@ -1229,7 +1328,7 @@ pub fn start() -> Result<Outcome, TransportError> {
     let recorder = Recorder::spawn(
         || Box::new(crate::capture::cpal_source::CpalSource::new()),
         loaded.config.audio,
-        takes,
+        takes.clone(),
     );
 
     // Not fatal either: an unrecognised `[context] source` costs the take its
@@ -1265,6 +1364,8 @@ pub fn start() -> Result<Outcome, TransportError> {
         clock: std::sync::Arc::new(crate::ptt::SystemClock::default()),
         activity: std::sync::Mutex::new(Activity::Idle),
         ui: loaded.config.ui.clone(),
+        records,
+        takes,
     };
     // What the rename of issue #73 left in somebody's herdr configuration. Read
     // here, once, for the same reason the plugin's own configuration is read
@@ -1449,6 +1550,8 @@ pub mod tests_support {
             clock: std::sync::Arc::clone(take_clock) as std::sync::Arc<dyn crate::ptt::Clock>,
             activity: std::sync::Mutex::new(Activity::Idle),
             ui,
+            records: None,
+            takes: std::path::PathBuf::new(),
         }
     }
 }
@@ -1507,6 +1610,8 @@ mod tests {
             clock: std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::ptt::Clock>,
             activity: std::sync::Mutex::new(Activity::Idle),
             ui: crate::config::Ui::default(),
+            records: None,
+            takes: std::path::PathBuf::new(),
         };
         (runtime, clock)
     }
@@ -1647,6 +1752,8 @@ mod tests {
             clock: std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::ptt::Clock>,
             activity: std::sync::Mutex::new(Activity::Idle),
             ui: crate::config::Ui::default(),
+            records: None,
+            takes: std::path::PathBuf::new(),
         };
         (runtime, clock)
     }
@@ -1673,6 +1780,387 @@ mod tests {
 
     fn journalled(journal: &std::sync::Arc<RecordingJournal>) -> Vec<String> {
         journal.0.lock().unwrap().clone()
+    }
+
+    fn records_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "herdr-voice-take-records-{tag}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn take_for_recording(tag: &str) -> crate::capture::Take {
+        crate::capture::Take {
+            path: records_dir(tag).join("1789729477005-4242-1.wav"),
+            level_dbfs: -20.0,
+            target: "wJ:pE".to_string(),
+            agent: None,
+            cwd: None,
+            tab: None,
+        }
+    }
+
+    /// A runtime that recognises `transcript`, rewrites to `rewritten`, records
+    /// into a fresh directory, and hands back the journal and that directory.
+    fn runtime_recording(
+        transcript: &str,
+        rewritten: Option<&str>,
+        tag: &str,
+    ) -> (
+        Runtime,
+        std::sync::Arc<RecordingJournal>,
+        std::path::PathBuf,
+    ) {
+        let dir = records_dir(tag);
+        std::fs::remove_dir_all(&dir).ok();
+        let (mut runtime, journal) =
+            runtime_reading_back(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.recognition = Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+            transcript.to_string()
+        ))));
+        runtime.skip_if_plain = false;
+        runtime.rewrite = match rewritten {
+            Some(text) => crate::rewrite::Resolution::Engine(Box::new(
+                crate::rewrite::tests_support::Fake(Ok(text.to_string())),
+            )),
+            None => crate::rewrite::Resolution::Off,
+        };
+        runtime.records = Some(crate::record::Records::new(dir.clone()));
+        (runtime, journal, dir)
+    }
+
+    fn only_record_in(dir: &std::path::Path) -> serde_json::Value {
+        let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .expect("the records directory exists")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect();
+        found.sort();
+        assert_eq!(found.len(), 1, "exactly one record: {found:?}");
+        serde_json::from_str(&std::fs::read_to_string(&found[0]).expect("read record"))
+            .expect("valid json")
+    }
+
+    #[test]
+    fn a_delivered_take_leaves_no_recording_when_the_key_is_off() {
+        let (mut runtime, _journal, dir) =
+            runtime_recording("fix the worklog entry", Some("Fix it."), "gone");
+        runtime.records = None;
+        runtime.takes = dir.clone();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let take = take_for_recording("gone");
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Ok(_)), "{reply:?}");
+        assert!(!take.path.exists(), "the recording goes with the take");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_delivered_take_keeps_its_recording_when_the_key_is_on() {
+        let (mut runtime, _journal, dir) =
+            runtime_recording("fix the worklog entry", Some("Fix it."), "kept");
+        runtime.takes = dir.clone();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let take = take_for_recording("kept");
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Ok(_)), "{reply:?}");
+        assert!(
+            take.path.exists(),
+            "the recording is kept beside its record"
+        );
+        assert!(
+            take.path.with_extension("json").exists(),
+            "and the record is there"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A read-only directory is what refuses a `remove_file` on Unix; the file's
+    /// own mode does not. Unix-only for that reason.
+    #[test]
+    #[cfg(unix)]
+    fn a_recording_that_cannot_be_removed_does_not_end_the_take_and_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut runtime, journal, dir) =
+            runtime_recording("fix the worklog entry", Some("Fix it."), "stuck");
+        runtime.records = None;
+        runtime.takes = dir.clone();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let take = take_for_recording("stuck");
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        // Enough older takes that the bound has removals to attempt as well, so
+        // that this one fixture covers both journal lines: the recording that
+        // could not be removed, and the bound that could not do its own work.
+        for n in 0..=crate::record::KEEP {
+            let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
+            std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
+        }
+        let mut locked = std::fs::metadata(&dir).expect("metadata").permissions();
+        locked.set_mode(0o500);
+        std::fs::set_permissions(&dir, locked).expect("lock the directory");
+
+        let (reply, _) = transcribe(&runtime, &take, "");
+
+        let mut open = std::fs::metadata(&dir).expect("metadata").permissions();
+        open.set_mode(0o700);
+        std::fs::set_permissions(&dir, open).expect("unlock the directory");
+
+        assert!(
+            matches!(reply, Reply::Ok(_)),
+            "the text was delivered; the recording is a separate matter: {reply:?}"
+        );
+        assert!(take.path.exists(), "and the recording is still there");
+        let lines = journalled(&journal);
+        let kept = lines
+            .iter()
+            .find(|line| line.starts_with("recording kept:"))
+            .unwrap_or_else(|| panic!("the failure is reported: {lines:?}"));
+        assert!(
+            kept.contains(&take.path.display().to_string()),
+            "and it names the file: {kept}"
+        );
+        assert!(kept.contains("remove the"), "and what to do next: {kept}");
+        let stuck = lines
+            .iter()
+            .find(|line| line.starts_with("take not removed:"))
+            .unwrap_or_else(|| panic!("the bound's own failure is reported too: {lines:?}"));
+        assert!(
+            stuck.contains("takes could not be removed"),
+            "one line naming how many: {stuck}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_take_whose_delivery_was_refused_keeps_its_recording_with_the_key_off() {
+        let dir = records_dir("refused");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        );
+        let (mut runtime, _journal) = runtime_reading_back(fake, false);
+        runtime.recognition = Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+            "fix the worklog entry".to_string(),
+        ))));
+        runtime.records = None;
+        runtime.takes = dir.clone();
+        let take = take_for_recording("refused");
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Error(_)), "{reply:?}");
+        assert!(
+            take.path.exists(),
+            "the reply names this path; deleting it would point at nothing"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_take_that_failed_recognition_keeps_its_recording_with_the_key_off() {
+        let (mut runtime, _journal, dir) = runtime_recording("unused", Some("unused"), "no-engine");
+        runtime.records = None;
+        runtime.recognition = Err("no engine is configured".to_string());
+        runtime.takes = dir.clone();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let take = take_for_recording("no-engine");
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Error(_)), "{reply:?}");
+        assert!(
+            take.path.exists(),
+            "the reply names this path; deleting it would point at nothing"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_take_that_never_reached_delivery_still_has_the_bound_run_for_it() {
+        let (mut runtime, _journal, dir) =
+            runtime_recording("unused", Some("unused"), "no-recognition");
+        runtime.records = None;
+        runtime.recognition = Err("no engine is configured".to_string());
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        // Fifty-one takes' recordings, none of them the one in hand.
+        for n in 0..=crate::record::KEEP {
+            let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
+            std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
+        }
+        runtime.takes = dir.clone();
+        let take = take_for_recording("no-recognition");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(
+            matches!(reply, Reply::Error(_)),
+            "recognition is unavailable: {reply:?}"
+        );
+        let left = std::fs::read_dir(&dir).expect("read dir").flatten().count();
+        assert_eq!(
+            left,
+            crate::record::KEEP,
+            "the bound runs on the exit that gives up before delivery"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_rewritten_take_records_both_stages() {
+        let (runtime, _journal, dir) = runtime_recording(
+            "fix the worklog entry",
+            Some("Fix the worklog entry."),
+            "both",
+        );
+        let take = take_for_recording("both");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Ok(_)), "{reply:?}");
+        let doc = only_record_in(&dir);
+        assert_eq!(doc["transcript"], "fix the worklog entry");
+        assert_eq!(doc["rewrite"]["ran"], true);
+        assert_eq!(doc["rewrite"]["text"], "Fix the worklog entry.");
+        assert_eq!(
+            doc["take"],
+            take.path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("a stem")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_key_being_off_writes_neither_stage() {
+        let (mut runtime, journal, dir) = runtime_recording(
+            "fix the worklog entry",
+            Some("Fix the worklog entry."),
+            "off",
+        );
+        // Built through the key rather than set by hand, and the directory is
+        // made first so the assertion below bites instead of passing on a
+        // directory that was never created.
+        runtime.records = crate::record::records_for(&crate::config::Record::default(), &dir);
+        assert!(runtime.records.is_none(), "the default key is off");
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let take = take_for_recording("off");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Ok(_)), "{reply:?}");
+        let written: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("the directory exists")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert!(
+            written.is_empty(),
+            "nothing is written with the key off: {written:?}"
+        );
+        // This take's recording was never written, so the removal on the
+        // delivery-success arm meets a file that is not there. That is the
+        // outcome it wanted, not a failure: nothing may say the recording was
+        // kept, because there is no recording and no file to go and remove.
+        let lines = journalled(&journal);
+        assert!(
+            !lines.iter().any(|line| line.starts_with("recording kept:")),
+            "a recording that was already gone is not a failure: {lines:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_written_does_not_end_the_take() {
+        let (mut runtime, journal, dir) = runtime_recording(
+            "fix the worklog entry",
+            Some("Fix the worklog entry."),
+            "blocked",
+        );
+        // A file where the directory should be: the record cannot be written and
+        // the take must not care.
+        std::fs::create_dir_all(&dir).expect("create parent");
+        let blocked = dir.join("no-directory-here");
+        std::fs::write(&blocked, b"in the way").expect("write blocker");
+        runtime.records = Some(crate::record::Records::new(blocked));
+        let take = take_for_recording("blocked");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(
+            matches!(reply, Reply::Ok(_)),
+            "the take is still delivered: {reply:?}"
+        );
+        let lines = journalled(&journal);
+        assert!(
+            lines.iter().any(|line| line.starts_with("record failed:")),
+            "the failure is recorded, not swallowed: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("delivering:")),
+            "the delivering line still goes out: {lines:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_five_rewrite_outcomes_are_each_named() {
+        use crate::record::Rewrite;
+
+        let mut runtime = fake_runtime("some spoken words");
+        runtime.rewrite = crate::rewrite::Resolution::Off;
+        assert_eq!(
+            resolve_rewrite(&runtime, "some spoken words", ""),
+            Rewrite::Off
+        );
+
+        runtime.rewrite = crate::rewrite::Resolution::Unavailable("no engine".to_string());
+        assert_eq!(
+            resolve_rewrite(&runtime, "some spoken words", ""),
+            Rewrite::Unavailable {
+                why: "no engine".to_string()
+            }
+        );
+
+        // Eight words or fewer, no run of two ASCII letters, nothing shared with
+        // an empty bias: exactly what `rewrite::skip::plain` skips.
+        runtime.rewrite = crate::rewrite::Resolution::Engine(Box::new(
+            crate::rewrite::tests_support::Fake(Ok("never called".to_string())),
+        ));
+        runtime.skip_if_plain = true;
+        assert_eq!(
+            resolve_rewrite(&runtime, "просто пара слов", ""),
+            Rewrite::Skipped
+        );
+
+        // The same runtime with the gate off reaches the engine.
+        runtime.skip_if_plain = false;
+        assert_eq!(
+            resolve_rewrite(&runtime, "просто пара слов", ""),
+            Rewrite::Ran {
+                text: "never called".to_string()
+            }
+        );
+
+        runtime.rewrite = crate::rewrite::Resolution::Engine(Box::new(
+            crate::rewrite::tests_support::Fake(Err("the endpoint refused".to_string())),
+        ));
+        match resolve_rewrite(&runtime, "просто пара слов", "") {
+            Rewrite::Failed { why } => assert!(
+                why.contains("the endpoint refused"),
+                "the reason travels with the outcome: {why}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unavailable_engine_still_tells_the_person_once() {
+        let (mut runtime, journal) =
+            runtime_reading_back(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.rewrite = crate::rewrite::Resolution::Unavailable("no engine".to_string());
+        let _ = resolve_rewrite(&runtime, "some spoken words", "");
+        let _ = resolve_rewrite(&runtime, "some spoken words", "");
+        let notices = journalled(&journal)
+            .into_iter()
+            .filter(|line| line.contains("no engine"))
+            .count();
+        assert_eq!(notices, 1, "one notice per daemon, not per take");
     }
 
     #[test]
@@ -1912,6 +2400,8 @@ mod tests {
             clock: std::sync::Arc::new(crate::ptt::SystemClock::default()),
             activity: std::sync::Mutex::new(Activity::Idle),
             ui: crate::config::Ui::default(),
+            records: None,
+            takes: std::path::PathBuf::new(),
         };
         let request = dictate_request();
         answer(&request, &recorder, &runtime);

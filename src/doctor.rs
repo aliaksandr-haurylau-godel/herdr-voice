@@ -1,9 +1,9 @@
 //! What is missing, and what to do about it.
 //!
-//! Six lines in a fixed order: herdr, daemon, config, engine, model, rewrite. The
-//! prototype's worst failure was silence: a parse error produced no output and
-//! looked like a hang for a morning, so every line that is not `ok` names the next
-//! action. See `tasks/3/DESIGN_3.md`, section 4.
+//! Seven lines in a fixed order: herdr, daemon, config, engine, model, rewrite,
+//! record. The prototype's worst failure was silence: a parse error produced no
+//! output and looked like a hang for a morning, so every line that is not `ok`
+//! names the next action. See `tasks/3/DESIGN_3.md`, section 4.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -205,7 +205,7 @@ pub fn config_finding(loaded: &config::Loaded) -> Finding {
 /// digest-verified.
 fn engine_finding_from(stt: &config::Stt, state: &stt::ModelState) -> Finding {
     // `check_with`, never `resolve_with`: reporting must not load 1.6 GB of
-    // weights and run an encoder pass to print six lines
+    // weights and run an encoder pass to print seven lines
     // (`tasks/15/DESIGN_15.md`, section 2c). `resolve_with` is defined as
     // `check_with` plus construction, so the two can never disagree about what
     // is wrong.
@@ -292,6 +292,33 @@ fn engine_and_model_findings(stt: &config::Stt, models: &Path) -> (Finding, Find
     let engine = engine_finding_from(stt, &state);
     let model_line = model_finding_from(stt, models, &state);
     (engine, model_line)
+}
+
+/// Where a take's record goes, and whether anything is being written there.
+///
+/// Never `Missing`: `Missing` is what makes this command exit non-zero
+/// (`exit_code`), and a key sitting at its own default is not a fault to go and
+/// fix.
+pub fn record_finding(record: &config::Record, takes: &Path) -> Finding {
+    if !record.transcripts {
+        return Finding {
+            name: "record",
+            state: State::Default,
+            detail: "off; set [record] transcripts = true to keep each take's \
+                     transcript and rewrite beside its recording"
+                .to_string(),
+        };
+    }
+    Finding {
+        name: "record",
+        state: State::Ok,
+        detail: format!(
+            "on; each take's transcript and rewrite are written to {}, and the \
+             last {} takes are kept",
+            takes.display(),
+            crate::record::KEEP
+        ),
+    }
 }
 
 pub fn rewrite_finding(rewrite: &config::Rewrite) -> Finding {
@@ -410,6 +437,8 @@ pub fn run() -> u8 {
         }
     }
     findings.push(rewrite_finding(&loaded.config.rewrite));
+    let takes = transport::takes_directory(&transport::Vars::from_env());
+    findings.push(record_finding(&loaded.config.record, &takes));
     print!("{}", render(&findings));
     exit_code(&findings)
 }
@@ -418,6 +447,34 @@ pub fn run() -> u8 {
 mod tests {
     use super::*;
     use crate::stt::model;
+
+    #[test]
+    fn recording_off_is_a_default_and_never_a_failure() {
+        let finding = record_finding(&config::Record::default(), Path::new("/state/takes"));
+        assert_eq!(finding.name, "record");
+        assert_eq!(finding.state, State::Default);
+        assert!(
+            finding.detail.contains("[record] transcripts"),
+            "it names the key that turns it on: {}",
+            finding.detail
+        );
+        assert_eq!(exit_code(&[finding]), 0);
+    }
+
+    #[test]
+    fn recording_on_names_the_directory() {
+        let finding = record_finding(
+            &config::Record { transcripts: true },
+            Path::new("/state/takes"),
+        );
+        assert_eq!(finding.state, State::Ok);
+        assert!(
+            finding.detail.contains("/state/takes"),
+            "it names where to look: {}",
+            finding.detail
+        );
+        assert_eq!(exit_code(&[finding]), 0);
+    }
 
     #[test]
     fn a_version_is_read_out_of_what_herdr_prints() {

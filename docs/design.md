@@ -172,6 +172,10 @@ told once, not on every take.
 The text is **inserted** into the pane's input box and not submitted, which allows
 several takes to be stacked and edited before sending. Submitting is opt-in.
 
+A take that was delivered keeps neither its recording nor what the two text
+stages produced, unless `[record] transcripts` says so. A take that ended some
+other way keeps its recording either way — section 7.
+
 ## 5. Push-to-talk
 
 ### Context
@@ -326,6 +330,9 @@ toasts = true
 
 [delivery]
 submit = false
+
+[record]
+transcripts = false       # keep each take's transcript and rewrite on disk
 ```
 
 `blink_ms` is raised to 100 ms when a configuration file asks for less. Every
@@ -336,6 +343,32 @@ the take for the machine. A hundred milliseconds is ten ticks a second, slower
 than the twelve-a-second keypress path the plugin already sustains. It is a
 floor rather than a refusal: an out-of-range value is not a reason to stop the
 daemon starting.
+
+`[record] transcripts` is off, and with it off a take leaves nothing behind. Its
+recording is removed once the text has been delivered, and no transcript is
+written anywhere. Switched on, each finished take keeps its recording and writes
+one file beside it — `<state>/takes/<the take's name>.json`, the same name the
+recording already has — holding the transcript recognition returned, the text the
+rewrite returned, and which of five things the rewrite did: ran, was switched off,
+was skipped as a plain phrase, was unavailable, or was called and failed.
+
+A take that ended some other way keeps its recording whatever the key says: when
+recognition is unavailable, when it fails, when herdr refuses the delivery, and
+when the daemon stops with the key still down. Each of those says where the file
+is, in the reply or in the plugin's own output, so that it can be recovered by
+hand.
+
+The last fifty takes are kept, counted by take rather than by file, so a recording
+and its record go together. `doctor` names the directory. Nothing is sent
+anywhere: what is written is written and read on the machine that made it, and
+deleting the file, or the directory, is what removes it.
+
+**`transcripts` here and `transcript` under `[context]` are two different
+things.** This key is about what *you* said: the words recognition made of your
+speech. `[context] source = "transcript"` is about what the *agent* said — the
+session transcript of the conversation in the pane, read to bias recognition
+towards terms already on screen. Switching this key on keeps your speech; that
+one has never written anything.
 
 Keybindings are **not** part of this file. A herdr plugin manifest cannot declare
 keys, so they live in the user's herdr configuration; the `setup` action prints
