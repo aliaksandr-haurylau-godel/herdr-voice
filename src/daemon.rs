@@ -141,6 +141,10 @@ pub struct Runtime {
     /// An `Option` rather than a flag beside a path: with the key off there is
     /// then no writer to call, so nothing in the take path can forget to check.
     pub records: Option<crate::record::Records>,
+    /// The directory a take's files live in. Held separately from `records`
+    /// because the bound on what accumulates there runs whether or not
+    /// `[record] transcripts` is on.
+    pub takes: std::path::PathBuf,
 }
 
 /// The two context fields `Runtime` holds, resolved from the loaded
@@ -871,6 +875,15 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> (Re
     // that a path added later cannot forget it: a take left saying TRANSCR is a
     // token renewed forever and a tab decorated forever.
     publish(runtime, Activity::Idle);
+    // The bound on what the takes directory holds, here for the same reason and
+    // not inside the pipeline: a daemon with no recognition engine takes the
+    // first exit on every take, and a bound placed after delivery would never
+    // run while those recordings accumulated.
+    for why in crate::record::bound(&runtime.takes, &take.path) {
+        runtime
+            .journal
+            .write(&take_not_removed_line(&why.replace('\n', " ")));
+    }
     outcome
 }
 
@@ -937,11 +950,6 @@ fn transcribe_take(
                 &records.directory().display().to_string().replace('\n', " "),
                 &why.replace('\n', " "),
             ));
-        }
-        for why in &report.not_removed {
-            runtime
-                .journal
-                .write(&record_not_removed_line(&why.replace('\n', " ")));
         }
     }
 
@@ -1092,10 +1100,11 @@ pub fn record_failed_line(directory: &str, why: &str) -> String {
     )
 }
 
-/// Written when the fifty-record cap could not remove something. Nothing else
-/// happens: a record that outstays its turn is not a reason to end a take.
-pub fn record_not_removed_line(why: &str) -> String {
-    format!("record not removed: {why}; remove it by hand if the directory is growing")
+/// Written when the bound could not remove a take's file — a record or a
+/// recording. Nothing else happens: a file that outstays its turn is not a reason
+/// to end a take.
+pub fn take_not_removed_line(why: &str) -> String {
+    format!("take not removed: {why}; remove it by hand if the directory is growing")
 }
 
 /// `ctrl+g, prefix+i and ctrl+shift+g` — a list read in a toast rather than
@@ -1288,7 +1297,7 @@ pub fn start() -> Result<Outcome, TransportError> {
     let recorder = Recorder::spawn(
         || Box::new(crate::capture::cpal_source::CpalSource::new()),
         loaded.config.audio,
-        takes,
+        takes.clone(),
     );
 
     // Not fatal either: an unrecognised `[context] source` costs the take its
@@ -1325,6 +1334,7 @@ pub fn start() -> Result<Outcome, TransportError> {
         activity: std::sync::Mutex::new(Activity::Idle),
         ui: loaded.config.ui.clone(),
         records,
+        takes,
     };
     // What the rename of issue #73 left in somebody's herdr configuration. Read
     // here, once, for the same reason the plugin's own configuration is read
@@ -1510,6 +1520,7 @@ pub mod tests_support {
             activity: std::sync::Mutex::new(Activity::Idle),
             ui,
             records: None,
+            takes: std::path::PathBuf::new(),
         }
     }
 }
@@ -1569,6 +1580,7 @@ mod tests {
             activity: std::sync::Mutex::new(Activity::Idle),
             ui: crate::config::Ui::default(),
             records: None,
+            takes: std::path::PathBuf::new(),
         };
         (runtime, clock)
     }
@@ -1710,6 +1722,7 @@ mod tests {
             activity: std::sync::Mutex::new(Activity::Idle),
             ui: crate::config::Ui::default(),
             records: None,
+            takes: std::path::PathBuf::new(),
         };
         (runtime, clock)
     }
@@ -1796,6 +1809,34 @@ mod tests {
         assert_eq!(found.len(), 1, "exactly one record: {found:?}");
         serde_json::from_str(&std::fs::read_to_string(&found[0]).expect("read record"))
             .expect("valid json")
+    }
+
+    #[test]
+    fn a_take_that_never_reached_delivery_still_has_the_bound_run_for_it() {
+        let (mut runtime, _journal, dir) =
+            runtime_recording("unused", Some("unused"), "no-recognition");
+        runtime.records = None;
+        runtime.recognition = Err("no engine is configured".to_string());
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        // Fifty-one takes' recordings, none of them the one in hand.
+        for n in 0..=crate::record::KEEP {
+            let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
+            std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
+        }
+        runtime.takes = dir.clone();
+        let take = take_for_recording("no-recognition");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(
+            matches!(reply, Reply::Error(_)),
+            "recognition is unavailable: {reply:?}"
+        );
+        let left = std::fs::read_dir(&dir).expect("read dir").flatten().count();
+        assert_eq!(
+            left,
+            crate::record::KEEP,
+            "the bound runs on the exit that gives up before delivery"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -2184,6 +2225,7 @@ mod tests {
             activity: std::sync::Mutex::new(Activity::Idle),
             ui: crate::config::Ui::default(),
             records: None,
+            takes: std::path::PathBuf::new(),
         };
         let request = dictate_request();
         answer(&request, &recorder, &runtime);

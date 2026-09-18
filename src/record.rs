@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// nothing to tune. Fifty is far more takes than the question this record answers
 /// reaches back through — it is asked about the take that just landed wrong — and
 /// it bounds what accumulates without asking anybody to remember anything.
-const KEEP: usize = 50;
+pub(crate) const KEEP: usize = 50;
 
 /// What the rewrite stage did with the transcript. Five outcomes, because four
 /// different things all deliver the transcript unchanged and a record that
@@ -59,12 +59,80 @@ pub fn document(take: &Path, transcript: &str, rewrite: &Rewrite) -> serde_json:
     })
 }
 
-/// What a `write` did, in the two parts a caller reports differently: the record
-/// itself, and whatever the cap should have removed and could not. Neither is
-/// allowed to end a take, so neither is returned as a failure of the call.
+/// Keeps the newest `KEEP` takes in `directory` and removes every file belonging
+/// to an older one. Returns what it could not remove, which is reported and is
+/// never a reason to end a take.
+///
+/// A free function over a path rather than a method of `Records`, because the
+/// bound applies whether or not `[record] transcripts` is on: with it off, the
+/// four endings that keep a recording are the only files there are, and a bound
+/// living inside the recording feature would not run for them at all.
+///
+/// The unit is the take, by file stem, so a take's record and its recording are
+/// kept or removed together rather than by two rules that have to agree.
+/// Ordering by stem is ordering by time: a take's name begins with unix
+/// milliseconds, thirteen digits until the year 2286, and `BTreeMap` walks its
+/// keys in byte order.
+///
+/// `in_hand` — the take in the pipeline — is never removed, whatever it sorts as.
+/// A clock stepping backwards names it below everything already there, and
+/// removing it would take the recording out from under the take being served.
+///
+/// Entries that are not plain files are ignored. A subdirectory named `x.json`
+/// would otherwise take one of the fifty places and fail a removal on every take
+/// thereafter.
+pub fn bound(directory: &Path, in_hand: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut takes: std::collections::BTreeMap<String, Vec<PathBuf>> =
+        std::collections::BTreeMap::new();
+    for entry in entries.flatten() {
+        if !entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let path = entry.path();
+        let extension = path.extension().and_then(|e| e.to_str());
+        if !matches!(extension, Some("wav") | Some("json")) {
+            continue;
+        }
+        let Some(name) = stem(&path) else {
+            continue;
+        };
+        takes.entry(name).or_default().push(path);
+    }
+    let in_hand_stem = stem(in_hand);
+    let mut failures = Vec::new();
+    let mut remaining = takes.len();
+    for (name, files) in takes {
+        if remaining <= KEEP {
+            break;
+        }
+        if Some(&name) == in_hand_stem.as_ref() {
+            continue;
+        }
+        let mut gone = true;
+        for path in files {
+            if let Err(why) = std::fs::remove_file(&path) {
+                failures.push(format!("{}: {why}", path.display()));
+                gone = false;
+            }
+        }
+        if gone {
+            remaining -= 1;
+        }
+    }
+    failures
+}
+
+/// What a `write` did. One field, because the bound is no longer this type's
+/// business: it belongs to the directory and runs whether or not the key is on.
 pub struct Report {
     pub written: Result<PathBuf, String>,
-    pub not_removed: Vec<String>,
 }
 
 /// The key, turned into a writer or into nothing. A function rather than three
@@ -92,17 +160,11 @@ impl Records {
         &self.directory
     }
 
-    /// Writes one record and then applies the cap. The cap runs here because this
-    /// is the only moment anything touches the directory anyway.
+    /// Writes one record. What accumulates in the directory is `bound`'s
+    /// business, not this type's: the bound applies whether or not the key is on.
     pub fn write(&self, take: &Path, transcript: &str, rewrite: &Rewrite) -> Report {
-        let written = self.write_one(take, transcript, rewrite);
-        let not_removed = match &written {
-            Ok(path) => self.trim(path),
-            Err(_) => Vec::new(),
-        };
         Report {
-            written,
-            not_removed,
+            written: self.write_one(take, transcript, rewrite),
         }
     }
 
@@ -123,56 +185,6 @@ impl Records {
             .map_err(|why| format!("{}: {why}", path.display()))?;
         std::fs::write(&path, text).map_err(|why| format!("{}: {why}", path.display()))?;
         Ok(path)
-    }
-
-    /// Keeps the newest `KEEP` records. Ordering by file name is ordering by
-    /// time: a take's name begins with unix milliseconds, and every such stamp is
-    /// thirteen digits until the year 2286. Only `.json` is counted; the
-    /// recordings beside them are not this key's business.
-    ///
-    /// `just_written` is excluded whatever it sorts as. A clock that steps
-    /// backwards far enough — an NTP correction, a resumed suspend — names a take
-    /// below every record already there, and without this the call that wrote a
-    /// record would delete it and still report success: the person would find
-    /// nothing for the take they just made and no line saying why.
-    ///
-    /// Directories and anything that is not a plain file are left out. A
-    /// subdirectory named `x.json` would otherwise take one of the fifty places
-    /// and fail `remove_file` on every take thereafter.
-    fn trim(&self, just_written: &Path) -> Vec<String> {
-        let Ok(entries) = std::fs::read_dir(&self.directory) else {
-            return Vec::new();
-        };
-        let mut records: Vec<PathBuf> = entries
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .file_type()
-                    .map(|kind| kind.is_file())
-                    .unwrap_or(false)
-            })
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
-            .collect();
-        records.sort();
-        // Counted down as removals succeed rather than sliced off the front, so
-        // that a removal which fails leaves the next oldest to be tried instead
-        // of leaving the directory one over its cap.
-        let mut remaining = records.len();
-        let mut failures = Vec::new();
-        for path in records {
-            if remaining <= KEEP {
-                break;
-            }
-            if path == just_written {
-                continue;
-            }
-            match std::fs::remove_file(&path) {
-                Ok(()) => remaining -= 1,
-                Err(why) => failures.push(format!("{}: {why}", path.display())),
-            }
-        }
-        failures
     }
 }
 
@@ -260,7 +272,6 @@ mod tests {
         );
         let path = report.written.expect("written");
         assert_eq!(path, dir.join("1789729477005-4242-7.json"));
-        assert!(report.not_removed.is_empty());
         let back: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read back"))
                 .expect("valid json");
@@ -278,42 +289,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_newest_fifty_records_are_kept_and_the_audio_is_left_alone() {
-        let dir = scratch("cap");
-        let records = Records::new(dir.clone());
-        let wav = dir.join("1000000000000-1-0.wav");
-        std::fs::write(&wav, b"not audio, but a file in the way").expect("write wav");
-        for n in 0..(KEEP + 5) {
-            let take = take_in(
-                &dir,
-                &format!("{:013}-1-{n}", 1_000_000_000_000u64 + n as u64),
-            );
-            let report = records.write(&take, "words", &Rewrite::Off);
-            assert!(report.written.is_ok(), "{:?}", report.written);
-            assert!(report.not_removed.is_empty());
-        }
-        let mut kept: Vec<String> = std::fs::read_dir(&dir)
-            .expect("read dir")
-            .map(|entry| {
-                entry
-                    .expect("entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .filter(|name| name.ends_with(".json"))
-            .collect();
-        kept.sort();
-        assert_eq!(kept.len(), KEEP);
-        assert_eq!(
-            kept.first().map(String::as_str),
-            Some("1000000000005-1-5.json"),
-            "the five oldest records are the ones removed"
-        );
-        assert!(wav.exists(), "the recording must not be touched");
-    }
-
-    #[test]
     fn the_key_decides_whether_there_is_a_writer_at_all() {
         let takes = Path::new("/state/takes");
         assert!(records_for(&crate::config::Record::default(), takes).is_none());
@@ -323,53 +298,92 @@ mod tests {
     }
 
     #[test]
-    fn a_record_is_never_removed_by_the_call_that_wrote_it() {
-        let dir = scratch("backwards");
-        let records = Records::new(dir.clone());
-        // Fifty records already there, all newer than the one about to be
-        // written: a clock that stepped backwards names the next take below
-        // every one of them.
-        for n in 0..KEEP {
-            let take = take_in(&dir, &format!("{}-1-{n}", 9_000_000_000_000u64 + n as u64));
-            assert!(records.write(&take, "words", &Rewrite::Off).written.is_ok());
+    fn the_bound_keeps_the_newest_fifty_takes_and_removes_both_files_of_an_older_one() {
+        let dir = scratch("bound-pairs");
+        for n in 0..(KEEP + 3) {
+            let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
+            std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
+            std::fs::write(dir.join(format!("{name}.json")), b"{}").expect("json");
         }
-        let late = take_in(&dir, "1000000000000-1-0");
-        let report = records.write(&late, "the take just made", &Rewrite::Off);
-        let path = report.written.expect("written");
-        assert!(
-            path.exists(),
-            "the record of the take just made must still be there"
-        );
-        assert!(report.not_removed.is_empty());
-        let back: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).expect("read back"))
-                .expect("valid json");
-        assert_eq!(back["transcript"], "the take just made");
-        let kept = std::fs::read_dir(&dir)
+        let in_hand = dir.join(format!("{}-1-52.wav", 1_000_000_000_052u64));
+        let failures = bound(&dir, &in_hand);
+        assert!(failures.is_empty(), "{failures:?}");
+        let mut stems: Vec<String> = std::fs::read_dir(&dir)
             .expect("read dir")
             .flatten()
-            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
-            .count();
-        assert_eq!(kept, KEEP, "the cap still holds");
+            .filter_map(|entry| stem(&entry.path()))
+            .collect();
+        stems.sort();
+        stems.dedup();
+        assert_eq!(stems.len(), KEEP, "fifty takes, not fifty files");
+        for name in &stems {
+            assert!(
+                dir.join(format!("{name}.wav")).exists(),
+                "{name} lost its wav"
+            );
+            assert!(
+                dir.join(format!("{name}.json")).exists(),
+                "{name} lost its json"
+            );
+        }
+        assert!(
+            !dir.join("1000000000000-1-0.wav").exists(),
+            "the oldest take's recording goes with its record"
+        );
     }
 
     #[test]
-    fn a_directory_named_like_a_record_is_not_counted_and_not_removed() {
-        let dir = scratch("subdir");
-        let records = Records::new(dir.clone());
-        let intruder = dir.join("not-a-record.json");
-        std::fs::create_dir_all(&intruder).expect("create intruder");
-        for n in 0..KEEP {
-            let take = take_in(&dir, &format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64));
-            let report = records.write(&take, "words", &Rewrite::Off);
-            assert!(report.written.is_ok());
-            assert!(
-                report.not_removed.is_empty(),
-                "a directory must never be counted toward the cap: {:?}",
-                report.not_removed
-            );
+    fn a_take_with_only_a_recording_counts_as_a_take() {
+        let dir = scratch("bound-wav-only");
+        for n in 0..(KEEP + 2) {
+            let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
+            std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
         }
+        let failures = bound(&dir, Path::new("/nowhere/none.wav"));
+        assert!(failures.is_empty(), "{failures:?}");
+        let kept = std::fs::read_dir(&dir).expect("read dir").flatten().count();
+        assert_eq!(kept, KEEP);
+        assert!(!dir.join("1000000000000-1-0.wav").exists());
+        assert!(dir.join("1000000000051-1-51.wav").exists());
+    }
+
+    #[test]
+    fn the_take_in_hand_is_never_removed_even_when_it_sorts_first() {
+        let dir = scratch("bound-in-hand");
+        for n in 0..KEEP {
+            let name = format!("{}-1-{n}", 9_000_000_000_000u64 + n as u64);
+            std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
+        }
+        let in_hand = dir.join("1000000000000-1-0.wav");
+        std::fs::write(&in_hand, b"audio").expect("wav");
+        let failures = bound(&dir, &in_hand);
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(
+            in_hand.exists(),
+            "a clock that stepped backwards must not cost the take in hand its recording"
+        );
+    }
+
+    #[test]
+    fn a_directory_named_like_a_take_is_not_counted_and_not_removed() {
+        let dir = scratch("bound-subdir");
+        let intruder = dir.join("not-a-take.json");
+        std::fs::create_dir_all(&intruder).expect("create intruder");
+        for n in 0..(KEEP + 1) {
+            let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
+            std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
+        }
+        let failures = bound(&dir, Path::new("/nowhere/none.wav"));
+        assert!(
+            failures.is_empty(),
+            "a directory must never be counted toward the bound: {failures:?}"
+        );
         assert!(intruder.is_dir(), "the intruder is left where it is");
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_read_is_not_a_failure() {
+        assert!(bound(Path::new("/nowhere/at/all"), Path::new("/nowhere/x.wav")).is_empty());
     }
 
     #[test]
