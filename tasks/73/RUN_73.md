@@ -783,7 +783,7 @@ and what a rename leaves behind. The criterion was written before that section
 existed, and a document explaining a rename cannot do it without naming what was
 renamed. Recorded rather than quietly allowed.
 
-### Rebased a second time, onto `98a6073`
+### Rebased again, onto `98a6073` and then `7e1e591`
 
 #79 landed — the record of the corrected notes of `v0.1.0-beta.1` — and appends to
 `docs/evidence.md` as this branch does. One conflict, in that file again.
@@ -798,10 +798,17 @@ and #80 is appending to the same file.
 The first rebase was checked the same way afterwards: against the base it landed on,
 this branch's `docs/evidence.md` is 109 lines added and nothing removed or altered.
 
-Four gates again from scratch on the rebased tree — 527 + 2 tests, clippy,
-`fmt --check`, `check_manifest.py` — plus `test-release-notes.sh` and
-`test-release-kind.sh`, and the Windows dead-code approximation with the windows
-arms enabled, because `main` has moved twice since the last pass.
+#80 landed during that rebase and appends to the same file, so the same resolution
+was made once more against `7e1e591`: three sections now stand in front of this
+one — #74's corrected notes, #79's record of the edit, #76's prompt measurements —
+each in the order it landed and none reflowed. The prefix assertion was re-run
+after each pass.
+
+Four gates again from scratch on each rebased tree — 539 + 2 tests on the last of
+them, the twelve new ones arriving with #76 — plus clippy, `fmt --check`,
+`check_manifest.py`, `test-release-notes.sh`, `test-release-kind.sh`, and the
+Windows dead-code approximation with the windows arms enabled, because `main`
+moved three times while this branch was open.
 
 ### AC-11 is not met, and the merge does not change that
 
