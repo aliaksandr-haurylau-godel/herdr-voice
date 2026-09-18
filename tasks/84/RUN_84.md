@@ -695,10 +695,22 @@ the rest is noise on every take for ever.
 
 **One half of a design requirement is not reachable and is recorded rather than
 faked.** `DESIGN_84.md` section 14 asks for "a removal that fails is reported and
-the next oldest is tried". The report is tested. The "next oldest" half is not: on
-Unix a refusal is a property of the directory, not of the file, so there is no way
-to have one removable and one refused file in the same directory. A test was
-written for it, asserted nothing, and was deleted rather than left standing.
+the next oldest is tried". The report is tested, and so is the
+continuation: the read-only test puts fifty-two takes in a directory that refuses
+every removal and asserts all fifty-two are reported, which is only reachable if
+the loop walked past fifty-one refusals.
+
+What is not tested is a mix — one file removable and the next refused. It was
+first written down here that Unix makes that impossible because a refusal is a
+property of the directory rather than of the file. That reason is stronger than
+the fact and is corrected: `chflags uchg` on macOS and `chattr +i` on Linux both
+refuse `unlink` on one file inside a writable directory, and on macOS setting the
+flag on a file one owns needs no privilege, so the mixed case is reachable on the
+runner this project uses. It is left untested all the same, because the behaviour
+at issue — the loop does not abort on a refusal — is already covered by the
+read-only test, and a per-platform file-flag fixture would buy a second proof of
+the same thing. The first attempt at a mixed-case test asserted nothing and was
+deleted rather than left standing.
 
 Four smaller answers: `doctor` reads `record::KEEP` instead of printing fifty as a
 literal; a recording already gone is no longer reported as one that could not be
@@ -724,6 +736,43 @@ they match `src/rewrite/skip.rs:63`, which predates this run, and
 gate cannot be demonstrated in English.
 
 Gate, round 3:
+
+```yaml
+gate:
+  stage: S4
+  artifact: git diff d83570c..HEAD
+  reviewer: code
+  verdict: QUESTIONS
+  date: 2026-09-18
+  questions:
+    - bound counts failed files and calls them takes, so the number is doubled with the key on
+    - the NotFound suppression has no test, and an existing test already walks through it
+    - the reason recorded for the untested mixed case is stronger than the fact
+  blocker: null
+```
+
+The `Option` return was confirmed to have kept the behaviour it was meant to keep:
+the removal loop is byte-identical, only the tail collapsed, and the read-only
+test reaches fifty-two reported takes only by walking past fifty-one refusals.
+Both `#[cfg(unix)]` tests gate whole functions and keep their `use` inside the
+body, so nothing is dead on Windows.
+
+Two defects, both fixed in `2f8e0a9`:
+
+- **The count was a file count.** `failures` was pushed inside the per-file loop,
+  so with the key on — where a take has two files — a directory that went
+  read-only with fifty-one takes in it said "102 takes could not be removed". The
+  number is the one thing in that line a person acts on. One entry per take now,
+  carrying the first file that refused. The test could not see it because it wrote
+  only a `.wav` per take, making both readings the same number; it writes both
+  files now, and the old code fails it.
+- **The `NotFound` suppression had no test**, and `the_key_being_off_writes_neither_stage`
+  already ran straight through it: that take's recording is never written, so the
+  removal meets a file that is not there. One assertion there — no line starting
+  with `recording kept:` — covers it. Checked by mutation: replacing the guard
+  with `if true` fails that test.
+
+Gate, round 4:
 
 ```yaml
 gate:

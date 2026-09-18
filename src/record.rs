@@ -127,15 +127,18 @@ pub fn bound(directory: &Path, in_hand: &Path) -> Option<String> {
         if Some(&name) == in_hand_stem.as_ref() {
             continue;
         }
-        let mut gone = true;
+        // One entry per take, not per file. The count is the one thing in the
+        // line a person acts on, and with the key on a take has two files — a
+        // per-file count would say twice the number of takes that are stuck.
+        let mut refused: Option<String> = None;
         for path in files {
             if let Err(why) = std::fs::remove_file(&path) {
-                failures.push(format!("{}: {why}", path.display()));
-                gone = false;
+                refused.get_or_insert_with(|| format!("{}: {why}", path.display()));
             }
         }
-        if gone {
-            remaining -= 1;
+        match refused {
+            None => remaining -= 1,
+            Some(why) => failures.push(why),
         }
     }
     match failures.len() {
@@ -414,9 +417,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = scratch("bound-readonly");
+        // Both files per take, so that a count of files and a count of takes are
+        // different numbers and the assertion below can tell them apart.
         for n in 0..(KEEP + 2) {
             let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
             std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
+            std::fs::write(dir.join(format!("{name}.json")), b"{}").expect("json");
         }
         let mut locked = std::fs::metadata(&dir).expect("metadata").permissions();
         locked.set_mode(0o500);
@@ -434,11 +440,11 @@ mod tests {
             "one line naming how many, not one line per file: {why}"
         );
         assert!(
-            why.contains("1000000000000-1-0.wav"),
+            why.contains("1000000000000-1-0."),
             "and naming the oldest of them: {why}"
         );
         let left = std::fs::read_dir(&dir).expect("read dir").flatten().count();
-        assert_eq!(left, KEEP + 2, "nothing was removed");
+        assert_eq!(left, (KEEP + 2) * 2, "nothing was removed");
         std::fs::remove_dir_all(&dir).ok();
     }
 

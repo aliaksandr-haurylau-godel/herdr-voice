@@ -2017,7 +2017,7 @@ mod tests {
 
     #[test]
     fn the_key_being_off_writes_neither_stage() {
-        let (mut runtime, _journal, dir) = runtime_recording(
+        let (mut runtime, journal, dir) = runtime_recording(
             "fix the worklog entry",
             Some("Fix the worklog entry."),
             "off",
@@ -2039,6 +2039,15 @@ mod tests {
         assert!(
             written.is_empty(),
             "nothing is written with the key off: {written:?}"
+        );
+        // This take's recording was never written, so the removal on the
+        // delivery-success arm meets a file that is not there. That is the
+        // outcome it wanted, not a failure: nothing may say the recording was
+        // kept, because there is no recording and no file to go and remove.
+        let lines = journalled(&journal);
+        assert!(
+            !lines.iter().any(|line| line.starts_with("recording kept:")),
+            "a recording that was already gone is not a failure: {lines:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
