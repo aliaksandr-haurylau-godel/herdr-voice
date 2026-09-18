@@ -17,6 +17,33 @@
 set -eu
 
 tag="${1:?usage: release-notes.sh <tag>}"
+here="$(cd "$(dirname "$0")" && pwd)"
+
+# The tag is expanded inside the heredoc below, so it is checked first. A tag may
+# legally carry `$`, backticks and parentheses, and a heredoc that expands is a
+# shell that runs whatever those spell. Only someone with push access can create
+# a tag, so this closes a small hole rather than a large one — but it costs a
+# line, and the alternative is a workflow with a token in its environment.
+case "${tag}" in
+    v[0-9]*) ;;
+    *)  echo "release-notes.sh: not a tag this repository cuts: ${tag}" >&2
+        exit 2 ;;
+esac
+case "${tag}" in
+    *[!0-9A-Za-z.+-]*)
+        echo "release-notes.sh: the tag carries a character a version does not: ${tag}" >&2
+        exit 2 ;;
+esac
+
+# Only prereleases get notes from here; a full release is published with
+# `--generate-notes`. Asking the rule rather than repeating it means the two
+# cannot drift, and it keeps the script from writing "it is marked as a
+# prerelease" over a tag that is not one.
+if [ "$(sh "${here}/release-kind.sh" "${tag}")" != prerelease ]; then
+    echo "release-notes.sh: ${tag} is not a prerelease; a release is published with --generate-notes" >&2
+    exit 2
+fi
+
 # The archives and the manifest carry the version without the leading `v`, which
 # is what a reader compares against `herdr plugin list`.
 version="${tag#v}"
@@ -55,8 +82,9 @@ latest, and installing it takes naming it.
 herdr plugin install ${repo} --ref ${tag}
 \`\`\`
 
-Without \`--ref\`, herdr installs from the default branch and fetches the archive
-for whatever version the manifest names there, which is not necessarily this one.
+\`--ref\` is what pins the install to this tag; the install reads the manifest at
+the ref it is given, and that manifest names the version whose archives are
+fetched.
 
 The install fetches the archive below that matches the machine, checks it against
 the \`.sha256\` file published beside it, and compiles from source only when there
@@ -64,6 +92,8 @@ is no archive for that platform.
 
 ## Before you rely on it
 
-Which platforms this has actually been exercised on, and with what result, is in
-[\`docs/evidence.md\`](https://github.com/${repo}/blob/${tag}/docs/evidence.md).
+This is published to be used, and not everything in it has been exercised on
+every platform it claims. What was verified by hand, and on which platform, is
+what [\`docs/evidence.md\`](https://github.com/${repo}/blob/${tag}/docs/evidence.md)
+records at this tag.
 NOTES

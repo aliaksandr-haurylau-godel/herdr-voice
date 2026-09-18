@@ -30,17 +30,47 @@ from it really is thrown away after the install path has been exercised.
 `scripts` job in `.github/workflows/check.yml` runs it beside the release-kind
 tests.
 
+`scripts/release-notes.sh` refuses a tag `scripts/release-kind.sh` does not call
+a prerelease, and a tag whose name carries a character a version does not. The
+first keeps it from writing "the tag carries semver's prerelease marker" over a
+tag that has none; the second keeps a tag name out of a heredoc that expands it.
+
 Gates before the commit, all green: `cargo test` (491 + 2 passed),
 `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`,
 `python3 scripts/check_manifest.py`.
 
-Diff review: recorded below when it closes.
+### The diff review that closes S4
+
+Run against `acbe320..f076b54` before the pull request. Verdict: ready with
+fixes. What it found and what was done:
+
+- The notes said "Without `--ref`, herdr installs from the default branch". The
+  reviewer could not find that in `herdr plugin install --help` or anywhere in
+  the repository. The sentence now says only what is established: `--ref` pins
+  the install to this tag, and the install reads the manifest at the ref it is
+  given.
+- "Before you rely on it" pointed at `docs/evidence.md` for which platforms the
+  install path had been exercised on, and that file records nothing about the
+  install path at this tag. The sentence now points at what the file does hold —
+  what was verified by hand and on which platform.
+- The script accepted a tag with no prerelease marker and produced a sentence
+  claiming one, and it expanded the tag inside a heredoc. Both are refused now,
+  with tests.
+- Nothing in CI asserted that the workflow calls the script. Three assertions
+  now read `release.yml` directly.
+- The run document claimed the published release had already been corrected. It
+  had not; that work is below, and it waits on the owner.
 
 ### S5 Verify
 
-Recorded in `docs/evidence.md`.
+Recorded in `docs/evidence.md`, section "The prerelease notes, driven as the
+workflow drives them".
 
-The already-published `v0.1.0-beta.1` is corrected in place with
-`gh release edit`, notes only — not the tag, not the assets, not the prerelease
-flag. Nothing in this run pushes a tag, cuts a release or re-runs the release
-workflow.
+### Still open when this branch was pushed
+
+The already-published `v0.1.0-beta.1` still carries the old notes. Correcting it
+is `gh release edit`, notes and title only — not the tag, not the assets, not the
+prerelease flag — and it publishes outward, so it waits on the owner's word. The
+result goes into `docs/evidence.md` when it happens.
+
+Nothing in this run pushes a tag, cuts a release or re-runs the release workflow.

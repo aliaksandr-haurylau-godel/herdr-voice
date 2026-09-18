@@ -76,6 +76,43 @@ else
     printf 'ok    %-16s called with no tag, the script fails\n' '(none)'
 fi
 
+refuses() {
+    # tag, why it is refused
+    if sh "${SCRIPT}" "$1" >/dev/null 2>&1; then
+        fail "$1 produced notes; it should be refused ($2)"
+    else
+        printf 'ok    %-16s refused: %s\n' "$1" "$2"
+    fi
+}
+
+# A full release is published with `--generate-notes` and never reaches this
+# script. Reached anyway, it would say the tag carries a prerelease marker that
+# is not there, which is the same defect this whole change is about.
+refuses v1.0.0  'not a prerelease'
+refuses v10.20.30 'not a prerelease'
+# The tag is expanded inside a heredoc, so a tag that spells a command is turned
+# away before the expansion rather than run in a job holding a token.
+refuses 'v1.0.0-$(id)'   'a character a version does not carry'
+refuses 'v1.0.0-`id`'    'a character a version does not carry'
+refuses 'not-a-tag'      'not a tag this repository cuts'
+
+# The workflow has to be the thing that calls this script. Every assertion above
+# passes just as well on a workflow that still publishes a fixed string, which is
+# exactly the state this change was opened to end.
+WORKFLOW="${ROOT}/.github/workflows/release.yml"
+for needle in 'sh scripts/release-notes.sh "$GITHUB_REF_NAME"' '--notes-file'; do
+    if grep -qF -- "${needle}" "${WORKFLOW}"; then
+        printf 'ok    %-16s release.yml carries %s\n' '(workflow)' "${needle}"
+    else
+        fail "release.yml does not carry: ${needle}"
+    fi
+done
+if grep -qF -- 'Not a version of the plugin' "${WORKFLOW}"; then
+    fail 'release.yml still carries the fixed notes string'
+else
+    printf 'ok    %-16s release.yml carries no fixed notes string\n' '(workflow)'
+fi
+
 if [ "${failures}" -ne 0 ]; then
     printf '\n%s assertion(s) failed\n' "${failures}" >&2
     exit 1
