@@ -239,14 +239,6 @@ pub fn superseded_keys(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every `command` value naming this plugin's previous id, inside a
-/// `[[keys.command]]` block, rewritten to name the current one. Every other byte
-/// of the file is copied through.
-///
-/// A line edit rather than a pass through a TOML document: the file is
-/// hand-written and commented, the reason a key was chosen sits above the block
-/// that uses it, and a value tree keeps neither comments nor layout. The key does
-/// not change, so the comment goes on describing the binding under it.
 /// Which kind of multi-line string a line ended inside, if any. A basic one is
 /// closed only by `\"\"\"` and a literal one only by `'''`, so a `'''` inside a
 /// `\"\"\"` block is text and closes nothing.
@@ -266,13 +258,22 @@ enum Multiline {
 /// `[[keys.command]]` line inside somebody's prose as a block, nor a `\"\"\"` in a
 /// comment as the start of one.
 fn string_state(line: &str, inside: Option<Multiline>) -> Option<Multiline> {
-    let bytes = line.as_bytes();
     let mut at = 0;
     let mut state = inside;
-    while at < bytes.len() {
+    while at < line.len() {
         let rest = &line[at..];
         match state {
             Some(Multiline::Basic) => {
+                // A basic string honours escapes, and a literal one does not, so
+                // this is the one branch that has them. Without it `\\"\"\"` —
+                // an escaped quote and two ordinary ones, which TOML accepts as
+                // content — reads as a closing delimiter, and everything after
+                // somebody's text is scanned as structure.
+                if rest.starts_with('\\') {
+                    at += 1;
+                    at += line[at..].chars().next().map_or(0, char::len_utf8);
+                    continue;
+                }
                 if rest.starts_with("\"\"\"") {
                     state = None;
                     at += 3;
@@ -301,11 +302,13 @@ fn string_state(line: &str, inside: Option<Multiline>) -> Option<Multiline> {
                     continue;
                 }
                 // A single-line string. It cannot reach the end of the line, so
-                // it is skipped whole rather than tracked across lines.
+                // it is skipped whole rather than tracked across lines. One with
+                // no closing quote is scanned on from the next character, which
+                // can read a delimiter inside it as one: such a file does not
+                // parse, `inspect` refuses it, and the rewrite is never reached.
                 if let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') {
-                    let mut chars = rest.char_indices().skip(1);
                     let mut escaped = false;
-                    for (offset, c) in chars.by_ref() {
+                    for (offset, c) in rest.char_indices().skip(1) {
                         if quote == '"' && c == '\\' && !escaped {
                             escaped = true;
                             continue;
@@ -1535,6 +1538,34 @@ mod tests {
                         command = \"haurylau.voice.ptt\"\n\
                         \"\"\"\n";
         assert_eq!(rewrite_commands(original), original);
+    }
+
+    /// A basic multi-line string honours escapes, so `\\\"\"\"` is content and
+    /// not a closing delimiter. Reading it as one left the string early, edited a
+    /// line of somebody's prose, and then blamed the real binding — which the
+    /// fixture below is a valid TOML document carrying.
+    #[test]
+    fn an_escaped_quote_does_not_close_a_multi_line_string() {
+        let original = "[[keys.command]]\n\
+                        key = \"ctrl+g\"\n\
+                        why = \"\"\"\n\
+                        he said \\\"\"\" and then\n\
+                        command = \"haurylau.voice.dictate\"\n\
+                        \"\"\"\n\
+                        command = \"haurylau.voice.ptt\"\n";
+        assert!(
+            toml::from_str::<toml::Value>(original).is_ok(),
+            "the fixture has to be a document TOML accepts"
+        );
+        let after = rewrite_commands(original);
+        assert!(
+            !after.contains("herdr-voice.dictate"),
+            "the line inside the string is somebody's text: {after}"
+        );
+        assert!(
+            after.contains("command = \"herdr-voice.ptt\""),
+            "and the binding below it is the one to rewrite: {after}"
+        );
     }
 
     #[test]

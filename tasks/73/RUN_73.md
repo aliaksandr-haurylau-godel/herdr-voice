@@ -609,3 +609,49 @@ gate:
   questions: []
   blocker: null
 ```
+
+## S4 gate, round 3
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff e5bd133..815febd
+  reviewer: code
+  verdict: QUESTIONS
+  round: 3
+  date: 2026-09-18
+  questions:
+    - "An escaped quote inside a basic multi-line string closes it early. The `Some(Multiline::Basic)` branch does not know about escapes, but a basic string honours them: on `\\\"\"\"` — an escaped quote and two ordinary ones, which TOML accepts as content — the scanner leaves the string, everything after somebody's text is read as structure, and the real closing delimiter then opens a phantom string. Reproduced through `run` on a fixture `toml` parses: the run wrote `command = \"herdr-voice.dictate\"` into a `why` value, left the real binding untouched, and reported that binding as written in a form it does not edit. Both halves of the round-2 finding, reached through escapes rather than through counting."
+  blocker: null
+```
+
+Five minor findings besides, and one statement worth keeping: the reviewer could
+construct no ordering in which the run exits 1 having named nothing, so the second
+report loop closes round 2's first finding.
+
+### How the finding was answered
+
+Reproduced here first, on the reviewer's fixture:
+
+```
+parses=true prose_edited=true binding_rewritten=false
+```
+
+The `Basic` branch now skips an escape and the character after it, which is the
+one branch that needs it: a literal string has no escapes. A test carries the
+fixture, and asserts first that `toml` accepts it — a fixture that is not a valid
+document would prove nothing about a file a person can have. Removing the four
+lines turns that test red.
+
+Four of the five minor findings taken: the duplicated paragraph above
+`enum Multiline` is gone, `bytes` existed only for its length, the `by_ref()` had
+no reader after the loop, and an unterminated single-line string now carries a
+sentence saying why it costs nothing — such a file does not parse, `inspect`
+refuses it, and the rewrite is never reached. The fifth is left: with three or
+more blocks for one action, one dead key is named per run and a second run names
+the next, because `superseded_keys` answers one key per action — which is also
+what the notice at daemon start needs to say. The run fails and names a key, so
+nothing is silent.
+
+Four gates after: `cargo test` 527 + 2 passed, clippy clean, `fmt --check` clean,
+`check_manifest.py` 12 entries.
