@@ -102,11 +102,17 @@ jobs:
           # `.sha256`. Each archive and each sidecar appears exactly once.
           assets=(dist/*.tar.gz dist/*.tar.gz.sha256)
           if [ "$(sh scripts/release-kind.sh "$GITHUB_REF_NAME")" = prerelease ]; then
+            # The notes come from a script because they name the tag, and a
+            # built string is a string that can be built wrong;
+            # scripts/test-release-notes.sh is what reads them. Through a file
+            # rather than `--notes "$(...)"`: the text is several paragraphs of
+            # Markdown with backticks in it.
+            sh scripts/release-notes.sh "$GITHUB_REF_NAME" >"$RUNNER_TEMP/notes.md"
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --prerelease --latest=false \
-              --title "$GITHUB_REF_NAME — install-path check" \
-              --notes "Not a version of the plugin. This tag exists so the install path can be verified: the manifest's build entries fetch these archives and check them against the .sha256 files published beside them. It is deleted once that check is recorded in docs/evidence.md."
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/notes.md"
           else
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \
