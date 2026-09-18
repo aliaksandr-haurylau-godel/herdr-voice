@@ -400,11 +400,11 @@ impl std::fmt::Display for WriteError {
     }
 }
 
-/// Appends `addition` to the file at `path`, with herdr's approval and nobody
-/// else's bytes lost.
+/// Replaces the file at `path` with whatever `make` returns for its current
+/// text, with herdr's approval and nobody else's bytes lost.
 ///
 /// The original is checked first: a configuration herdr already complains about
-/// is one it is ignoring, wholly or in part, and a binding appended to it would
+/// is one it is ignoring, wholly or in part, and a binding written into it would
 /// do nothing when pressed — a failure that would look like this action's.
 ///
 /// The write is a candidate beside the real file plus a rename, so the only
@@ -414,7 +414,13 @@ impl std::fmt::Display for WriteError {
 ///
 /// A path that is a symbolic link is resolved first, and the file it points at
 /// is the one that is read, written beside and renamed over.
-pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), WriteError> {
+///
+/// `make` is given the empty string when the file does not exist.
+fn commit(
+    herdr: &dyn Herdr,
+    path: &Path,
+    make: impl FnOnce(&str) -> String,
+) -> Result<(), WriteError> {
     let io = |path: &Path, e: std::io::Error| WriteError::Io {
         path: path.display().to_string(),
         reason: e.to_string(),
@@ -449,12 +455,7 @@ pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), Writ
         }
     }
 
-    let mut candidate_text = original.clone().unwrap_or_default();
-    if !candidate_text.is_empty() && !candidate_text.ends_with('\n') {
-        candidate_text.push('\n');
-    }
-    candidate_text.push('\n');
-    candidate_text.push_str(addition);
+    let candidate_text = make(original.as_deref().unwrap_or_default());
 
     let candidate = target.with_extension("toml.herdr-voice-candidate");
     std::fs::write(&candidate, &candidate_text).map_err(|e| io(&candidate, e))?;
@@ -484,6 +485,24 @@ pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), Writ
     std::fs::rename(&candidate, target).map_err(|e| {
         let _ = std::fs::remove_file(&candidate);
         io(path, e)
+    })
+}
+
+/// Appends `addition` to the file at `path`, through `commit`.
+///
+/// The blank line before it is what keeps an appended block off the end of
+/// whatever was already there, and the newline before that is what keeps a file
+/// with no trailing newline from having the block glued onto its last line —
+/// which herdr answers with a parse error and a fall back to its defaults.
+pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), WriteError> {
+    commit(herdr, path, |original| {
+        let mut text = original.to_string();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push('\n');
+        text.push_str(addition);
+        text
     })
 }
 
@@ -1026,6 +1045,39 @@ mod tests {
             Some(&"setup"),
             "the pane must run the setup subcommand, got {command:?}"
         );
+    }
+
+    #[test]
+    fn commit_writes_what_the_maker_returns_and_not_the_original() {
+        let path = scratch("commit-replaces");
+        std::fs::write(&path, "[theme]\nname = \"old\"\n").unwrap();
+        commit(&FakeHerdr::clean(), &path, |original| {
+            assert_eq!(original, "[theme]\nname = \"old\"\n");
+            "[theme]\nname = \"new\"\n".to_string()
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[theme]\nname = \"new\"\n"
+        );
+    }
+
+    /// The whole reason the write path is shared: herdr judges the candidate,
+    /// and a candidate it refuses never reaches the real file.
+    #[test]
+    fn commit_leaves_the_file_alone_when_herdr_refuses_the_candidate() {
+        let path = scratch("commit-refused");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let herdr = FakeHerdr::answering(vec![
+            Check::from_status(0, "config: ok".into()),
+            Check::from_status(1, "config: issues found".into()),
+        ]);
+        let err = commit(&herdr, &path, |_| "[nonsense]\n".to_string()).unwrap_err();
+        assert!(
+            matches!(err, WriteError::CandidateRejected { .. }),
+            "{err:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[theme]\n");
     }
 
     /// The design rests on the write being one rename: an interrupted copy

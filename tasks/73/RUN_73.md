@@ -325,3 +325,66 @@ gate:
 The reviewer checked every file and line the plan cites against the code in this
 worktree and found each one as stated, and checked that every signature a task
 introduces is consumed later exactly as produced.
+
+## S4 Implement
+
+### A correction to the plan, found by executing it
+
+`cargo clippy --all-targets -- -D warnings` refuses a constant nothing calls:
+
+```
+error: constant `LEGACY_PLUGIN_ID` is never used
+  --> src/transport.rs:23:11
+```
+
+The plan had task 1 add `LEGACY_PLUGIN_ID` and task 2 add `legacy_sibling`, each
+with tests and no other caller. Neither can be committed green on its own, and
+`pub` does not exempt them: this is a binary crate, and the same rule is already
+recorded twice in it — `HerdrCli::with_binary` is `#[cfg(all(test, unix))]` and
+`main.rs`'s `IMPLEMENTED` is `#[cfg(test)]`, both "because a constant used nowhere
+else would trip `dead_code`, and CI runs clippy with `-D warnings`".
+
+So the task boundaries move, and nothing else does. Each task now lands with a
+caller outside the tests:
+
+| was | is |
+|---|---|
+| 1: constants and spellings | 1: `PLUGIN_ID` and every spelling of the id — no new constant |
+| 2: `legacy_sibling` | folded into what is now task 3, whose `setup::main` is its only caller outside a test |
+| 3: `commit` out of `append` | 2, unchanged and still independent |
+| 4: `superseded` and `rewrite_commands` | 3, and it brings `LEGACY_PLUGIN_ID`, whose first caller is `decide` |
+| 5: what `setup` reports | 4, and it brings `legacy_sibling` |
+| 6, 7, 8 | 5, 6, 7, unchanged |
+
+### Task 1 — done
+
+`herdr-plugin.toml`, `PLUGIN_ID`, and the twenty-five other places the id was
+spelled out. Committed as `107cd68`.
+
+Before the constant changed, the manifest was changed alone, to see the guard
+fire rather than to trust it:
+
+```
+thread 'setup::tests::every_action_the_snippet_names_is_declared_in_the_manifest'
+panicked at src/setup.rs:1683:9: assertion `left == right` failed
+  left: "herdr-voice"  right: "haurylau.voice"
+```
+
+Four gates after: `cargo test` 491 + 2 passed, clippy clean, `fmt --check` clean,
+`check_manifest.py` 12 entries.
+
+### Task 2 — done
+
+`commit` is the safe write, `append` is one call to it. The four properties were
+re-established by mutation rather than by trusting the move; each broke exactly
+one test:
+
+| mutation | what went red |
+|---|---|
+| the original is never judged by herdr | `an_original_herdr_already_complains_about_is_left_alone`, and two more |
+| the rename becomes a copy | `the_file_is_replaced_by_a_rename_rather_than_written_in_place` |
+| a symbolic link is not resolved | `a_configuration_that_is_a_link_keeps_the_link_and_changes_what_it_points_at` |
+| the original's mode is not carried | `the_mode_the_original_had_is_the_mode_the_result_has` |
+
+Four gates after: `cargo test` 493 + 2 passed, clippy clean, `fmt --check` clean,
+`check_manifest.py` 12 entries.
