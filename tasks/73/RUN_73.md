@@ -730,3 +730,27 @@ accepts, and say nothing about documents it rejects — which a person's
 configuration briefly is, while they are editing it. That case never reaches the
 scanner, because `run` reads the file with `inspect` first and stops; the design
 now says so rather than leaving it to be worked out.
+
+### A flake on ubuntu, not from this branch
+
+After the Windows fix, one ubuntu job failed on
+`delivery::tests::submit_runs_agent_prompt_not_pane_send_text`, in
+`src/delivery.rs`, which this branch does not touch:
+
+```
+the recorder always succeeds: NotFound { binary:
+"/tmp/herdr-voice-delivery-recorder-submit-2982/record.sh", path: "…" }
+```
+
+It passed on the rerun and on every other job in both runs. What it is not: a
+collision between the recorders' scratch directories, which are named by tag and
+process id, and whose four tags are distinct. What it looks like: the race a
+multi-threaded process has when it executes a file it has just written — another
+thread forks while the write descriptor is still open, and the exec answers
+`ETXTBSY`.
+
+Nothing here can tell, because `HerdrDeliverer::run` maps every failure to start a
+process to `NotFound` and prints the `PATH` (`src/delivery.rs:186`). That is worth
+its own issue rather than a fix inside a rename: a person whose `herdr` exists but
+cannot be started is told it is not on the `PATH`, which sends them to look in the
+wrong place.
