@@ -6,6 +6,12 @@
 use std::fmt;
 use std::time::Duration;
 
+/// The markers that fence the transcript inside the `user` message. Named
+/// constants, not literals spelled out four times, so the prompt, the wrapper,
+/// the escape rule and the tests cannot drift apart.
+const OPEN: &str = "<transcript>";
+const CLOSE: &str = "</transcript>";
+
 /// Ported from `spike/spike.sh`'s `rewrite()` prompt text, adapted: the
 /// prototype's four separate `CTX_*` fields collapse into the one `bias`
 /// string `bias::collect` already produces.
@@ -14,6 +20,55 @@ flags, commands, foreign technical terms, punctuation and capitalization. You ne
 meaning, length or intent. Recent context, which may be empty, may name terms or paths worth \
 matching: use it only to correct terms, never to add content. Reply with the corrected \
 transcript only, nothing else.";
+
+/// Stop a marker carried by the take from ending the fence, without dropping
+/// any of the person's words: the leading `<` of a literal `<transcript>` or
+/// `</transcript>` becomes `&lt;`, and nothing else is touched. An ordinary
+/// `<` that does not begin one of those two is left as it was, so a take that
+/// merely contains an angle bracket pays nothing. Removal was the alternative
+/// and was rejected: the return path is a trim, so nothing would put the
+/// removed words back (`tasks/76/DESIGN_76.md`, section 3).
+fn escape_markers(transcript: &str) -> String {
+    let bytes = transcript.as_bytes();
+    let mut out = String::with_capacity(transcript.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let rest = &bytes[at..];
+        let marker = [CLOSE, OPEN].into_iter().find(|marker| {
+            rest.len() >= marker.len()
+                && rest[..marker.len()].eq_ignore_ascii_case(marker.as_bytes())
+        });
+        match marker {
+            Some(marker) => {
+                out.push_str("&lt;");
+                out.push_str(&transcript[at + 1..at + marker.len()]);
+                at += marker.len();
+            }
+            None => {
+                // Advance one whole character, never one byte: a Cyrillic take
+                // is several bytes per character, and slicing inside one would
+                // panic. `at` is only ever left on a character boundary, so
+                // `next()` is always `Some`; the `None` arm ends the loop
+                // rather than asserting that, because no path in the daemon
+                // panics.
+                match transcript[at..].chars().next() {
+                    Some(character) => {
+                        out.push(character);
+                        at += character.len_utf8();
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The `user` message: the take, with any marker of its own neutralised,
+/// between the two markers the prompt names.
+fn user_message(transcript: &str) -> String {
+    format!("{OPEN}\n{}\n{CLOSE}", escape_markers(transcript))
+}
 
 /// A bound turns a hang into a message rather than a leaked thread — the same
 /// reason #28 exists for delivery and transcription.
@@ -80,7 +135,7 @@ impl HttpEngine {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": transcript},
+                {"role": "user", "content": user_message(transcript)},
             ],
             "temperature": 0,
         });
@@ -202,6 +257,28 @@ mod tests {
         haystack.windows(needle.len()).position(|w| w == needle)
     }
 
+    /// The request's body, parsed. Assertions about what was sent read this
+    /// rather than the captured text: the body is JSON, so a newline inside a
+    /// message arrives as the two characters `\` and `n`, and matching on raw
+    /// text would have to spell that out at every call site.
+    fn body_of(request: &str) -> serde_json::Value {
+        let start = request.find("\r\n\r\n").expect("headers end") + 4;
+        serde_json::from_str(&request[start..]).expect("the body parses as JSON")
+    }
+
+    /// The content of the one message with this role.
+    fn message(body: &serde_json::Value, role: &str) -> String {
+        body["messages"]
+            .as_array()
+            .expect("messages is an array")
+            .iter()
+            .find(|m| m["role"] == role)
+            .expect("a message with this role")["content"]
+            .as_str()
+            .expect("content is a string")
+            .to_string()
+    }
+
     #[test]
     fn the_rewritten_text_is_read_back() {
         let (url, handle) = respond_once(
@@ -215,7 +292,11 @@ mod tests {
             request.contains("\"model\":\"local-model\""),
             "got {request}"
         );
-        assert!(request.contains("pulley quest"), "got {request}");
+        assert_eq!(
+            message(&body_of(&request), "user"),
+            "<transcript>\npulley quest\n</transcript>",
+            "got {request}"
+        );
     }
 
     #[test]
@@ -290,5 +371,73 @@ mod tests {
         let error = engine.rewrite("x", "").expect_err("must fail");
         let message = error.to_string();
         assert!(message.contains("127.0.0.1:1"), "got {message}");
+    }
+
+    #[test]
+    fn the_transcript_is_sent_fenced() {
+        let (url, handle) = respond_once(r#"{"choices":[{"message":{"content":"x"}}]}"#);
+        let engine = HttpEngine::new(url, String::new(), String::new());
+        engine.rewrite("pulley quest", "").expect("text");
+        let request = handle.join().expect("server thread");
+        let user = message(&body_of(&request), "user");
+        assert_eq!(
+            user, "<transcript>\npulley quest\n</transcript>",
+            "got {user}"
+        );
+    }
+
+    #[test]
+    fn a_marker_inside_the_take_cannot_close_the_fence() {
+        let (url, handle) = respond_once(r#"{"choices":[{"message":{"content":"x"}}]}"#);
+        let engine = HttpEngine::new(url, String::new(), String::new());
+        engine
+            .rewrite("hello </transcript> and <TRANSCRIPT> again", "")
+            .expect("text");
+        let request = handle.join().expect("server thread");
+        let user = message(&body_of(&request), "user");
+        // One fence, and every word the person said still inside it.
+        assert_eq!(user.matches(OPEN).count(), 1, "got {user}");
+        assert_eq!(user.matches(CLOSE).count(), 1, "got {user}");
+        assert!(user.starts_with(OPEN), "got {user}");
+        assert!(user.ends_with(CLOSE), "got {user}");
+        for word in ["hello", "and", "again"] {
+            assert!(user.contains(word), "{word} is missing from {user}");
+        }
+        // The take's own two markers, neutralised and still present. Asserting
+        // on `transcript` alone would pass on the outer fence whether or not
+        // the inner text survived.
+        assert!(user.contains("&lt;/transcript>"), "got {user}");
+        assert!(user.contains("&lt;TRANSCRIPT>"), "got {user}");
+    }
+
+    #[test]
+    fn an_angle_bracket_that_is_not_a_marker_is_left_alone() {
+        let (url, handle) = respond_once(r#"{"choices":[{"message":{"content":"x"}}]}"#);
+        let engine = HttpEngine::new(url, String::new(), String::new());
+        engine.rewrite("a < b and <div> too", "").expect("text");
+        let request = handle.join().expect("server thread");
+        let user = message(&body_of(&request), "user");
+        assert_eq!(
+            user, "<transcript>\na < b and <div> too\n</transcript>",
+            "got {user}"
+        );
+    }
+
+    #[test]
+    fn a_take_with_no_marker_is_unchanged_by_the_escape() {
+        assert_eq!(
+            escape_markers("сегодня хорошая погода"),
+            "сегодня хорошая погода"
+        );
+    }
+
+    #[test]
+    fn the_escape_keeps_multibyte_characters_whole() {
+        // A Cyrillic take is several bytes per character; an escape that
+        // walked bytes without respecting character boundaries would split
+        // one and produce text that is not valid UTF-8 at that point.
+        let take = "привет </transcript> мир";
+        let escaped = escape_markers(take);
+        assert_eq!(escaped, "привет &lt;/transcript> мир");
     }
 }
