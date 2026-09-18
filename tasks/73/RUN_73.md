@@ -431,3 +431,18 @@ and the four mutations were run a second time after the change:
 
 Four gates after: `cargo test` 508 + 2 passed, clippy clean, `fmt --check` clean,
 `check_manifest.py` 12 entries.
+
+### Task 5 — done
+
+The notice at daemon start. Written implementation-first rather than test-first,
+which means its tests were never seen to fail for the right reason, so they were
+measured by mutation instead:
+
+| mutation | what went red |
+|---|---|
+| the body is always in the plural | `one_key_gives_the_notice_in_the_singular_and_names_only_that_key`, and the raising test |
+| the journal line is skipped when `[ui] toasts` is off | `with_toasts_off_the_rename_notice_is_still_journalled` |
+| the notice fires with no keys found | `no_superseded_key_is_no_notice`, and the one about raising nothing |
+
+Four gates after: `cargo test` 519 + 2 passed, clippy clean, `fmt --check` clean,
+`check_manifest.py` 12 entries.

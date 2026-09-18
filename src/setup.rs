@@ -215,6 +215,30 @@ pub fn decide(existing: &Existing) -> Decision {
     decision
 }
 
+/// The keys of every `[[keys.command]]` block naming this plugin's previous id,
+/// in the order `BINDINGS` declares the actions — so the sentence the daemon
+/// builds from them does not depend on the order somebody's file happens to be
+/// in.
+///
+/// A file that does not parse has none: the daemon reads this at start and has
+/// no terminal to report a broken configuration on. `setup` has one, and does.
+pub fn superseded_keys(text: &str) -> Vec<String> {
+    let Ok(existing) = inspect(text) else {
+        return Vec::new();
+    };
+    BINDINGS
+        .iter()
+        .filter_map(|binding| {
+            let command = format!("{LEGACY_PLUGIN_ID}.{}", binding.action);
+            existing
+                .commands
+                .iter()
+                .find(|(_, c)| *c == command)
+                .map(|(key, _)| key.clone())
+        })
+        .collect()
+}
+
 /// Every `command` value naming this plugin's previous id, inside a
 /// `[[keys.command]]` block, rewritten to name the current one. Every other byte
 /// of the file is copied through.
@@ -1390,6 +1414,29 @@ mod tests {
         let said = String::from_utf8(said).unwrap();
         assert!(!said.contains("mv "), "{said}");
         assert!(!said.contains("kill"), "{said}");
+    }
+
+    #[test]
+    fn the_superseded_keys_are_the_ones_found_in_the_order_the_bindings_declare() {
+        let text =
+            "[[keys.command]]\nkey = \"ctrl+shift+g\"\ncommand = \"haurylau.voice.cancel\"\n\n\
+                    [[keys.command]]\nkey = \"ctrl+g\"\ncommand = \"haurylau.voice.ptt\"\n\n\
+                    [[keys.command]]\nkey = \"ctrl+t\"\ncommand = \"somebody.else.thing\"\n";
+        assert_eq!(superseded_keys(text), vec!["ctrl+g", "ctrl+shift+g"]);
+    }
+
+    #[test]
+    fn a_configuration_with_no_predecessor_block_has_no_superseded_keys() {
+        let text = "[[keys.command]]\nkey = \"ctrl+g\"\ncommand = \"herdr-voice.ptt\"\n";
+        assert!(superseded_keys(text).is_empty());
+    }
+
+    /// A file the daemon cannot parse is not evidence that a key is dead, and
+    /// the daemon has no terminal to report a broken configuration on. `setup`
+    /// has one, and does.
+    #[test]
+    fn a_configuration_that_does_not_parse_has_no_superseded_keys() {
+        assert!(superseded_keys("[keys\nbroken =").is_empty());
     }
 
     #[test]
