@@ -754,3 +754,31 @@ process to `NotFound` and prints the `PATH` (`src/delivery.rs:186`). That is wor
 its own issue rather than a fix inside a rename: a person whose `herdr` exists but
 cannot be started is told it is not on the `PATH`, which sends them to look in the
 wrong place.
+
+### Rebased onto `main` after #75 landed
+
+The owner merged #75 (`dc06f69`) while this branch was open, and both branches
+appended a section to `docs/evidence.md`. One conflict, in that document and
+nowhere else. Resolved by keeping both sections in the order they were written:
+#74's "The prerelease notes, driven as the workflow drives them" first, then this
+run's.
+
+What #75 added was checked for the plugin id rather than assumed clean:
+`scripts/release-notes.sh` and `scripts/test-release-notes.sh` name
+`aliaksandr-haurylau-godel/herdr-voice`, the repository, and never the plugin id.
+Nothing there needed renaming — and nothing would have said so, since those
+scripts are not compiled. Their own tests pass on the rebased tree: 24 assertions
+in `test-release-notes.sh`, six in `test-release-kind.sh`.
+
+The four gates were run again from scratch after the rebase rather than trusted
+from before it — 527 + 2 tests, clippy, `fmt --check`, `check_manifest.py` — and
+the Windows approximation with them, because `check.yml` changed under this branch
+too.
+
+**A divergence from AC-8, deliberate.** The criterion listed four places the old
+id may still appear: `LEGACY_PLUGIN_ID`, the tests, `tasks/` and
+`docs/evidence.md`. There is now a fifth — `docs/design.md:347`, "It was
+`haurylau.voice` until issue #73" — in the section written to say what the id is
+and what a rename leaves behind. The criterion was written before that section
+existed, and a document explaining a rename cannot do it without naming what was
+renamed. Recorded rather than quietly allowed.
