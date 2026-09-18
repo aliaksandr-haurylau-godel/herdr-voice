@@ -1143,7 +1143,9 @@ thirteen seconds each call takes is unchanged and is not what was being
 measured.
 ## The rename to `herdr-voice`, by hand on macOS
 
-macOS 15 on arm64, herdr 0.9.1, the release binary of this branch. Paths are
+macOS 15 on arm64, herdr 0.9.1, the release binary built from `33af41a`. Every
+run below was made against that build; a reader asking what the evidence covers
+should not have to work out which commit it was. Paths are
 written as `<scratch>`, `<config>` and `<state>`; nothing here ran against the
 configuration or the plugin of the machine's own installation, and the plugin
 already installed there was neither unlinked, restarted nor invoked.

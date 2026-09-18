@@ -265,7 +265,7 @@ fn string_state(line: &str, inside: Option<Multiline>) -> Option<Multiline> {
         match state {
             Some(Multiline::Basic) => {
                 // A basic string honours escapes, and a literal one does not, so
-                // this is the one branch that has them. Without it `\\"\"\"` —
+                // of the two multi-line arms this is the one that has them. Without it `\\"\"\"` —
                 // an escaped quote and two ordinary ones, which TOML accepts as
                 // content — reads as a closing delimiter, and everything after
                 // somebody's text is scanned as structure.

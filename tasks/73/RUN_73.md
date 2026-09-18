@@ -578,7 +578,8 @@ Four gates after: `cargo test` 526 + 2 passed, clippy clean, `fmt --check` clean
 ## S5 Verify
 - artifact: a section in `docs/evidence.md`, "The rename to `herdr-voice`, by hand on macOS"
 - produced: 2026-09-18
-- platform: macOS 15 on arm64, herdr 0.9.1, the release binary of this branch
+- platform: macOS 15 on arm64, herdr 0.9.1, the release binary built from `33af41a`
+- every measurement was re-run against that build after the last change to the code, so the record and the binary it describes are the same thing
 
 What was run, and what it established:
 
@@ -655,3 +656,31 @@ nothing is silent.
 
 Four gates after: `cargo test` 527 + 2 passed, clippy clean, `fmt --check` clean,
 `check_manifest.py` 12 entries.
+
+## S4 gate, round 4
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff 815febd..fb5c87a
+  reviewer: code
+  verdict: READY
+  round: 4
+  date: 2026-09-18
+  questions: []
+  blocker: null
+```
+
+The reviewer probed the escape skip against the line-ending backslash, a doubled
+backslash before a delimiter, a backslash inside a literal multi-line string, a
+backslash as a line's last byte and a multi-byte character after one, then
+generated 867 documents — 625 of the form `v = """<four characters from a
+backslash, a quote, an apostrophe and a space>"""`, and 242 putting a `command`
+line inside a `"""` or `'''` block surrounded by escape noise — and found no
+disagreement with `toml` on any document `toml` accepts.
+
+Two minor findings, both taken. The comment above the escape skip said it was the
+only branch tracking escapes, which is true of the two multi-line arms and false
+of the function. And the S5 record named no commit, while the code had moved
+since the runs: rather than write the caveat, every measurement was made again
+against the build from `33af41a`, and the section now names it.
