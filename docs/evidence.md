@@ -1087,9 +1087,13 @@ Run on 2026-09-18 on macOS, Apple silicon, against LM Studio serving
 `google/gemma-4-e4b` on `http://127.0.0.1:4000/v1/chat/completions`, through the
 OpenAI-compatible chat route, `temperature: 0` and no token limit. The prompt and
 both markers were parsed out of `src/rewrite/http.rs` rather than retyped, and
-the user message was built the way `user_message` builds it, so what is measured
-is the request the plugin makes. Every case was run twice, and the two runs
-agreed on every case reported below, word for word.
+the user message was built the way `user_message` builds it. That is an
+equivalent reconstruction of the request rather than the shipped function
+itself — unlike the 2026-09-14 section above, which included
+`src/rewrite/http.rs` by path — so the prompt and the markers are byte-for-byte
+what ships and the two-line wrapper around them is not. Every case in both
+columns was run twice, and the two runs agreed on every case reported below,
+word for word.
 
 **No token limit, deliberately.** This model spends 200 to 500 tokens on its own
 reasoning before it answers. A small `max_tokens` returns an empty `content` with

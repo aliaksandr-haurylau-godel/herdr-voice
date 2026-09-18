@@ -512,6 +512,15 @@ mod tests {
             system.contains("never change its meaning, length or intent"),
             "got {system}"
         );
+        // This one was bought with a measurement rather than reasoned out:
+        // without it, the fenced take asking for a translation came back two
+        // words short, seven runs in a row (`docs/evidence.md`). It is the
+        // part of the prompt most worth guarding against a silent loss.
+        assert!(
+            system.contains("Every word of the speech appears in your reply"),
+            "got {system}"
+        );
+        assert!(system.contains("never shorten it"), "got {system}");
     }
 
     #[test]
@@ -587,9 +596,12 @@ mod tests {
             let request = handle.join().expect("server thread");
             assert_eq!(delivered, expected, "for {take}");
             // And the take went out fenced, so the answer above is the answer
-            // to the request this engine actually makes.
-            assert!(
-                message(&body_of(&request), "user").contains(take),
+            // to the request this engine actually makes. `contains(take)`
+            // would pass on a bare user message too, which is the shape this
+            // whole change exists to leave behind.
+            assert_eq!(
+                message(&body_of(&request), "user"),
+                user_message(take),
                 "for {take}"
             );
         }

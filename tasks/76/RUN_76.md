@@ -261,3 +261,80 @@ Recorded in `docs/evidence.md`, section "The rewrite prompt against a take that
 reads like an instruction", verified on macOS, Apple silicon, against
 `google/gemma-4-e4b` under LM Studio on 2026-09-18. Every case run twice, the
 two runs agreeing on every case reported.
+
+#### The review of the diff that closes S4
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff dc06f69..6213acd
+  reviewer: code
+  verdict: READY_WITH_FIXES
+  date: 2026-09-18
+  findings: 2 important, 7 minor, 0 critical
+```
+
+The reviewer ran the four gates itself, ran `gitleaks` over the range and every
+`.leakwords` pattern over the diff by hand, and compiled `escape_markers`
+standalone against sixteen inputs — the empty string, each marker alone, a
+truncated marker, an upper-case marker, an emoji before a marker, a doubled
+`<`, and the already-escaped form. None panics and every one is correct. It
+found no defect in the function and no dead code behind a platform gate.
+
+Two important findings, both fixed.
+
+**The one sentence a measurement bought had no test.** Four tests pin the rest
+of the prompt, and AC-6 exists so the prompt cannot lose a statement silently —
+but "Every word of the speech appears in your reply … you never shorten it" was
+unguarded, and it is the part that was not reasoned out.
+`the_prompt_still_carries_the_job_it_had` now asserts it.
+
+**S4 and S5 carried no verdict block.** `CLAUDE.md` requires one for every
+stage. This block and S5's below are it.
+
+Four minor findings fixed.
+
+- `docs/evidence.md` said the measured request "is the request the plugin
+  makes". It is an equivalent reconstruction: the prompt and both markers are
+  parsed out of the source, but the two-line wrapper around them is rebuilt, not
+  called. The 2026-09-14 section in the same file could say more because its
+  harness included `src/rewrite/http.rs` by path. The sentence now says which
+  half is byte-for-byte and which is not.
+- "Every case was run twice" covered the "before" column, which had been run
+  once. The four takes were re-run twice against the prompt as it stands at
+  `dc06f69`, extracted from git rather than retyped; both runs agree on all
+  four, and the sentence is now true of both columns.
+- `AC_76.md`'s second as-is row was quoted from the ticket and presented among
+  reproduced results. It says so now, with what re-running it returned.
+- The fixture test's comment claimed the take went out fenced while asserting
+  only `contains(take)`, which a bare user message also satisfies. It asserts
+  `user_message(take)` now.
+
+Three minor findings recorded and not acted on.
+
+- `the_transcript_is_sent_fenced` and `the_rewritten_text_is_read_back` assert
+  the same fact on the same transcript. Both stay: the first is AC-5's named
+  assertion and the second is the existing test AC-8 requires to keep its
+  intent, so deleting either leaves a criterion without a test.
+- `< transcript>` and `</ transcript>`, spaced, pass through unescaped. AC-7 is
+  about the literal marker, and a transcriber does not produce angle brackets at
+  all.
+- Nothing strips the markers if the model echoes them; the prompt is the only
+  defence and that was not measured. `DESIGN_76.md` section 4 item 6 names it.
+
+### S5 Verify
+
+```yaml
+gate:
+  stage: S5
+  artifact: docs/evidence.md, "The rewrite prompt against a take that reads like an instruction"
+  verdict: READY
+  date: 2026-09-18
+  platform: macOS, Apple silicon
+  model: google/gemma-4-e4b under LM Studio
+```
+
+Four takes, both columns, each run twice, the two runs agreeing on every case.
+Before the change, two of the four were carried out rather than corrected; after
+it, all four are corrected and the two that already worked are unchanged. The
+forged-marker take is recorded as a limit the escaping does not remove.
