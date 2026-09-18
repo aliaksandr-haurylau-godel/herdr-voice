@@ -74,6 +74,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: the release-kind rule
         run: sh scripts/test-release-kind.sh
+      - name: the prerelease notes
+        run: sh scripts/test-release-notes.sh
       - name: the install script's decisions
         run: sh scripts/test-install.sh
 

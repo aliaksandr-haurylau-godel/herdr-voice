@@ -1018,3 +1018,30 @@ A configuration file that is a symbolic link is followed rather than replaced.
 Renaming over the link would have left a regular file in its place and the file
 it pointed at unchanged, while the run reported success — checked directly with a
 link and a rename before the code was changed to resolve the path first.
+
+## The prerelease notes, driven as the workflow drives them
+
+Verified on macOS 15 (Darwin 25.6.0), 2026-09-18, for issue #74.
+
+`scripts/test-release-notes.sh` passes: 16 assertions, one of them that the notes
+for `v1.0.0-rc.1` name no other tag, and one that no `${` survives the heredoc.
+`scripts/test-release-kind.sh` still passes its six.
+
+The publish step itself was run rather than read. The prerelease branch of
+`.github/workflows/release.yml` was executed in a scratch directory with two
+empty files standing in for the archives, `RUNNER_TEMP` set and a stub `gh` on
+`PATH` that prints its arguments and the file it is handed. The call it made:
+
+```
+gh release create v0.1.0-beta.1 dist/...tar.gz dist/...tar.gz.sha256 \
+  --repo owner/herdr-voice --prerelease --latest=false \
+  --title v0.1.0-beta.1 --notes-file $RUNNER_TEMP/notes.md
+```
+
+and the body of that file was the notes for `v0.1.0-beta.1` — the install line
+carrying `--ref v0.1.0-beta.1`, and no sentence calling the tag disposable. So
+the script, the redirection and the flag are connected; what is not established
+here is anything about GitHub's own rendering of the Markdown.
+
+`herdr plugin install --help` was the source for `--ref`: it lists `--ref <REF>`,
+and `scripts/install-check.sh:125` already installs that way.
