@@ -574,3 +574,38 @@ the failure the bound exists to prevent" (2026-08-24, #3).
 
 Four gates after: `cargo test` 526 + 2 passed, clippy clean, `fmt --check` clean,
 `check_manifest.py` 12 entries.
+
+## S5 Verify
+- artifact: a section in `docs/evidence.md`, "The rename to `herdr-voice`, by hand on macOS"
+- produced: 2026-09-18
+- platform: macOS 15 on arm64, herdr 0.9.1, the release binary of this branch
+
+What was run, and what it established:
+
+| acceptance criterion | established by |
+|---|---|
+| AC-2, herdr registers `herdr-voice` | `herdr plugin link .` on a copy of this branch's checkout answered `"plugin_id":"herdr-voice"`; `herdr plugin list` and `herdr plugin config-dir herdr-voice` agreed. Linking started no daemon. The copy was unlinked and the directories herdr made for it removed |
+| AC-6, the rewrite and what herdr says about it | `setup` against a copy of a 4017-byte hand-written configuration carrying the three old bindings: three lines changed and nothing else, 4017 bytes became 4008 — three replacements of a 14-character id by an 11-character one — the comment above `ctrl+g` still sits above the same block, and `herdr config check` answered `config: ok`, exit 0 |
+| AC-7, the two other leftovers | the same run named the old configuration file and the directory now read, with the command that moves it; it said nothing about a daemon, because nothing was listening on the legacy socket |
+| AC-10, no decoration from the old id survives | a daemon under the new id, given a tab labelled `1 🎙️🔴 REC 0:12`, answered `tab rename w1:t1 1` |
+| AC-11, the notice at start | against the configuration with the old bindings: one journal line and one `notification show` naming the count and the three keys. Against the rewritten one: neither |
+
+The daemon runs used a stand-in for herdr that records its argument lists, so no
+live herdr was called. The setup runs used the real `herdr config check`, which
+reads only the file it is given.
+
+**What S5 did not establish, stated rather than implied.** That the toast reaches
+the screen when herdr itself starts the daemon from the manifest's `[[startup]]`
+entry. Nothing here can confirm it: it needs a person in front of a running herdr,
+and this run does not restart the one on this machine. `docs/evidence.md` says so
+in the same words.
+
+```yaml
+gate:
+  stage: S5
+  artifact: docs/evidence.md, "The rename to `herdr-voice`, by hand on macOS"
+  verdict: READY
+  date: 2026-09-18
+  questions: []
+  blocker: null
+```
