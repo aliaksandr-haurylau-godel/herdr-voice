@@ -177,8 +177,22 @@ function Invoke-HvMain {
     # $ErrorActionPreference does not catch it, and without this a verified
     # download that unpacks badly ends on an uncaught Copy-Item error with no
     # statement that nothing was installed and nothing to do next.
-    tar -xzf $hvArchiveFile -C $tmp
-    if ($LASTEXITCODE -ne 0) {
+    #
+    # Extracted with the working directory set to $tmp and a bare relative
+    # filename, not $hvArchiveFile's absolute path: an absolute Windows path
+    # passed to tar's -f is read by an MSYS/Cygwin tar - the one a typical Git
+    # for Windows install puts ahead of the native one on PATH - as a
+    # [user@]host:file remote-archive spec, and "C:\..." becomes "connect to
+    # host C". A relative filename with the right working directory is
+    # correct whichever tar resolves, so -C is no longer needed either.
+    Push-Location $tmp
+    try {
+        tar -xzf $archive
+        $tarExitCode = $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+    if ($tarExitCode -ne 0) {
         Stop-Hv "$archive was verified but could not be unpacked" `
                 'the archive is not a readable gzip tarball; report it against the release.'
     }
