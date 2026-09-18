@@ -26,6 +26,7 @@ pub struct Config {
     pub delivery: Delivery,
     pub context: Context,
     pub ptt: Ptt,
+    pub record: Record,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -203,6 +204,19 @@ pub struct Delivery {
     pub submit: bool,
 }
 
+/// What the plugin keeps of a take's words. Off, because a transcript is what
+/// somebody said in their own room and keeping it is their decision, not the
+/// plugin's.
+///
+/// `transcripts` here and `[context] source = "transcript"` are different things:
+/// this is what the person said, and that is what the agent said. See
+/// `docs/design.md` section 7.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Record {
+    pub transcripts: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Context {
@@ -323,6 +337,23 @@ mod tests {
         path.push(format!("herdr-voice-config-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&path).expect("create scratch");
         path
+    }
+
+    #[test]
+    fn recording_transcripts_is_off_when_nothing_says_otherwise() {
+        assert!(!Config::default().record.transcripts);
+    }
+
+    #[test]
+    fn recording_transcripts_is_read_from_the_file() {
+        let directory = scratch("record-on");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[record]\ntranscripts = true\n",
+        )
+        .unwrap();
+        let loaded = load(Some(&directory));
+        assert!(loaded.config.record.transcripts);
     }
 
     #[test]

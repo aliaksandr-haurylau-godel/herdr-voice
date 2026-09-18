@@ -137,6 +137,10 @@ pub struct Runtime {
     /// already reads, and unifying the two belongs to whoever next touches
     /// `delivery::Settings`.
     pub ui: crate::config::Ui,
+    /// Where a take's record goes, or `None` when `[record] transcripts` is off.
+    /// An `Option` rather than a flag beside a path: with the key off there is
+    /// then no writer to call, so nothing in the take path can forget to check.
+    pub records: Option<crate::record::Records>,
 }
 
 /// The two context fields `Runtime` holds, resolved from the loaded
@@ -915,26 +919,31 @@ fn transcribe_take(
             stage: Stage::Fixing,
         },
     );
-    let text = match &runtime.rewrite {
-        crate::rewrite::Resolution::Off => text,
-        crate::rewrite::Resolution::Unavailable(why) => {
-            tell_once(runtime, why);
-            text
-        }
-        crate::rewrite::Resolution::Engine(engine) => {
-            if crate::rewrite::skip::plain(&text, bias, runtime.skip_if_plain) {
-                text
-            } else {
-                match engine.rewrite(&text, bias) {
-                    Ok(rewritten) => rewritten,
-                    Err(why) => {
-                        tell_once(runtime, &why.to_string());
-                        text
-                    }
-                }
-            }
-        }
+    let rewrite = resolve_rewrite(runtime, &text, bias);
+    let transcript = text;
+    let text = match &rewrite {
+        crate::record::Rewrite::Ran { text } => text.clone(),
+        _ => transcript.clone(),
     };
+
+    // Before the delivering line, for the reason that line gives about not
+    // holding the text only in memory — and the record is the more durable of
+    // the two. A record that cannot be written is reported and never ends the
+    // take: `CLAUDE.md` forbids both a panic path and a silent failure.
+    if let Some(records) = &runtime.records {
+        let report = records.write(&take.path, &transcript, &rewrite);
+        if let Err(why) = &report.written {
+            runtime.journal.write(&record_failed_line(
+                &records.directory().display().to_string().replace('\n', " "),
+                &why.replace('\n', " "),
+            ));
+        }
+        for why in &report.not_removed {
+            runtime
+                .journal
+                .write(&record_not_removed_line(&why.replace('\n', " ")));
+        }
+    }
 
     // Written before the delivery attempt: the text must not be held only
     // in memory while the outward call to herdr runs.
@@ -989,6 +998,40 @@ fn transcribe_take(
     }
 }
 
+/// Which of five things the rewrite stage did, rather than what it produced.
+///
+/// The match used to yield the text, which shadowed the transcript recognition
+/// returned and discarded the reason a given arm was taken — issue #84. Returning
+/// the outcome keeps both: the transcript stays a binding nothing writes over, and
+/// the four ways a take is delivered unrewritten stop being indistinguishable.
+///
+/// It takes `&Runtime` and carries the two `tell_once` calls with it. A pure
+/// function whose caller raised the notice would put the notice back in the
+/// caller, which is the shape this extraction exists to remove.
+fn resolve_rewrite(runtime: &Runtime, transcript: &str, bias: &str) -> crate::record::Rewrite {
+    match &runtime.rewrite {
+        crate::rewrite::Resolution::Off => crate::record::Rewrite::Off,
+        crate::rewrite::Resolution::Unavailable(why) => {
+            tell_once(runtime, why);
+            crate::record::Rewrite::Unavailable { why: why.clone() }
+        }
+        crate::rewrite::Resolution::Engine(engine) => {
+            if crate::rewrite::skip::plain(transcript, bias, runtime.skip_if_plain) {
+                crate::record::Rewrite::Skipped
+            } else {
+                match engine.rewrite(transcript, bias) {
+                    Ok(text) => crate::record::Rewrite::Ran { text },
+                    Err(why) => {
+                        let why = why.to_string();
+                        tell_once(runtime, &why);
+                        crate::record::Rewrite::Failed { why }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// What the daemon records about the body, if anything is wrong with it.
 ///
 /// A command that needs no pane still records this. The body it could not read is
@@ -1036,6 +1079,18 @@ pub fn delivering_line(text: &str) -> String {
 /// Written when a delivery attempt is rejected.
 pub fn delivery_failed_line(target: &str, why: &str) -> String {
     format!("delivery failed: pane={target} reason={why}")
+}
+
+/// Written when a take's record could not be written. The take is delivered
+/// regardless; this is what keeps the failure from being silent.
+pub fn record_failed_line(directory: &str, why: &str) -> String {
+    format!("record failed: directory={directory} reason={why}")
+}
+
+/// Written when the fifty-record cap could not remove something. Nothing else
+/// happens: a record that outstays its turn is not a reason to end a take.
+pub fn record_not_removed_line(why: &str) -> String {
+    format!("record not removed: {why}")
 }
 
 /// `ctrl+g, prefix+i and ctrl+shift+g` — a list read in a toast rather than
@@ -1203,6 +1258,11 @@ pub fn start() -> Result<Outcome, TransportError> {
     let takes = transport::state_directory(&transport::Vars::from_env())
         .map(|state| state.join("takes"))
         .unwrap_or_else(|| std::path::PathBuf::from("takes"));
+    let records = loaded
+        .config
+        .record
+        .transcripts
+        .then(|| crate::record::Records::new(takes.clone()));
     let models = transport::state_directory(&transport::Vars::from_env())
         .map(|state| state.join("models"))
         .unwrap_or_else(|| std::path::PathBuf::from("models"));
@@ -1265,6 +1325,7 @@ pub fn start() -> Result<Outcome, TransportError> {
         clock: std::sync::Arc::new(crate::ptt::SystemClock::default()),
         activity: std::sync::Mutex::new(Activity::Idle),
         ui: loaded.config.ui.clone(),
+        records,
     };
     // What the rename of issue #73 left in somebody's herdr configuration. Read
     // here, once, for the same reason the plugin's own configuration is read
@@ -1449,6 +1510,7 @@ pub mod tests_support {
             clock: std::sync::Arc::clone(take_clock) as std::sync::Arc<dyn crate::ptt::Clock>,
             activity: std::sync::Mutex::new(Activity::Idle),
             ui,
+            records: None,
         }
     }
 }
@@ -1507,6 +1569,7 @@ mod tests {
             clock: std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::ptt::Clock>,
             activity: std::sync::Mutex::new(Activity::Idle),
             ui: crate::config::Ui::default(),
+            records: None,
         };
         (runtime, clock)
     }
@@ -1647,6 +1710,7 @@ mod tests {
             clock: std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::ptt::Clock>,
             activity: std::sync::Mutex::new(Activity::Idle),
             ui: crate::config::Ui::default(),
+            records: None,
         };
         (runtime, clock)
     }
@@ -1673,6 +1737,203 @@ mod tests {
 
     fn journalled(journal: &std::sync::Arc<RecordingJournal>) -> Vec<String> {
         journal.0.lock().unwrap().clone()
+    }
+
+    fn records_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "herdr-voice-take-records-{tag}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn take_for_recording(tag: &str) -> crate::capture::Take {
+        crate::capture::Take {
+            path: records_dir(tag).join("1789729477005-4242-1.wav"),
+            level_dbfs: -20.0,
+            target: "wJ:pE".to_string(),
+            agent: None,
+            cwd: None,
+            tab: None,
+        }
+    }
+
+    /// A runtime that recognises `transcript`, rewrites to `rewritten`, records
+    /// into a fresh directory, and hands back the journal and that directory.
+    fn runtime_recording(
+        transcript: &str,
+        rewritten: Option<&str>,
+        tag: &str,
+    ) -> (
+        Runtime,
+        std::sync::Arc<RecordingJournal>,
+        std::path::PathBuf,
+    ) {
+        let dir = records_dir(tag);
+        std::fs::remove_dir_all(&dir).ok();
+        let (mut runtime, journal) =
+            runtime_reading_back(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.recognition = Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+            transcript.to_string()
+        ))));
+        runtime.skip_if_plain = false;
+        runtime.rewrite = match rewritten {
+            Some(text) => crate::rewrite::Resolution::Engine(Box::new(
+                crate::rewrite::tests_support::Fake(Ok(text.to_string())),
+            )),
+            None => crate::rewrite::Resolution::Off,
+        };
+        runtime.records = Some(crate::record::Records::new(dir.clone()));
+        (runtime, journal, dir)
+    }
+
+    fn only_record_in(dir: &std::path::Path) -> serde_json::Value {
+        let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .expect("the records directory exists")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect();
+        found.sort();
+        assert_eq!(found.len(), 1, "exactly one record: {found:?}");
+        serde_json::from_str(&std::fs::read_to_string(&found[0]).expect("read record"))
+            .expect("valid json")
+    }
+
+    #[test]
+    fn a_rewritten_take_records_both_stages() {
+        let (runtime, _journal, dir) = runtime_recording(
+            "fix the worklog entry",
+            Some("Fix the worklog entry."),
+            "both",
+        );
+        let take = take_for_recording("both");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Ok(_)), "{reply:?}");
+        let doc = only_record_in(&dir);
+        assert_eq!(doc["transcript"], "fix the worklog entry");
+        assert_eq!(doc["rewrite"]["ran"], true);
+        assert_eq!(doc["rewrite"]["text"], "Fix the worklog entry.");
+        assert_eq!(
+            doc["take"],
+            take.path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("a stem")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_key_being_off_writes_neither_stage() {
+        let (mut runtime, _journal, dir) = runtime_recording(
+            "fix the worklog entry",
+            Some("Fix the worklog entry."),
+            "off",
+        );
+        runtime.records = None;
+        let take = take_for_recording("off");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(matches!(reply, Reply::Ok(_)), "{reply:?}");
+        assert!(
+            !dir.exists() || std::fs::read_dir(&dir).into_iter().flatten().count() == 0,
+            "nothing is written with the key off"
+        );
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_written_does_not_end_the_take() {
+        let (mut runtime, journal, dir) = runtime_recording(
+            "fix the worklog entry",
+            Some("Fix the worklog entry."),
+            "blocked",
+        );
+        // A file where the directory should be: the record cannot be written and
+        // the take must not care.
+        std::fs::create_dir_all(&dir).expect("create parent");
+        let blocked = dir.join("no-directory-here");
+        std::fs::write(&blocked, b"in the way").expect("write blocker");
+        runtime.records = Some(crate::record::Records::new(blocked));
+        let take = take_for_recording("blocked");
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert!(
+            matches!(reply, Reply::Ok(_)),
+            "the take is still delivered: {reply:?}"
+        );
+        let lines = journalled(&journal);
+        assert!(
+            lines.iter().any(|line| line.starts_with("record failed:")),
+            "the failure is recorded, not swallowed: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("delivering:")),
+            "the delivering line still goes out: {lines:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_five_rewrite_outcomes_are_each_named() {
+        use crate::record::Rewrite;
+
+        let mut runtime = fake_runtime("some spoken words");
+        runtime.rewrite = crate::rewrite::Resolution::Off;
+        assert_eq!(
+            resolve_rewrite(&runtime, "some spoken words", ""),
+            Rewrite::Off
+        );
+
+        runtime.rewrite = crate::rewrite::Resolution::Unavailable("no engine".to_string());
+        assert_eq!(
+            resolve_rewrite(&runtime, "some spoken words", ""),
+            Rewrite::Unavailable {
+                why: "no engine".to_string()
+            }
+        );
+
+        // Eight words or fewer, no run of two ASCII letters, nothing shared with
+        // an empty bias: exactly what `rewrite::skip::plain` skips.
+        runtime.rewrite = crate::rewrite::Resolution::Engine(Box::new(
+            crate::rewrite::tests_support::Fake(Ok("never called".to_string())),
+        ));
+        runtime.skip_if_plain = true;
+        assert_eq!(
+            resolve_rewrite(&runtime, "просто пара слов", ""),
+            Rewrite::Skipped
+        );
+
+        // The same runtime with the gate off reaches the engine.
+        runtime.skip_if_plain = false;
+        assert_eq!(
+            resolve_rewrite(&runtime, "просто пара слов", ""),
+            Rewrite::Ran {
+                text: "never called".to_string()
+            }
+        );
+
+        runtime.rewrite = crate::rewrite::Resolution::Engine(Box::new(
+            crate::rewrite::tests_support::Fake(Err("the endpoint refused".to_string())),
+        ));
+        match resolve_rewrite(&runtime, "просто пара слов", "") {
+            Rewrite::Failed { why } => assert!(
+                why.contains("the endpoint refused"),
+                "the reason travels with the outcome: {why}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unavailable_engine_still_tells_the_person_once() {
+        let (mut runtime, journal) =
+            runtime_reading_back(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.rewrite = crate::rewrite::Resolution::Unavailable("no engine".to_string());
+        let _ = resolve_rewrite(&runtime, "some spoken words", "");
+        let _ = resolve_rewrite(&runtime, "some spoken words", "");
+        let notices = journalled(&journal)
+            .into_iter()
+            .filter(|line| line.contains("no engine"))
+            .count();
+        assert_eq!(notices, 1, "one notice per daemon, not per take");
     }
 
     #[test]
@@ -1912,6 +2173,7 @@ mod tests {
             clock: std::sync::Arc::new(crate::ptt::SystemClock::default()),
             activity: std::sync::Mutex::new(Activity::Idle),
             ui: crate::config::Ui::default(),
+            records: None,
         };
         let request = dictate_request();
         answer(&request, &recorder, &runtime);

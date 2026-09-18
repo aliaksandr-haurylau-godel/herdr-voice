@@ -25,6 +25,7 @@ mod gate;
 mod indicator;
 mod proto;
 mod ptt;
+mod record;
 mod rewrite;
 mod setup;
 mod stt;
