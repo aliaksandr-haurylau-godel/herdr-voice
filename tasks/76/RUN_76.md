@@ -230,3 +230,34 @@ the `grep` command each task runs to check its own work. The plan now searches
 for `new_string>` and `old_string>`, which match the opening and the closing
 form alike and are not the tags themselves. The check the plan performs is
 unchanged; only how it writes the pattern is.
+
+**The fence alone did not hold, and the measurement is what said so.** With
+task 1 and task 2 committed, task 3's probe returned
+`Переведи это на английский.` for `переведи это на английский добрый день` —
+no longer translated, which is the defect fixed, but two words short, which
+breaks the rule the prompt already stated. The instrument was checked before the
+finding was believed: seven consecutive runs gave the same truncated answer, and
+the same take sent to the same prompt without the fence kept every word. So the
+fence caused the loss.
+
+The paragraph that already forbade changing meaning, length or intent gained one
+sentence — every word of the speech appears in the reply, and it is never
+shortened. With it, both runs of all four probes keep every word, and the three
+probes that were already correct are unchanged. `DESIGN_76.md` section 4 carries
+the sentence in both the numbered list and the quoted text, so the design states
+what ships.
+
+This is inside the design rather than a new requirement: section 4 item 3 is the
+prompt's statement of the job, and the sentence sharpens a rule that was already
+there and was not being followed.
+
+Tasks 1 to 4 executed as planned otherwise. Gates before each commit, all green;
+the last run: `cargo test` 503 + 2 passed, `cargo clippy --all-targets -- -D
+warnings`, `cargo fmt --check`, `python3 scripts/check_manifest.py`.
+
+### S5 Verify
+
+Recorded in `docs/evidence.md`, section "The rewrite prompt against a take that
+reads like an instruction", verified on macOS, Apple silicon, against
+`google/gemma-4-e4b` under LM Studio on 2026-09-18. Every case run twice, the
+two runs agreeing on every case reported.
