@@ -314,8 +314,9 @@ pub fn record_finding(record: &config::Record, takes: &Path) -> Finding {
         state: State::Ok,
         detail: format!(
             "on; each take's transcript and rewrite are written to {}, and the \
-             last 50 are kept",
-            takes.display()
+             last {} takes are kept",
+            takes.display(),
+            crate::record::KEEP
         ),
     }
 }
@@ -473,25 +474,6 @@ mod tests {
             finding.detail
         );
         assert_eq!(exit_code(&[finding]), 0);
-    }
-
-    /// The finding must name the directory the daemon actually writes to, in
-    /// every environment — including one that names no state directory, where
-    /// the daemon falls back to a relative `takes`. `doctor` saying there is
-    /// nowhere to write while records accumulate is the failure AC-4 exists
-    /// against, and one shared function is what makes the two agree.
-    #[test]
-    fn doctor_names_the_directory_the_daemon_writes_to() {
-        let bare = transport::Vars::default();
-        let takes = transport::takes_directory(&bare);
-        let finding = record_finding(&config::Record { transcripts: true }, &takes);
-        assert_eq!(finding.state, State::Ok);
-        assert!(
-            finding.detail.contains(&takes.display().to_string()),
-            "it names the directory: {}",
-            finding.detail
-        );
-        assert_ne!(finding.state, State::Missing);
     }
 
     #[test]

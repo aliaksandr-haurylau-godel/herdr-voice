@@ -172,8 +172,9 @@ told once, not on every take.
 The text is **inserted** into the pane's input box and not submitted, which allows
 several takes to be stacked and edited before sending. Submitting is opt-in.
 
-Neither the recording nor what the two text stages produced is kept unless
-`[record] transcripts` says so — section 7.
+A take that was delivered keeps neither its recording nor what the two text
+stages produced, unless `[record] transcripts` says so. A take that ended some
+other way keeps its recording either way — section 7.
 
 ## 5. Push-to-talk
 

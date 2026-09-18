@@ -879,7 +879,7 @@ fn transcribe(runtime: &Runtime, take: &crate::capture::Take, bias: &str) -> (Re
     // not inside the pipeline: a daemon with no recognition engine takes the
     // first exit on every take, and a bound placed after delivery would never
     // run while those recordings accumulated.
-    for why in crate::record::bound(&runtime.takes, &take.path) {
+    if let Some(why) = crate::record::bound(&runtime.takes, &take.path) {
         runtime
             .journal
             .write(&take_not_removed_line(&why.replace('\n', " ")));
@@ -970,11 +970,17 @@ fn transcribe_take(
             // ending names this path to somebody, in a reply or in the journal,
             // and deleting there would turn a promise into a pointer at nothing.
             if runtime.records.is_none() {
+                // A recording that is already gone is the outcome this wanted,
+                // not a failure: somebody cleared the directory, or a second
+                // pipeline's bound reached it first. Saying "recording kept"
+                // about a file that is not there would be worse than silence.
                 if let Err(why) = std::fs::remove_file(&take.path) {
-                    runtime.journal.write(&recording_kept_line(
-                        &take.path.display().to_string().replace('\n', " "),
-                        &why.to_string().replace('\n', " "),
-                    ));
+                    if why.kind() != std::io::ErrorKind::NotFound {
+                        runtime.journal.write(&recording_kept_line(
+                            &take.path.display().to_string().replace('\n', " "),
+                            &why.to_string().replace('\n', " "),
+                        ));
+                    }
                 }
             }
             (
@@ -1869,6 +1875,48 @@ mod tests {
             take.path.with_extension("json").exists(),
             "and the record is there"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A read-only directory is what refuses a `remove_file` on Unix; the file's
+    /// own mode does not. Unix-only for that reason.
+    #[test]
+    #[cfg(unix)]
+    fn a_recording_that_cannot_be_removed_does_not_end_the_take_and_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut runtime, journal, dir) =
+            runtime_recording("fix the worklog entry", Some("Fix it."), "stuck");
+        runtime.records = None;
+        runtime.takes = dir.clone();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let take = take_for_recording("stuck");
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        let mut locked = std::fs::metadata(&dir).expect("metadata").permissions();
+        locked.set_mode(0o500);
+        std::fs::set_permissions(&dir, locked).expect("lock the directory");
+
+        let (reply, _) = transcribe(&runtime, &take, "");
+
+        let mut open = std::fs::metadata(&dir).expect("metadata").permissions();
+        open.set_mode(0o700);
+        std::fs::set_permissions(&dir, open).expect("unlock the directory");
+
+        assert!(
+            matches!(reply, Reply::Ok(_)),
+            "the text was delivered; the recording is a separate matter: {reply:?}"
+        );
+        assert!(take.path.exists(), "and the recording is still there");
+        let lines = journalled(&journal);
+        let kept = lines
+            .iter()
+            .find(|line| line.starts_with("recording kept:"))
+            .unwrap_or_else(|| panic!("the failure is reported: {lines:?}"));
+        assert!(
+            kept.contains(&take.path.display().to_string()),
+            "and it names the file: {kept}"
+        );
+        assert!(kept.contains("remove the"), "and what to do next: {kept}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -60,8 +60,8 @@ pub fn document(take: &Path, transcript: &str, rewrite: &Rewrite) -> serde_json:
 }
 
 /// Keeps the newest `KEEP` takes in `directory` and removes every file belonging
-/// to an older one. Returns what it could not remove, which is reported and is
-/// never a reason to end a take.
+/// to an older one. Returns one line about what it could not remove, or `None`
+/// when there was nothing to say. Never a reason to end a take.
 ///
 /// A free function over a path rather than a method of `Records`, because the
 /// bound applies whether or not `[record] transcripts` is on: with it off, the
@@ -80,10 +80,22 @@ pub fn document(take: &Path, transcript: &str, rewrite: &Rewrite) -> serde_json:
 ///
 /// Entries that are not plain files are ignored. A subdirectory named `x.json`
 /// would otherwise take one of the fifty places and fail a removal on every take
-/// thereafter.
-pub fn bound(directory: &Path, in_hand: &Path) -> Vec<String> {
+/// thereafter. A name whose bytes are not UTF-8 is ignored for the same reason it
+/// cannot be a take's: nothing here creates one, and a name this cannot read is a
+/// name it must not delete.
+///
+/// A file that cannot be removed keeps its take counted, so the next oldest is
+/// removed instead and the directory does not drift over its cap. It holds one of
+/// the fifty places and is retried on every take, so somebody is told about it
+/// every time — which is what gets it removed by hand.
+///
+/// **One line, however many failed.** A directory nothing can be removed from —
+/// one made read-only — otherwise puts a line per file into the journal on every
+/// take, which is hundreds of lines for a state nobody can act on more than once.
+/// The count and the oldest name are what a person needs; the rest is noise.
+pub fn bound(directory: &Path, in_hand: &Path) -> Option<String> {
     let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
+        return None;
     };
     let mut takes: std::collections::BTreeMap<String, Vec<PathBuf>> =
         std::collections::BTreeMap::new();
@@ -126,7 +138,14 @@ pub fn bound(directory: &Path, in_hand: &Path) -> Vec<String> {
             remaining -= 1;
         }
     }
-    failures
+    match failures.len() {
+        0 => None,
+        1 => failures.pop(),
+        count => Some(format!(
+            "{count} takes could not be removed, the oldest of them {}",
+            failures.remove(0)
+        )),
+    }
 }
 
 /// What a `write` did. One field, because the bound is no longer this type's
@@ -306,8 +325,8 @@ mod tests {
             std::fs::write(dir.join(format!("{name}.json")), b"{}").expect("json");
         }
         let in_hand = dir.join(format!("{}-1-52.wav", 1_000_000_000_052u64));
-        let failures = bound(&dir, &in_hand);
-        assert!(failures.is_empty(), "{failures:?}");
+        let failure = bound(&dir, &in_hand);
+        assert!(failure.is_none(), "{failure:?}");
         let mut stems: Vec<String> = std::fs::read_dir(&dir)
             .expect("read dir")
             .flatten()
@@ -339,8 +358,8 @@ mod tests {
             let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
             std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
         }
-        let failures = bound(&dir, Path::new("/nowhere/none.wav"));
-        assert!(failures.is_empty(), "{failures:?}");
+        let failure = bound(&dir, Path::new("/nowhere/none.wav"));
+        assert!(failure.is_none(), "{failure:?}");
         let kept = std::fs::read_dir(&dir).expect("read dir").flatten().count();
         assert_eq!(kept, KEEP);
         assert!(!dir.join("1000000000000-1-0.wav").exists());
@@ -356,8 +375,8 @@ mod tests {
         }
         let in_hand = dir.join("1000000000000-1-0.wav");
         std::fs::write(&in_hand, b"audio").expect("wav");
-        let failures = bound(&dir, &in_hand);
-        assert!(failures.is_empty(), "{failures:?}");
+        let failure = bound(&dir, &in_hand);
+        assert!(failure.is_none(), "{failure:?}");
         assert!(
             in_hand.exists(),
             "a clock that stepped backwards must not cost the take in hand its recording"
@@ -367,23 +386,65 @@ mod tests {
     #[test]
     fn a_directory_named_like_a_take_is_not_counted_and_not_removed() {
         let dir = scratch("bound-subdir");
-        let intruder = dir.join("not-a-take.json");
+        // Named to sort before every take, so the guard is what keeps it out of
+        // the fifty. A name sorting after them would be the newest entry, the
+        // loop would break before reaching it, and the test would pass with the
+        // guard deleted.
+        let intruder = dir.join("0000000000000-1-0.json");
         std::fs::create_dir_all(&intruder).expect("create intruder");
         for n in 0..(KEEP + 1) {
             let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
             std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
         }
-        let failures = bound(&dir, Path::new("/nowhere/none.wav"));
+        let failure = bound(&dir, Path::new("/nowhere/none.wav"));
         assert!(
-            failures.is_empty(),
-            "a directory must never be counted toward the bound: {failures:?}"
+            failure.is_none(),
+            "a directory must never be counted toward the bound: {failure:?}"
         );
         assert!(intruder.is_dir(), "the intruder is left where it is");
     }
 
+    /// The `gone = false` branch, and the one line it produces however many
+    /// files failed. A read-only directory is what refuses a `remove_file` on
+    /// Unix; the file's own mode does not, which is why this is the mechanism and
+    /// why the test is Unix-only.
+    #[test]
+    #[cfg(unix)]
+    fn a_directory_nothing_can_be_removed_from_reports_once_and_not_per_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("bound-readonly");
+        for n in 0..(KEEP + 2) {
+            let name = format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64);
+            std::fs::write(dir.join(format!("{name}.wav")), b"audio").expect("wav");
+        }
+        let mut locked = std::fs::metadata(&dir).expect("metadata").permissions();
+        locked.set_mode(0o500);
+        std::fs::set_permissions(&dir, locked).expect("lock the directory");
+
+        let failure = bound(&dir, Path::new("/nowhere/none.wav"));
+
+        let mut open = std::fs::metadata(&dir).expect("metadata").permissions();
+        open.set_mode(0o700);
+        std::fs::set_permissions(&dir, open).expect("unlock the directory");
+
+        let why = failure.expect("a directory nothing can be removed from is reported");
+        assert!(
+            why.starts_with(&format!("{} takes could not be removed", KEEP + 2)),
+            "one line naming how many, not one line per file: {why}"
+        );
+        assert!(
+            why.contains("1000000000000-1-0.wav"),
+            "and naming the oldest of them: {why}"
+        );
+        let left = std::fs::read_dir(&dir).expect("read dir").flatten().count();
+        assert_eq!(left, KEEP + 2, "nothing was removed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_directory_that_cannot_be_read_is_not_a_failure() {
-        assert!(bound(Path::new("/nowhere/at/all"), Path::new("/nowhere/x.wav")).is_empty());
+        assert!(bound(Path::new("/nowhere/at/all"), Path::new("/nowhere/x.wav")).is_none());
     }
 
     #[test]
