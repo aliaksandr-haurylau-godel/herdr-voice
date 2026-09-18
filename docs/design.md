@@ -172,8 +172,8 @@ told once, not on every take.
 The text is **inserted** into the pane's input box and not submitted, which allows
 several takes to be stacked and edited before sending. Submitting is opt-in.
 
-What the two text stages produced is not kept unless `[record] transcripts` says
-so — section 7.
+Neither the recording nor what the two text stages produced is kept unless
+`[record] transcripts` says so — section 7.
 
 ## 5. Push-to-talk
 
@@ -343,16 +343,24 @@ than the twelve-a-second keypress path the plugin already sustains. It is a
 floor rather than a refusal: an out-of-range value is not a reason to stop the
 daemon starting.
 
-`[record] transcripts` is off, and with it off nothing of a take's words is
-written to disk. Switched on, each finished take writes one file beside its own
-recording — `<state>/takes/<the take's name>.json`, the same name the recording
-already has — holding the transcript recognition returned, the text the rewrite
-returned, and which of five things the rewrite did: ran, was switched off, was
-skipped as a plain phrase, was unavailable, or was called and failed. The last
-fifty of those files are kept, and writing a new one removes the oldest beyond
-that. `doctor` names the directory. Nothing is sent anywhere: the file is written
-and read on the machine that made it, and deleting it, or the directory, is what
-removes it.
+`[record] transcripts` is off, and with it off a take leaves nothing behind. Its
+recording is removed once the text has been delivered, and no transcript is
+written anywhere. Switched on, each finished take keeps its recording and writes
+one file beside it — `<state>/takes/<the take's name>.json`, the same name the
+recording already has — holding the transcript recognition returned, the text the
+rewrite returned, and which of five things the rewrite did: ran, was switched off,
+was skipped as a plain phrase, was unavailable, or was called and failed.
+
+A take that ended some other way keeps its recording whatever the key says: when
+recognition is unavailable, when it fails, when herdr refuses the delivery, and
+when the daemon stops with the key still down. Each of those says where the file
+is, in the reply or in the plugin's own output, so that it can be recovered by
+hand.
+
+The last fifty takes are kept, counted by take rather than by file, so a recording
+and its record go together. `doctor` names the directory. Nothing is sent
+anywhere: what is written is written and read on the machine that made it, and
+deleting the file, or the directory, is what removes it.
 
 **`transcripts` here and `transcript` under `[context]` are two different
 things.** This key is about what *you* said: the words recognition made of your
