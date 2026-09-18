@@ -1,6 +1,6 @@
 [package]
 name = "herdr-voice"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 edition = "2021"
 # Unverified against the candle stack: no candle crate declares a rust-version,
 # so cargo cannot check it, both CI workflows build `stable`, and only 1.98 is
