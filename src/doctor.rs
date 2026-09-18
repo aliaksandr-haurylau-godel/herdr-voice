@@ -205,7 +205,7 @@ pub fn config_finding(loaded: &config::Loaded) -> Finding {
 /// digest-verified.
 fn engine_finding_from(stt: &config::Stt, state: &stt::ModelState) -> Finding {
     // `check_with`, never `resolve_with`: reporting must not load 1.6 GB of
-    // weights and run an encoder pass to print six lines
+    // weights and run an encoder pass to print seven lines
     // (`tasks/15/DESIGN_15.md`, section 2c). `resolve_with` is defined as
     // `check_with` plus construction, so the two can never disagree about what
     // is wrong.
@@ -299,7 +299,7 @@ fn engine_and_model_findings(stt: &config::Stt, models: &Path) -> (Finding, Find
 /// Never `Missing`: `Missing` is what makes this command exit non-zero
 /// (`exit_code`), and a key sitting at its own default is not a fault to go and
 /// fix.
-pub fn record_finding(record: &config::Record, takes: Option<&Path>) -> Finding {
+pub fn record_finding(record: &config::Record, takes: &Path) -> Finding {
     if !record.transcripts {
         return Finding {
             name: "record",
@@ -309,23 +309,14 @@ pub fn record_finding(record: &config::Record, takes: Option<&Path>) -> Finding 
                 .to_string(),
         };
     }
-    match takes {
-        Some(directory) => Finding {
-            name: "record",
-            state: State::Ok,
-            detail: format!(
-                "on; each take's transcript and rewrite are written to {}, and the \
-                 last 50 are kept",
-                directory.display()
-            ),
-        },
-        None => Finding {
-            name: "record",
-            state: State::Default,
-            detail: "on, but there is nowhere to write: neither HERDR_PLUGIN_STATE_DIR, \
-                     XDG_STATE_HOME nor HOME is set"
-                .to_string(),
-        },
+    Finding {
+        name: "record",
+        state: State::Ok,
+        detail: format!(
+            "on; each take's transcript and rewrite are written to {}, and the \
+             last 50 are kept",
+            takes.display()
+        ),
     }
 }
 
@@ -445,9 +436,8 @@ pub fn run() -> u8 {
         }
     }
     findings.push(rewrite_finding(&loaded.config.rewrite));
-    let takes =
-        transport::state_directory(&transport::Vars::from_env()).map(|state| state.join("takes"));
-    findings.push(record_finding(&loaded.config.record, takes.as_deref()));
+    let takes = transport::takes_directory(&transport::Vars::from_env());
+    findings.push(record_finding(&loaded.config.record, &takes));
     print!("{}", render(&findings));
     exit_code(&findings)
 }
@@ -459,7 +449,7 @@ mod tests {
 
     #[test]
     fn recording_off_is_a_default_and_never_a_failure() {
-        let finding = record_finding(&config::Record::default(), Some(Path::new("/state/takes")));
+        let finding = record_finding(&config::Record::default(), Path::new("/state/takes"));
         assert_eq!(finding.name, "record");
         assert_eq!(finding.state, State::Default);
         assert!(
@@ -474,7 +464,7 @@ mod tests {
     fn recording_on_names_the_directory() {
         let finding = record_finding(
             &config::Record { transcripts: true },
-            Some(Path::new("/state/takes")),
+            Path::new("/state/takes"),
         );
         assert_eq!(finding.state, State::Ok);
         assert!(
@@ -485,11 +475,23 @@ mod tests {
         assert_eq!(exit_code(&[finding]), 0);
     }
 
+    /// The finding must name the directory the daemon actually writes to, in
+    /// every environment — including one that names no state directory, where
+    /// the daemon falls back to a relative `takes`. `doctor` saying there is
+    /// nowhere to write while records accumulate is the failure AC-4 exists
+    /// against, and one shared function is what makes the two agree.
     #[test]
-    fn recording_on_with_nowhere_to_write_says_so_without_failing_the_run() {
-        let finding = record_finding(&config::Record { transcripts: true }, None);
+    fn doctor_names_the_directory_the_daemon_writes_to() {
+        let bare = transport::Vars::default();
+        let takes = transport::takes_directory(&bare);
+        let finding = record_finding(&config::Record { transcripts: true }, &takes);
+        assert_eq!(finding.state, State::Ok);
+        assert!(
+            finding.detail.contains(&takes.display().to_string()),
+            "it names the directory: {}",
+            finding.detail
+        );
         assert_ne!(finding.state, State::Missing);
-        assert!(!finding.detail.is_empty());
     }
 
     #[test]

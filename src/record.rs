@@ -67,6 +67,16 @@ pub struct Report {
     pub not_removed: Vec<String>,
 }
 
+/// The key, turned into a writer or into nothing. A function rather than three
+/// lines at the call site: it is the whole of what `[record] transcripts` does,
+/// and inverted by accident it would record every take with the key off and none
+/// with it on — a mistake nothing else in the suite could see.
+pub fn records_for(record: &crate::config::Record, takes: &Path) -> Option<Records> {
+    record
+        .transcripts
+        .then(|| Records::new(takes.to_path_buf()))
+}
+
 /// Where records go. Built only when the key is on, so there is nothing to
 /// consult per take.
 pub struct Records {
@@ -86,10 +96,9 @@ impl Records {
     /// is the only moment anything touches the directory anyway.
     pub fn write(&self, take: &Path, transcript: &str, rewrite: &Rewrite) -> Report {
         let written = self.write_one(take, transcript, rewrite);
-        let not_removed = if written.is_ok() {
-            self.trim()
-        } else {
-            Vec::new()
+        let not_removed = match &written {
+            Ok(path) => self.trim(path),
+            Err(_) => Vec::new(),
         };
         Report {
             written,
@@ -120,24 +129,47 @@ impl Records {
     /// time: a take's name begins with unix milliseconds, and every such stamp is
     /// thirteen digits until the year 2286. Only `.json` is counted; the
     /// recordings beside them are not this key's business.
-    fn trim(&self) -> Vec<String> {
+    ///
+    /// `just_written` is excluded whatever it sorts as. A clock that steps
+    /// backwards far enough — an NTP correction, a resumed suspend — names a take
+    /// below every record already there, and without this the call that wrote a
+    /// record would delete it and still report success: the person would find
+    /// nothing for the take they just made and no line saying why.
+    ///
+    /// Directories and anything that is not a plain file are left out. A
+    /// subdirectory named `x.json` would otherwise take one of the fifty places
+    /// and fail `remove_file` on every take thereafter.
+    fn trim(&self, just_written: &Path) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(&self.directory) else {
             return Vec::new();
         };
         let mut records: Vec<PathBuf> = entries
             .flatten()
+            .filter(|entry| {
+                entry
+                    .file_type()
+                    .map(|kind| kind.is_file())
+                    .unwrap_or(false)
+            })
             .map(|entry| entry.path())
             .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
             .collect();
-        if records.len() <= KEEP {
-            return Vec::new();
-        }
         records.sort();
-        let over = records.len() - KEEP;
+        // Counted down as removals succeed rather than sliced off the front, so
+        // that a removal which fails leaves the next oldest to be tried instead
+        // of leaving the directory one over its cap.
+        let mut remaining = records.len();
         let mut failures = Vec::new();
-        for path in records.into_iter().take(over) {
-            if let Err(why) = std::fs::remove_file(&path) {
-                failures.push(format!("{}: {why}", path.display()));
+        for path in records {
+            if remaining <= KEEP {
+                break;
+            }
+            if path == just_written {
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => remaining -= 1,
+                Err(why) => failures.push(format!("{}: {why}", path.display())),
             }
         }
         failures
@@ -279,6 +311,65 @@ mod tests {
             "the five oldest records are the ones removed"
         );
         assert!(wav.exists(), "the recording must not be touched");
+    }
+
+    #[test]
+    fn the_key_decides_whether_there_is_a_writer_at_all() {
+        let takes = Path::new("/state/takes");
+        assert!(records_for(&crate::config::Record::default(), takes).is_none());
+        let on = records_for(&crate::config::Record { transcripts: true }, takes)
+            .expect("the key being on builds a writer");
+        assert_eq!(on.directory(), takes);
+    }
+
+    #[test]
+    fn a_record_is_never_removed_by_the_call_that_wrote_it() {
+        let dir = scratch("backwards");
+        let records = Records::new(dir.clone());
+        // Fifty records already there, all newer than the one about to be
+        // written: a clock that stepped backwards names the next take below
+        // every one of them.
+        for n in 0..KEEP {
+            let take = take_in(&dir, &format!("{}-1-{n}", 9_000_000_000_000u64 + n as u64));
+            assert!(records.write(&take, "words", &Rewrite::Off).written.is_ok());
+        }
+        let late = take_in(&dir, "1000000000000-1-0");
+        let report = records.write(&late, "the take just made", &Rewrite::Off);
+        let path = report.written.expect("written");
+        assert!(
+            path.exists(),
+            "the record of the take just made must still be there"
+        );
+        assert!(report.not_removed.is_empty());
+        let back: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read back"))
+                .expect("valid json");
+        assert_eq!(back["transcript"], "the take just made");
+        let kept = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
+            .count();
+        assert_eq!(kept, KEEP, "the cap still holds");
+    }
+
+    #[test]
+    fn a_directory_named_like_a_record_is_not_counted_and_not_removed() {
+        let dir = scratch("subdir");
+        let records = Records::new(dir.clone());
+        let intruder = dir.join("not-a-record.json");
+        std::fs::create_dir_all(&intruder).expect("create intruder");
+        for n in 0..KEEP {
+            let take = take_in(&dir, &format!("{}-1-{n}", 1_000_000_000_000u64 + n as u64));
+            let report = records.write(&take, "words", &Rewrite::Off);
+            assert!(report.written.is_ok());
+            assert!(
+                report.not_removed.is_empty(),
+                "a directory must never be counted toward the cap: {:?}",
+                report.not_removed
+            );
+        }
+        assert!(intruder.is_dir(), "the intruder is left where it is");
     }
 
     #[test]

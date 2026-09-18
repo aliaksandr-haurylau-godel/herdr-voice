@@ -1082,15 +1082,20 @@ pub fn delivery_failed_line(target: &str, why: &str) -> String {
 }
 
 /// Written when a take's record could not be written. The take is delivered
-/// regardless; this is what keeps the failure from being silent.
+/// regardless; this is what keeps the failure from being silent, and it names
+/// the next action rather than only the fault.
 pub fn record_failed_line(directory: &str, why: &str) -> String {
-    format!("record failed: directory={directory} reason={why}")
+    format!(
+        "record failed: directory={directory} reason={why}; dictation is \
+         unaffected — make that directory writable, or set [record] transcripts \
+         = false to stop recording"
+    )
 }
 
 /// Written when the fifty-record cap could not remove something. Nothing else
 /// happens: a record that outstays its turn is not a reason to end a take.
 pub fn record_not_removed_line(why: &str) -> String {
-    format!("record not removed: {why}")
+    format!("record not removed: {why}; remove it by hand if the directory is growing")
 }
 
 /// `ctrl+g, prefix+i and ctrl+shift+g` — a list read in a toast rather than
@@ -1255,14 +1260,8 @@ pub fn start() -> Result<Outcome, TransportError> {
     // while somebody is speaking.
     let vars = config::Vars::from_env();
     let loaded = config::load(config::directory(&vars).as_deref());
-    let takes = transport::state_directory(&transport::Vars::from_env())
-        .map(|state| state.join("takes"))
-        .unwrap_or_else(|| std::path::PathBuf::from("takes"));
-    let records = loaded
-        .config
-        .record
-        .transcripts
-        .then(|| crate::record::Records::new(takes.clone()));
+    let takes = transport::takes_directory(&transport::Vars::from_env());
+    let records = crate::record::records_for(&loaded.config.record, &takes);
     let models = transport::state_directory(&transport::Vars::from_env())
         .map(|state| state.join("models"))
         .unwrap_or_else(|| std::path::PathBuf::from("models"));
@@ -1830,14 +1829,25 @@ mod tests {
             Some("Fix the worklog entry."),
             "off",
         );
-        runtime.records = None;
+        // Built through the key rather than set by hand, and the directory is
+        // made first so the assertion below bites instead of passing on a
+        // directory that was never created.
+        runtime.records = crate::record::records_for(&crate::config::Record::default(), &dir);
+        assert!(runtime.records.is_none(), "the default key is off");
+        std::fs::create_dir_all(&dir).expect("create the directory");
         let take = take_for_recording("off");
         let (reply, _) = transcribe(&runtime, &take, "");
         assert!(matches!(reply, Reply::Ok(_)), "{reply:?}");
+        let written: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("the directory exists")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
         assert!(
-            !dir.exists() || std::fs::read_dir(&dir).into_iter().flatten().count() == 0,
-            "nothing is written with the key off"
+            written.is_empty(),
+            "nothing is written with the key off: {written:?}"
         );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
