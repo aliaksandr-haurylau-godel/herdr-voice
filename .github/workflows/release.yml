@@ -8,6 +8,14 @@ on:
 permissions:
   contents: write
 
+# Two runs for one tag competed for the same scarce runners and both sat in the
+# queue. `check.yml` has carried this for the same reason since #3; the release
+# workflow never did. Keyed on the ref, so re-pointing a tag cancels the run the
+# previous push started instead of racing it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: ${{ matrix.target }}
@@ -17,7 +25,14 @@ jobs:
       matrix:
         include:
           - { os: macos-latest,   target: aarch64-apple-darwin }
-          - { os: macos-13,       target: x86_64-apple-darwin }
+          # Cross-compiled from the arm64 runner rather than built on an Intel
+          # one. `macos-13` is GitHub's Intel image and it is being withdrawn: a
+          # job asking for it sat queued with no runner for seven hours while
+          # the other four were given one within seconds, and the release
+          # publishes only when the whole matrix has built, so that one label
+          # held back five archives. Apple's toolchain builds both architectures
+          # from either, and the toolchain step above installs the target.
+          - { os: macos-latest,   target: x86_64-apple-darwin }
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
