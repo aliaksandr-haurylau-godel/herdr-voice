@@ -6,7 +6,7 @@
 /// action as `<plugin id>.<action id>`. Re-exported rather than written out a
 /// second time: two copies of the id could drift apart, and the id is already
 /// the one `src/transport.rs:18` names.
-pub use crate::transport::PLUGIN_ID;
+pub use crate::transport::{LEGACY_PLUGIN_ID, PLUGIN_ID};
 
 #[derive(Debug)]
 pub struct Binding {
@@ -155,6 +155,9 @@ pub fn inspect(text: &str) -> Result<Existing, String> {
 #[derive(Debug, Default)]
 pub struct Decision {
     pub to_add: Vec<&'static Binding>,
+    /// A block naming the id this plugin had before issue #73, with the key it
+    /// sits on. Its key does nothing until the block is rewritten.
+    pub superseded: Vec<(&'static Binding, String)>,
     /// Ours, already bound — with the key it is bound to, which may not be ours.
     pub already: Vec<(&'static Binding, String)>,
     /// Our key, held by something else — with what holds it.
@@ -167,6 +170,15 @@ pub struct Decision {
 pub fn decide(existing: &Existing) -> Decision {
     let mut decision = Decision::default();
     for binding in BINDINGS.iter() {
+        // Before anything else: a block naming this plugin's own previous id is
+        // its own past, not a stranger holding the key. Reported as blocked it
+        // would tell the person to pick another key for a binding they added on
+        // this plugin's instruction.
+        let superseded = format!("{LEGACY_PLUGIN_ID}.{}", binding.action);
+        if let Some((key, _)) = existing.commands.iter().find(|(_, c)| *c == superseded) {
+            decision.superseded.push((binding, key.clone()));
+            continue;
+        }
         let command = binding.command();
         if let Some((key, _)) = existing.commands.iter().find(|(_, c)| *c == command) {
             decision.already.push((binding, key.clone()));
@@ -201,6 +213,61 @@ pub fn decide(existing: &Existing) -> Decision {
         }
     }
     decision
+}
+
+/// Every `command` value naming this plugin's previous id, inside a
+/// `[[keys.command]]` block, rewritten to name the current one. Every other byte
+/// of the file is copied through.
+///
+/// A line edit rather than a pass through a TOML document: the file is
+/// hand-written and commented, the reason a key was chosen sits above the block
+/// that uses it, and a value tree keeps neither comments nor layout. The key does
+/// not change, so the comment goes on describing the binding under it.
+pub fn rewrite_commands(original: &str) -> String {
+    let mut out = String::with_capacity(original.len());
+    let mut in_block = false;
+    for line in original.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed == "[[keys.command]]" {
+            in_block = true;
+        } else if trimmed.starts_with('[') {
+            in_block = false;
+        }
+        let rewritten = if in_block {
+            BINDINGS.iter().find_map(|binding| replaced(line, binding))
+        } else {
+            None
+        };
+        match rewritten {
+            Some(line) => out.push_str(&line),
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// `line` with the quoted value of a `command` assignment naming `binding`'s
+/// predecessor replaced, or `None` when this line is not that assignment. A
+/// comment is not an assignment, so one that merely mentions the old command is
+/// left as it is.
+fn replaced(line: &str, binding: &Binding) -> Option<String> {
+    let (key, rest) = line.split_once('=')?;
+    if key.trim() != "command" {
+        return None;
+    }
+    let old = format!("\"{LEGACY_PLUGIN_ID}.{}\"", binding.action);
+    let at = rest.find(&old)?;
+    // Only blank space may precede the value: `command = x "old"` is not an
+    // assignment of that value.
+    if !rest[..at].trim().is_empty() {
+        return None;
+    }
+    let new = format!("\"{PLUGIN_ID}.{}\"", binding.action);
+    Some(format!(
+        "{key}={}{new}{}",
+        &rest[..at],
+        &rest[at + old.len()..]
+    ))
 }
 
 use std::path::Path;
@@ -488,22 +555,20 @@ fn commit(
     })
 }
 
-/// Appends `addition` to the file at `path`, through `commit`.
+/// `original` with `addition` after it.
 ///
-/// The blank line before it is what keeps an appended block off the end of
+/// The blank line between them is what keeps an appended block off the end of
 /// whatever was already there, and the newline before that is what keeps a file
 /// with no trailing newline from having the block glued onto its last line —
 /// which herdr answers with a parse error and a fall back to its defaults.
-pub fn append(herdr: &dyn Herdr, path: &Path, addition: &str) -> Result<(), WriteError> {
-    commit(herdr, path, |original| {
-        let mut text = original.to_string();
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
+pub fn appended(original: &str, addition: &str) -> String {
+    let mut text = original.to_string();
+    if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
-        text.push_str(addition);
-        text
-    })
+    }
+    text.push('\n');
+    text.push_str(addition);
+    text
 }
 
 /// "1 binding" or "2 bindings" — the count belongs in the question, because the
@@ -516,12 +581,70 @@ fn plural_bindings(count: usize) -> String {
     }
 }
 
+/// What an install under the id this plugin had before issue #73 left behind.
+///
+/// Gathered by `main` and handed in, so `run` has no branch that depends on the
+/// environment and the tests need not mutate one they share — the reason
+/// `config_path_from` above takes its three values rather than reading them.
+#[derive(Debug, Default, Clone)]
+pub struct Legacy {
+    /// The configuration file under the old id, when one is there.
+    pub config_file: Option<PathBuf>,
+    /// The directory the plugin reads now, which the same sentence names.
+    pub current_config_dir: Option<PathBuf>,
+    /// The old socket, when a daemon still answers on it. Unix only: on Windows
+    /// the address is a name in the pipe namespace, with no path.
+    pub daemon_socket: Option<String>,
+}
+
+/// "rewrite 2 bindings to name herdr-voice", "append 1 binding", or both — the
+/// question sits under a wall of TOML and has to say what answering it does.
+fn ask(decision: &Decision) -> String {
+    let mut parts = Vec::new();
+    if !decision.superseded.is_empty() {
+        parts.push(format!(
+            "rewrite {} to name {PLUGIN_ID}",
+            plural_bindings(decision.superseded.len())
+        ));
+    }
+    if !decision.to_add.is_empty() {
+        parts.push(format!("append {}", plural_bindings(decision.to_add.len())));
+    }
+    parts.join(" and ")
+}
+
+/// What the rename left behind besides the keybindings. Printed whether or not
+/// anything was rewritten: a person who repairs the keys and stops there runs on
+/// defaults, with a daemon from the old build still holding the old socket.
+fn report_legacy(legacy: &Legacy, out: &mut dyn std::io::Write) {
+    if let (Some(file), Some(now)) = (&legacy.config_file, &legacy.current_config_dir) {
+        let _ = writeln!(
+            out,
+            "\nyour configuration from before the rename is still at {}, and this \
+             plugin now reads {}. Move it with:\n  mv {} {}/",
+            file.display(),
+            now.display(),
+            file.display(),
+            now.display()
+        );
+    }
+    if let Some(socket) = &legacy.daemon_socket {
+        let _ = writeln!(
+            out,
+            "\na daemon from before the rename is still running and holding {socket}. \
+             No herdr restart ends it — it is not herdr's child. End it with:\n  \
+             kill $(lsof -t {socket})"
+        );
+    }
+}
+
 /// The whole action. `interactive` decides which half runs, and it is a fact
 /// about the process rather than a flag: a pane has a terminal, the action herdr
 /// starts does not.
 pub fn run(
     herdr: &dyn Herdr,
     path: Option<PathBuf>,
+    legacy: &Legacy,
     interactive: bool,
     answer: &mut dyn FnMut() -> Option<String>,
     out: &mut dyn std::io::Write,
@@ -581,6 +704,16 @@ pub fn run(
             binding.command()
         );
     }
+    for (binding, key) in &decision.superseded {
+        let _ = writeln!(
+            out,
+            "superseded: {key} in {} carries this plugin's previous id, {}.{}. \
+             The id is now {PLUGIN_ID}, so that key does nothing when it is pressed.",
+            path.display(),
+            LEGACY_PLUGIN_ID,
+            binding.action
+        );
+    }
     for (binding, holder) in &decision.blocked {
         let _ = writeln!(
             out,
@@ -592,7 +725,7 @@ pub fn run(
         );
     }
 
-    if decision.to_add.is_empty() {
+    if decision.to_add.is_empty() && decision.superseded.is_empty() {
         if decision.blocked.is_empty() {
             let _ = writeln!(out, "nothing to add to {}.", path.display());
         } else {
@@ -605,15 +738,18 @@ pub fn run(
                 decision.blocked.len()
             );
         }
+        report_legacy(legacy, out);
         return 0;
     }
 
     let snippet = render(&decision.to_add);
-    let _ = writeln!(out, "\nthese go into {}:\n\n{snippet}", path.display());
+    if !decision.to_add.is_empty() {
+        let _ = writeln!(out, "\nthese go into {}:\n\n{snippet}", path.display());
+    }
     let _ = write!(
         out,
-        "append these {} to the file named above? [y/N] then Enter: ",
-        plural_bindings(decision.to_add.len())
+        "\n{} in the file named above? [y/N] then Enter: ",
+        ask(&decision)
     );
     // "then Enter" is not decoration. The answer is read with `read_line`, which
     // returns nothing until a newline arrives, while the terminal echoes the
@@ -633,14 +769,34 @@ pub fn run(
     let said = answer().unwrap_or_default();
     if !matches!(said.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
         let _ = writeln!(out, "\nnothing was changed.");
+        report_legacy(legacy, out);
         return 0;
     }
 
-    match append(herdr, &path, &snippet) {
+    // One write for both halves, so herdr judges the file once and one rename
+    // puts it in place. The rewrite goes first: a block that is about to name
+    // the current id must not also be appended.
+    let rewriting = !decision.superseded.is_empty();
+    let outcome = commit(herdr, &path, |original| {
+        let mut text = if rewriting {
+            rewrite_commands(original)
+        } else {
+            original.to_string()
+        };
+        if !snippet.is_empty() {
+            text = appended(&text, &snippet);
+        }
+        text
+    });
+
+    let code = match outcome {
         Ok(()) => {
-            let _ = writeln!(out, "\nadded to {}:", path.display());
+            let _ = writeln!(out, "\nin {}:", path.display());
+            for (binding, key) in &decision.superseded {
+                let _ = writeln!(out, "  {} rewritten on {key}", binding.command());
+            }
             for binding in &decision.to_add {
-                let _ = writeln!(out, "  {} on {}", binding.command(), binding.key);
+                let _ = writeln!(out, "  {} added on {}", binding.command(), binding.key);
             }
             let _ = writeln!(
                 out,
@@ -653,6 +809,43 @@ pub fn run(
             let _ = writeln!(out, "\n{e}");
             1
         }
+    };
+    report_legacy(legacy, out);
+    code
+}
+
+/// A daemon from before the rename still answers on the old socket, or nothing
+/// does. Nothing is sent on the connection; a connection that opens is the whole
+/// answer.
+///
+/// Unix only: on Windows the address is a name in the pipe namespace, with no
+/// path for this to look beside and no `lsof` to name a process with.
+#[cfg(unix)]
+pub fn legacy_daemon_socket(state_dir: Option<PathBuf>) -> Option<String> {
+    let socket = crate::transport::legacy_sibling(&state_dir?)?.join("voice.sock");
+    let address = crate::transport::Address::path(socket.to_string_lossy().into_owned());
+    crate::transport::connect(&address).ok()?;
+    Some(address.display().to_string())
+}
+
+/// What the rename of issue #73 left on this machine, read once, outside `run`.
+fn legacy() -> Legacy {
+    let current_config_dir = crate::config::directory(&crate::config::Vars::from_env());
+    let config_file = current_config_dir
+        .as_deref()
+        .and_then(crate::transport::legacy_sibling)
+        .map(|dir| dir.join(crate::config::FILE_NAME))
+        .filter(|file| file.is_file());
+    #[cfg(unix)]
+    let daemon_socket = legacy_daemon_socket(crate::transport::state_directory(
+        &crate::transport::Vars::from_env(),
+    ));
+    #[cfg(not(unix))]
+    let daemon_socket = None;
+    Legacy {
+        config_file,
+        current_config_dir,
+        daemon_socket,
     }
 }
 
@@ -668,7 +861,14 @@ pub fn main() -> u8 {
         Some(line)
     };
     let mut out = std::io::stdout();
-    run(&herdr, config_path(), interactive, &mut answer, &mut out)
+    run(
+        &herdr,
+        config_path(),
+        &legacy(),
+        interactive,
+        &mut answer,
+        &mut out,
+    )
 }
 
 #[cfg(test)]
@@ -829,6 +1029,7 @@ mod tests {
         let code = run(
             &FakeHerdr::clean(),
             Some(path),
+            &Legacy::default(),
             true,
             &mut || {
                 let flushed = *seen.flushed_bytes.lock().unwrap();
@@ -868,6 +1069,7 @@ mod tests {
         let code = run(
             herdr,
             path,
+            &Legacy::default(),
             interactive,
             &mut || {
                 if answers.is_empty() {
@@ -970,11 +1172,9 @@ mod tests {
     fn a_clean_append_lands_and_keeps_every_byte_that_was_there() {
         let path = scratch("clean");
         std::fs::write(&path, "[theme]\nname = \"something\"\n").unwrap();
-        append(
-            &FakeHerdr::clean(),
-            &path,
-            "[[keys.command]]\nkey = \"ctrl+g\"\n",
-        )
+        commit(&FakeHerdr::clean(), &path, |original| {
+            appended(original, "[[keys.command]]\nkey = \"ctrl+g\"\n")
+        })
         .unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.starts_with("[theme]\nname = \"something\"\n"));
@@ -992,11 +1192,9 @@ mod tests {
         let target = path.parent().unwrap().join("real-config.toml");
         std::fs::write(&target, "[theme]\n").unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
-        append(
-            &FakeHerdr::clean(),
-            &path,
-            "[[keys.command]]\nkey = \"ctrl+g\"\n",
-        )
+        commit(&FakeHerdr::clean(), &path, |original| {
+            appended(original, "[[keys.command]]\nkey = \"ctrl+g\"\n")
+        })
         .unwrap();
         assert!(
             std::fs::symlink_metadata(&path)
@@ -1047,6 +1245,263 @@ mod tests {
         );
     }
 
+    /// The probe is a connection attempt and nothing else: a socket file with
+    /// nothing behind it is a daemon that is gone, and saying it is still
+    /// running would send a person to kill a process that does not exist.
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_answers_only_while_something_is_listening() {
+        let current = scratch("probe").parent().unwrap().join("herdr-voice");
+        std::fs::create_dir_all(&current).unwrap();
+        let legacy = crate::transport::legacy_sibling(&current).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(legacy_daemon_socket(Some(current.clone())), None);
+
+        let address = crate::transport::Address::path(
+            legacy.join("voice.sock").to_string_lossy().into_owned(),
+        );
+        let listener = crate::transport::listen(&address).unwrap();
+        let answered = legacy_daemon_socket(Some(current));
+        drop(listener);
+        assert_eq!(answered.as_deref(), Some(address.display()));
+    }
+
+    #[test]
+    fn y_rewrites_the_predecessor_s_blocks_and_says_which_keys_they_were_on() {
+        let path = scratch("rewrite-yes");
+        std::fs::write(
+            &path,
+            "# why ctrl+g: alt+g typed ©\n\
+             [[keys.command]]\n\
+             key = \"ctrl+g\"\n\
+             type = \"plugin_action\"\n\
+             command = \"haurylau.voice.ptt\"\n",
+        )
+        .unwrap();
+        let mut said = Vec::new();
+        let mut answer = || Some("y\n".to_string());
+        let code = run(
+            &FakeHerdr::clean(),
+            Some(path.clone()),
+            &Legacy::default(),
+            true,
+            &mut answer,
+            &mut said,
+        );
+        let said = String::from_utf8(said).unwrap();
+        assert_eq!(code, 0, "{said}");
+        assert!(said.contains("ctrl+g"), "the key it sits on: {said}");
+        assert!(
+            said.contains(&path.display().to_string()),
+            "the file it sits in: {said}"
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("command = \"herdr-voice.ptt\""), "{after}");
+        assert!(
+            after.contains("# why ctrl+g: alt+g typed ©\n[[keys.command]]"),
+            "{after}"
+        );
+        assert!(!after.contains("haurylau.voice"), "{after}");
+    }
+
+    #[test]
+    fn anything_but_y_leaves_the_predecessor_s_blocks_where_they_are() {
+        let path = scratch("rewrite-no");
+        let original = "[[keys.command]]\nkey = \"ctrl+g\"\ncommand = \"haurylau.voice.ptt\"\n";
+        std::fs::write(&path, original).unwrap();
+        let mut said = Vec::new();
+        let mut answer = || Some("n\n".to_string());
+        run(
+            &FakeHerdr::clean(),
+            Some(path.clone()),
+            &Legacy::default(),
+            true,
+            &mut answer,
+            &mut said,
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn the_report_names_the_old_configuration_file_and_the_one_read_now() {
+        let path = scratch("legacy-config");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let legacy = Legacy {
+            config_file: Some(PathBuf::from("/tmp/c/haurylau.voice/config.toml")),
+            current_config_dir: Some(PathBuf::from("/tmp/c/herdr-voice")),
+            daemon_socket: None,
+        };
+        let mut said = Vec::new();
+        let mut answer = || Some("n\n".to_string());
+        run(
+            &FakeHerdr::clean(),
+            Some(path),
+            &legacy,
+            true,
+            &mut answer,
+            &mut said,
+        );
+        let said = String::from_utf8(said).unwrap();
+        assert!(said.contains("/tmp/c/haurylau.voice/config.toml"), "{said}");
+        assert!(said.contains("/tmp/c/herdr-voice"), "{said}");
+        assert!(
+            said.contains("mv "),
+            "it gives the one command that moves it: {said}"
+        );
+    }
+
+    #[test]
+    fn the_report_names_a_daemon_that_still_answers_on_the_old_socket() {
+        let path = scratch("legacy-daemon");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let legacy = Legacy {
+            daemon_socket: Some("/tmp/s/haurylau.voice/voice.sock".to_string()),
+            ..Legacy::default()
+        };
+        let mut said = Vec::new();
+        let mut answer = || Some("n\n".to_string());
+        run(
+            &FakeHerdr::clean(),
+            Some(path),
+            &legacy,
+            true,
+            &mut answer,
+            &mut said,
+        );
+        let said = String::from_utf8(said).unwrap();
+        assert!(said.contains("/tmp/s/haurylau.voice/voice.sock"), "{said}");
+        assert!(said.contains("kill"), "and the one way to end it: {said}");
+    }
+
+    #[test]
+    fn nothing_is_said_about_leftovers_that_are_not_there() {
+        let path = scratch("legacy-none");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let mut said = Vec::new();
+        let mut answer = || Some("n\n".to_string());
+        run(
+            &FakeHerdr::clean(),
+            Some(path),
+            &Legacy::default(),
+            true,
+            &mut answer,
+            &mut said,
+        );
+        let said = String::from_utf8(said).unwrap();
+        assert!(!said.contains("mv "), "{said}");
+        assert!(!said.contains("kill"), "{said}");
+    }
+
+    #[test]
+    fn a_block_naming_the_previous_id_is_this_plugin_s_own_predecessor() {
+        let existing =
+            inspect("[[keys.command]]\nkey = \"ctrl+g\"\ncommand = \"haurylau.voice.ptt\"\n")
+                .unwrap();
+        let decision = decide(&existing);
+        assert_eq!(
+            decision
+                .superseded
+                .iter()
+                .map(|(b, key)| (b.action, key.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("ptt", "ctrl+g")]
+        );
+        assert!(
+            decision.blocked.is_empty(),
+            "its own past is not a stranger holding the key: {:?}",
+            decision.blocked
+        );
+        assert!(
+            !decision.to_add.iter().any(|b| b.action == "ptt"),
+            "ptt is repaired by the rewrite, not by an append"
+        );
+    }
+
+    /// A key held by something that is not this plugin, under either id, is
+    /// still somebody else's.
+    #[test]
+    fn a_block_naming_another_plugin_is_still_a_stranger() {
+        let existing =
+            inspect("[[keys.command]]\nkey = \"ctrl+g\"\ncommand = \"somebody.else.ptt\"\n")
+                .unwrap();
+        let decision = decide(&existing);
+        assert!(decision.superseded.is_empty(), "{:?}", decision.superseded);
+        assert_eq!(decision.blocked.len(), 1);
+    }
+
+    /// The file this edits is hand-written, and the reason a key was chosen sits
+    /// above the block that uses it. The key does not change, so the comment
+    /// stays true — as long as the block stays where it is and only the
+    /// command's value moves.
+    #[test]
+    fn the_rewrite_changes_the_command_value_and_nothing_else() {
+        let original = "# my herdr configuration\n\
+                        \n\
+                        [keys]\n\
+                        prefix = \"ctrl+b\"\n\
+                        \n\
+                        # ctrl+g, because alt+v did nothing and alt+g typed ©\n\
+                        [[keys.command]]\n\
+                        \tkey = \"ctrl+g\"\n\
+                        \ttype = \"plugin_action\"\n\
+                        \tcommand   =   \"haurylau.voice.ptt\"  # hold to talk\n\
+                        \n\
+                        [[keys.command]]\n\
+                        key = \"prefix+i\"\n\
+                        command = \"haurylau.voice.dictate\"\n";
+        let after = rewrite_commands(original);
+        assert!(
+            after.contains("\tcommand   =   \"herdr-voice.ptt\"  # hold to talk"),
+            "{after}"
+        );
+        assert!(
+            after.contains("command = \"herdr-voice.dictate\""),
+            "{after}"
+        );
+        assert!(
+            after.contains(
+                "# ctrl+g, because alt+v did nothing and alt+g typed ©\n[[keys.command]]"
+            ),
+            "the comment stays directly above the block it explains: {after}"
+        );
+        assert_eq!(
+            after.replace("herdr-voice.", "haurylau.voice."),
+            original,
+            "nothing but the two command values moved"
+        );
+    }
+
+    /// A comment is not an assignment. One that mentions the old command says
+    /// what it said; rewriting it would edit a person's prose.
+    #[test]
+    fn a_comment_that_mentions_the_old_command_is_left_alone() {
+        let original = "[[keys.command]]\n\
+                        # this used to be haurylau.voice.ptt before the rename\n\
+                        key = \"ctrl+g\"\n\
+                        command = \"haurylau.voice.ptt\"\n";
+        let after = rewrite_commands(original);
+        assert!(
+            after.contains("# this used to be haurylau.voice.ptt before the rename"),
+            "{after}"
+        );
+        assert!(after.contains("command = \"herdr-voice.ptt\""), "{after}");
+    }
+
+    /// Outside a [[keys.command]] block nothing is a binding, whatever it looks
+    /// like.
+    #[test]
+    fn a_command_assignment_outside_a_binding_block_is_left_alone() {
+        let original = "[some.other.section]\ncommand = \"haurylau.voice.ptt\"\n";
+        assert_eq!(rewrite_commands(original), original);
+    }
+
+    #[test]
+    fn an_action_this_plugin_does_not_have_is_left_alone() {
+        let original =
+            "[[keys.command]]\nkey = \"ctrl+j\"\ncommand = \"haurylau.voice.whatever\"\n";
+        assert_eq!(rewrite_commands(original), original);
+    }
+
     #[test]
     fn commit_writes_what_the_maker_returns_and_not_the_original() {
         let path = scratch("commit-replaces");
@@ -1091,7 +1546,10 @@ mod tests {
         let path = scratch("rename");
         std::fs::write(&path, "[theme]\n").unwrap();
         let before = std::fs::metadata(&path).unwrap().ino();
-        append(&FakeHerdr::clean(), &path, "[[keys.command]]\n").unwrap();
+        commit(&FakeHerdr::clean(), &path, |original| {
+            appended(original, "[[keys.command]]\n")
+        })
+        .unwrap();
         let after = std::fs::metadata(&path).unwrap().ino();
         assert_ne!(
             before, after,
@@ -1115,11 +1573,9 @@ mod tests {
                         \ttype = \"shell\"\n\
                         \tcommand = \"echo hello\"  # a naïve chord: alt+g typed © here\n";
         std::fs::write(&path, original).unwrap();
-        append(
-            &FakeHerdr::clean(),
-            &path,
-            "[[keys.command]]\nkey = \"ctrl+g\"\n",
-        )
+        commit(&FakeHerdr::clean(), &path, |original| {
+            appended(original, "[[keys.command]]\nkey = \"ctrl+g\"\n")
+        })
         .unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -1136,11 +1592,9 @@ mod tests {
     fn a_file_that_does_not_end_in_a_newline_is_not_glued_to_the_block() {
         let path = scratch("no-trailing-newline");
         std::fs::write(&path, "[theme]\nname = \"something\"").unwrap();
-        append(
-            &FakeHerdr::clean(),
-            &path,
-            "[[keys.command]]\nkey = \"ctrl+g\"\n",
-        )
+        commit(&FakeHerdr::clean(), &path, |original| {
+            appended(original, "[[keys.command]]\nkey = \"ctrl+g\"\n")
+        })
         .unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -1163,7 +1617,10 @@ mod tests {
         let path = scratch("mode");
         std::fs::write(&path, "[theme]\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        append(&FakeHerdr::clean(), &path, "[[keys.command]]\n").unwrap();
+        commit(&FakeHerdr::clean(), &path, |original| {
+            appended(original, "[[keys.command]]\n")
+        })
+        .unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "got {mode:o}");
     }
@@ -1174,7 +1631,10 @@ mod tests {
             .parent()
             .unwrap()
             .join("deeper/config.toml");
-        append(&FakeHerdr::clean(), &path, "[[keys.command]]\n").unwrap();
+        commit(&FakeHerdr::clean(), &path, |original| {
+            appended(original, "[[keys.command]]\n")
+        })
+        .unwrap();
         assert!(path.exists());
     }
 
@@ -1186,7 +1646,10 @@ mod tests {
             ok: false,
             output: "config: issues found\nunknown config section [nonsense]".into(),
         }]);
-        let err = append(&herdr, &path, "[[keys.command]]\n").unwrap_err();
+        let err = commit(&herdr, &path, |original| {
+            appended(original, "[[keys.command]]\n")
+        })
+        .unwrap_err();
         assert!(
             matches!(err, WriteError::OriginalRejected { .. }),
             "{err:?}"
@@ -1224,7 +1687,10 @@ mod tests {
                 output: "config: issues found\nctrl+g: disabled".into(),
             },
         ]);
-        let err = append(&herdr, &path, "[[keys.command]]\n").unwrap_err();
+        let err = commit(&herdr, &path, |original| {
+            appended(original, "[[keys.command]]\n")
+        })
+        .unwrap_err();
         assert!(
             matches!(err, WriteError::CandidateRejected { .. }),
             "{err:?}"
@@ -1252,7 +1718,10 @@ mod tests {
         std::fs::write(&path, "[theme]\n").unwrap();
         let dir = path.parent().unwrap();
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let err = append(&FakeHerdr::clean(), &path, "[[keys.command]]\n").unwrap_err();
+        let err = commit(&FakeHerdr::clean(), &path, |original| {
+            appended(original, "[[keys.command]]\n")
+        })
+        .unwrap_err();
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         match err {
             WriteError::Io { path: ref p, .. } => {

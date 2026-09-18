@@ -388,3 +388,46 @@ one test:
 
 Four gates after: `cargo test` 493 + 2 passed, clippy clean, `fmt --check` clean,
 `check_manifest.py` 12 entries.
+
+### A second correction, measured rather than inferred
+
+The plan's task 2 was to add `legacy_sibling` with its tests and no other caller.
+It cannot be committed green either, and this time the compiler said so directly
+rather than by analogy:
+
+```
+error: function `rewrite_commands` is never used
+error: function `replaced` is never used
+```
+
+A caller inside `#[cfg(test)]` does not exempt a function in the non-test build of
+a binary crate. So `legacy_sibling`, `LEGACY_PLUGIN_ID`, `rewrite_commands` and
+`Decision::superseded` all land in one commit with `run` and `setup::main`, which
+are their callers. The plan's tasks 3, 4 and 5 become one.
+
+### `append` split rather than kept
+
+Once `run` writes both halves in one `commit` call, `append` had no caller outside
+the tests — the same rule again. Rather than keep a wrapper alive for the tests,
+it split along the seam it already had:
+
+- `commit(herdr, path, make)` — the safe write, which owns the four properties;
+- `appended(original, addition) -> String` — the text rule, which owns the blank
+  line and the missing trailing newline.
+
+`run` composes them, and the closure that was duplicating the blank-line rule
+calls `appended` instead. Every test that drove `append` now drives `commit` with
+`appended` inside it, so the same properties are measured by the same assertions,
+and the four mutations were run a second time after the change:
+
+| mutation | what went red |
+|---|---|
+| the original is never judged by herdr | `an_original_herdr_already_complains_about_is_left_alone`, and two more |
+| the rename becomes a copy | `the_file_is_replaced_by_a_rename_rather_than_written_in_place` |
+| a symbolic link is not resolved | `a_configuration_that_is_a_link_keeps_the_link_and_changes_what_it_points_at` |
+| the original's mode is not carried | `the_mode_the_original_had_is_the_mode_the_result_has` |
+
+### Tasks 3 and 4 — done
+
+Four gates after: `cargo test` 508 + 2 passed, clippy clean, `fmt --check` clean,
+`check_manifest.py` 12 entries.
