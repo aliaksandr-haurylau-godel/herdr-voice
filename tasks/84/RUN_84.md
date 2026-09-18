@@ -757,7 +757,7 @@ test reaches fifty-two reported takes only by walking past fifty-one refusals.
 Both `#[cfg(unix)]` tests gate whole functions and keep their `use` inside the
 body, so nothing is dead on Windows.
 
-Two defects, both fixed in `2f8e0a9`:
+Two defects, both fixed in `b709b62`:
 
 - **The count was a file count.** `failures` was pushed inside the per-file loop,
   so with the key on — where a take has two files — a directory that went
