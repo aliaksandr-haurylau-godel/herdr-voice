@@ -132,6 +132,10 @@ pub fn state_directory(vars: &Vars) -> Option<PathBuf> {
     })
 }
 
+/// The socket's file name inside the state directory. Named once: `setup` builds
+/// the previous id's socket path too, and two spellings could drift apart.
+pub const SOCKET_FILE: &str = "voice.sock";
+
 /// The same directory under the id this plugin had before issue #73, or `None`
 /// when `current` is not this plugin's own directory.
 ///
@@ -159,7 +163,7 @@ pub fn address(_vars: &Vars) -> Result<Address, TransportError> {
 #[cfg(unix)]
 pub fn address(vars: &Vars) -> Result<Address, TransportError> {
     let directory = state_directory(vars).ok_or(TransportError::NoStateDirectory)?;
-    let path = directory.join("voice.sock");
+    let path = directory.join(SOCKET_FILE);
     Ok(Address::path(path.to_string_lossy().into_owned()))
 }
 

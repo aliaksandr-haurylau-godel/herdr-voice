@@ -340,8 +340,8 @@ person exactly where they were. It is raised through `toast`
 (`src/daemon.rs:691-699`), which is the existing path and which writes a journal
 line when herdr refuses the call. When `[ui] toasts` is off, `toast` returns
 without raising and without recording, so the journal line for this notice —
-`rename: <n> keys still name haurylau.voice: <list>` — is written by the caller
-before the toast in every case, which is the rule the file already states:
+`rename: <n> key(s) still name(s) haurylau.voice: <list>`, in the same number as
+the body — is written by the caller before the toast in every case, which is the rule the file already states:
 "`[ui] toasts` decides whether the person is interrupted. It never decides whether
 a failure is recorded" (`src/daemon.rs:688-690`).
 
@@ -349,6 +349,13 @@ When the herdr configuration cannot be located, does not exist, or does not pars
 the list is empty and nothing is raised. A file the daemon cannot read is not
 evidence that a key is dead, and `setup` is the place that reports a configuration
 it cannot parse — it has a terminal and this has none.
+
+The notice is raised on a thread of its own. `toast` runs
+`herdr notification show` through `Command::output()`, which has no timeout, and
+this is the only place a toast would be raised before the daemon is serving: a
+herdr slow to answer — it is starting this process as it starts itself — would
+otherwise hold the listener bound and accepting nothing, which reads as a hang
+rather than as a late notice.
 
 Once per daemon start, and nowhere near a take: reading a configuration file on
 the path that runs while somebody is speaking is what `start` already avoids by
@@ -361,6 +368,43 @@ keys that work. The notice is for the state after the relink, which is the state
 the issue describes. Nothing here reaches somebody who relinks and never restarts
 herdr; for them the old daemon is still listening and the old keys still work,
 because herdr still has the old plugin registered until it restarts.
+
+## 5b. Saying only what was actually done
+
+### Context
+
+`decide` finds a superseded block by parsing the file with `inspect`, and
+`rewrite_commands` edits one spelling of the value: `command`, `=`, blank space,
+`"<legacy id>.<action>"`.
+
+### Problem
+
+TOML has other spellings of the same value — a literal string in single quotes, a
+multi-line string — and `inspect` accepts all of them. A block written that way is
+found by the detector, offered for rewrite, left alone by the rewrite, and would
+be reported as repaired. The person is told their key works while the file still
+names an id that does not exist, and the notice at every daemon start has nothing
+to explain it. That is this repository's own silent-failure rule inverted: a
+failure that announces success.
+
+### Decision
+
+The text that is about to be written is read back through `superseded_keys`
+before it is written. Every key still named there is reported as left as it was,
+with the line to change by hand, and the run exits non-zero — a key that is still
+dead is a failure whatever else landed. A key that is no longer named is reported
+as rewritten.
+
+`rewrite_commands` also tracks multi-line strings and reads nothing inside one as
+structure, so a `[[keys.command]]` line inside somebody's prose opens no block and
+a `command =` line inside it is not a binding.
+
+### Why
+
+The check costs one pass over the text the code already holds, and it makes the
+report a statement about the file rather than about the intention. The
+alternative — teaching the line edit every TOML spelling — is a parser, and the
+one thing worse than not editing a line is editing the wrong one.
 
 ## 6. What does not change
 

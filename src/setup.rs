@@ -250,7 +250,20 @@ pub fn superseded_keys(text: &str) -> Vec<String> {
 pub fn rewrite_commands(original: &str) -> String {
     let mut out = String::with_capacity(original.len());
     let mut in_block = false;
+    let mut in_multiline = false;
     for line in original.split_inclusive('\n') {
+        // A multi-line string can hold anything, a `[[keys.command]]` line and a
+        // `command =` line included. Nothing inside one is read as structure and
+        // nothing inside one is rewritten: it is somebody's text, not a binding.
+        let was_inside = in_multiline;
+        if (line.matches("\"\"\"").count() + line.matches("'''").count()) % 2 == 1 {
+            in_multiline = !in_multiline;
+        }
+        if was_inside || in_multiline {
+            out.push_str(line);
+            continue;
+        }
+
         let trimmed = line.trim();
         if trimmed == "[[keys.command]]" {
             in_block = true;
@@ -585,7 +598,7 @@ fn commit(
 /// whatever was already there, and the newline before that is what keeps a file
 /// with no trailing newline from having the block glued onto its last line —
 /// which herdr answers with a parse error and a fall back to its defaults.
-pub fn appended(original: &str, addition: &str) -> String {
+fn appended(original: &str, addition: &str) -> String {
     let mut text = original.to_string();
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
@@ -645,8 +658,9 @@ fn report_legacy(legacy: &Legacy, out: &mut dyn std::io::Write) {
         let _ = writeln!(
             out,
             "\nyour configuration from before the rename is still at {}, and this \
-             plugin now reads {}. Move it with:\n  mv {} {}/",
+             plugin now reads {}. Move it with:\n  mkdir -p {} && mv {} {}/",
             file.display(),
+            now.display(),
             now.display(),
             file.display(),
             now.display()
@@ -695,6 +709,7 @@ pub fn run(
              HERDR_CONFIG_PATH, XDG_CONFIG_HOME nor HOME is set. Set \
              HERDR_CONFIG_PATH to the file and run this again."
         );
+        report_legacy(legacy, out);
         return 1;
     };
 
@@ -703,6 +718,7 @@ pub fn run(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
             let _ = writeln!(out, "cannot read {}: {e}", path.display());
+            report_legacy(legacy, out);
             return 1;
         }
     };
@@ -715,6 +731,7 @@ pub fn run(
                 "cannot read {} as TOML, so nothing was changed: {why}",
                 path.display()
             );
+            report_legacy(legacy, out);
             return 1;
         }
     };
@@ -801,6 +818,13 @@ pub fn run(
     // puts it in place. The rewrite goes first: a block that is about to name
     // the current id must not also be appended.
     let rewriting = !decision.superseded.is_empty();
+    // What still names the previous id in the text that was actually written.
+    // `decide` finds a superseded block by parsing the file; the rewrite matches
+    // one spelling of the value, `command = "<id>.<action>"`. A block whose value
+    // is written another way — a literal string, a multi-line one — is found by
+    // the first and left by the second, and reporting it as repaired would be a
+    // failure that announced success.
+    let mut left_as_it_was = Vec::new();
     let outcome = commit(herdr, &path, |original| {
         let mut text = if rewriting {
             rewrite_commands(original)
@@ -810,6 +834,7 @@ pub fn run(
         if !snippet.is_empty() {
             text = appended(&text, &snippet);
         }
+        left_as_it_was = superseded_keys(&text);
         text
     });
 
@@ -817,7 +842,19 @@ pub fn run(
         Ok(()) => {
             let _ = writeln!(out, "\nin {}:", path.display());
             for (binding, key) in &decision.superseded {
-                let _ = writeln!(out, "  {} rewritten on {key}", binding.command());
+                if left_as_it_was.contains(key) {
+                    let _ = writeln!(
+                        out,
+                        "  {key} was left as it was: its command is not written as \
+                         `command = \"{}.{}\"`, which is the one form this edits. \
+                         Change the value on that line to \"{}\" by hand.",
+                        LEGACY_PLUGIN_ID,
+                        binding.action,
+                        binding.command()
+                    );
+                } else {
+                    let _ = writeln!(out, "  {} rewritten on {key}", binding.command());
+                }
             }
             for binding in &decision.to_add {
                 let _ = writeln!(out, "  {} added on {}", binding.command(), binding.key);
@@ -827,7 +864,8 @@ pub fn run(
                 "\nthe running herdr does not see this until you run \
                  `herdr server reload-config`, or press prefix+shift+r."
             );
-            0
+            // A key that is still dead is a failure, whatever else landed.
+            u8::from(!left_as_it_was.is_empty())
         }
         Err(e) => {
             let _ = writeln!(out, "\n{e}");
@@ -846,7 +884,7 @@ pub fn run(
 /// path for this to look beside and no `lsof` to name a process with.
 #[cfg(unix)]
 pub fn legacy_daemon_socket(state_dir: Option<PathBuf>) -> Option<String> {
-    let socket = crate::transport::legacy_sibling(&state_dir?)?.join("voice.sock");
+    let socket = crate::transport::legacy_sibling(&state_dir?)?.join(crate::transport::SOCKET_FILE);
     let address = crate::transport::Address::path(socket.to_string_lossy().into_owned());
     crate::transport::connect(&address).ok()?;
     Some(address.display().to_string())
@@ -1326,6 +1364,63 @@ mod tests {
             "{after}"
         );
         assert!(!after.contains("haurylau.voice"), "{after}");
+    }
+
+    /// `decide` finds a superseded block by parsing the file; the rewrite edits
+    /// one spelling of the value. A block that only the first recognises must be
+    /// reported as left alone, with the line to change — not as repaired. Saying
+    /// a dead key was fixed is worse than saying nothing.
+    #[test]
+    fn a_value_the_rewrite_cannot_edit_is_reported_as_left_alone_and_the_run_fails() {
+        let path = scratch("rewrite-literal");
+        let original = "[[keys.command]]\nkey = \"ctrl+g\"\ncommand = '''haurylau.voice.ptt'''\n";
+        std::fs::write(&path, original).unwrap();
+        let mut said = Vec::new();
+        let mut answer = || Some("y\n".to_string());
+        let code = run(
+            &FakeHerdr::clean(),
+            Some(path.clone()),
+            &Legacy::default(),
+            true,
+            &mut answer,
+            &mut said,
+        );
+        let said = String::from_utf8(said).unwrap();
+        assert_eq!(code, 1, "a key that is still dead is a failure: {said}");
+        assert!(
+            said.contains("ctrl+g was left as it was"),
+            "it must not claim the key was repaired: {said}"
+        );
+        assert!(
+            said.contains("by hand"),
+            "and it must say what to do about it: {said}"
+        );
+        assert!(!said.contains("rewritten on ctrl+g"), "{said}");
+    }
+
+    /// A multi-line string holds somebody's text. `[[keys.command]]` inside one
+    /// opens no block, and a `command =` line inside one is not a binding.
+    #[test]
+    fn nothing_inside_a_multi_line_string_is_read_as_a_binding() {
+        let original = "[notes]\ntext = \"\"\"\n\
+                        [[keys.command]]\n\
+                        command = \"haurylau.voice.ptt\"\n\
+                        \"\"\"\n";
+        assert_eq!(rewrite_commands(original), original);
+    }
+
+    #[test]
+    fn the_question_says_which_halves_it_will_do() {
+        let mut decision = Decision::default();
+        decision
+            .superseded
+            .push((&BINDINGS[0], "ctrl+g".to_string()));
+        assert_eq!(ask(&decision), "rewrite 1 binding to name herdr-voice");
+        decision.to_add.push(&BINDINGS[1]);
+        assert_eq!(
+            ask(&decision),
+            "rewrite 1 binding to name herdr-voice and append 1 binding"
+        );
     }
 
     #[test]

@@ -446,3 +446,69 @@ measured by mutation instead:
 
 Four gates after: `cargo test` 519 + 2 passed, clippy clean, `fmt --check` clean,
 `check_manifest.py` 12 entries.
+
+### Task 6 — done
+
+`README.md` and six rows in `docs/decisions.md`.
+
+## S4 gate: the diff reviewed before a pull request exists
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff acbe320..87950a2
+  reviewer: code
+  verdict: QUESTIONS
+  round: 1
+  date: 2026-09-18
+  questions:
+    - "setup reports blocks as rewritten without checking that they were. `decide` classifies a block as superseded from a real TOML parse, while `rewrite_commands` matches one exact spelling — `command` `=` blank space `\"haurylau.voice.<action>\"`. A literal string, a multi-line string, or a block whose scope the scanner closed early is found by the first and left by the second, then printed as `herdr-voice.ptt rewritten on ctrl+g`. The person is told the key was repaired while the file still names the dead id, and the daemon notice keeps firing with no explanation."
+    - "The AC-11 notice is raised synchronously, before `serve`. `toast` runs `herdr notification show` through `Command::output()` with no timeout, so a herdr that does not answer leaves the daemon never serving with its listener bound — requests queue rather than fail, which looks like a hang."
+    - "The half of AC-6 that needs a real herdr is unverified and `docs/evidence.md` is untouched: every rewrite test runs against `FakeHerdr::clean()`, which answers `config: ok` unconditionally."
+  blocker: null
+```
+
+Eight minor findings besides. The reviewer also established, by construction
+rather than by reading the test, that `legacy_sibling` cannot answer with the
+directory it was given for any input — absolute, relative, trailing separator or
+`.`-terminated.
+
+### How the findings were answered
+
+**The first was reproduced before it was fixed.** A block written
+`command = 'haurylau.voice.ptt'` was detected as superseded and still named the
+old id after the rewrite:
+
+```
+detected=["ctrl+g"] rewritten_still_names=["ctrl+g"]
+```
+
+The fix reads the text back through `superseded_keys` before it is written, names
+every key still there as left as it was with the line to change, and exits
+non-zero — a key that is still dead is a failure whatever else landed.
+`rewrite_commands` also tracks multi-line strings now and reads nothing inside one
+as structure. Three tests cover it, and all three were measured by mutation:
+dropping the read-back, dropping the multi-line guard, and returning 0 with a key
+still dead each turn exactly one of them red.
+
+**The second was confirmed by reading the call it names** — `HerdrDeliverer::run`
+is `Command::new(..).output()`, with no timeout (`src/delivery.rs:182`). The
+notice now runs on a thread of its own, taken after the runtime is behind an
+`Arc` and before `serve`, so a herdr slow to answer cannot hold the listener bound
+and accepting nothing.
+
+**The third is S5**, which is the next stage and not a defect in the diff.
+
+Of the eight minor findings, six were taken: the legacy report now also runs on
+the three paths that end early with a failure, since somebody with a broken herdr
+configuration is the likeliest to have an orphaned one; the move command is
+`mkdir -p … && mv …`; the socket's file name is `transport::SOCKET_FILE` rather
+than two spellings; `appended`, `rename_notice` and `rename_notice_line` are
+private; the journal line agrees in number with the toast beside it; and the
+question `ask` builds has a test. Two were left: two legacy blocks for one action
+are rewritten and reported once, which the read-back now makes honest rather than
+wrong, and `CandidateRejected`'s message is pre-existing and belongs to whoever
+changes it next.
+
+Four gates after: `cargo test` 522 + 2 passed, clippy clean, `fmt --check` clean,
+`check_manifest.py` 12 entries.

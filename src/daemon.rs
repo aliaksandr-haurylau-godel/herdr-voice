@@ -1048,18 +1048,25 @@ fn key_list(keys: &[String]) -> String {
     }
 }
 
+/// "key"/"names" for one, "keys"/"name" for more: a sentence a person reads, in
+/// the toast and in the journal line alike.
+fn count_words(count: usize) -> (&'static str, &'static str) {
+    if count == 1 {
+        ("key", "names")
+    } else {
+        ("keys", "name")
+    }
+}
+
 /// The title and body of the one notice a daemon raises when the rename of issue
 /// #73 left keys behind, or `None` when it left none. See
 /// `tasks/73/DESIGN_73.md`, section 5a, which pins both forms.
-pub fn rename_notice(keys: &[String]) -> Option<(String, String)> {
+fn rename_notice(keys: &[String]) -> Option<(String, String)> {
     if keys.is_empty() {
         return None;
     }
-    let (noun, verb, object) = if keys.len() == 1 {
-        ("key", "names", "it")
-    } else {
-        ("keys", "name", "them")
-    };
+    let (noun, verb) = count_words(keys.len());
+    let object = if keys.len() == 1 { "it" } else { "them" };
     Some((
         "Dictation: the plugin id changed".to_string(),
         format!(
@@ -1075,9 +1082,10 @@ pub fn rename_notice(keys: &[String]) -> Option<(String, String)> {
 /// Written whether the toast is raised, refused or switched off: `[ui] toasts`
 /// decides whether the person is interrupted, never whether something is
 /// recorded.
-pub fn rename_notice_line(keys: &[String]) -> String {
+fn rename_notice_line(keys: &[String]) -> String {
+    let (noun, verb) = count_words(keys.len());
     format!(
-        "rename: {} keys still name {}: {}",
+        "rename: {} {noun} still {verb} {}: {}",
         keys.len(),
         crate::setup::LEGACY_PLUGIN_ID,
         key_list(keys)
@@ -1265,9 +1273,20 @@ pub fn start() -> Result<Outcome, TransportError> {
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|text| crate::setup::superseded_keys(&text))
         .unwrap_or_default();
-    announce_rename(&runtime, &superseded);
 
-    serve(listener, address, Arc::new(recorder), Arc::new(runtime));
+    let runtime = Arc::new(runtime);
+    // On a thread of its own, because raising it runs `herdr notification show`
+    // through `Command::output()`, which has no timeout, and this is the one
+    // place a toast would be raised before the daemon is serving. A herdr that
+    // is slow to answer — it is starting this process as it starts itself —
+    // would otherwise hold the listener bound and accepting nothing, which
+    // reads as a hang rather than as a late notice.
+    {
+        let runtime = Arc::clone(&runtime);
+        std::thread::spawn(move || announce_rename(&runtime, &superseded));
+    }
+
+    serve(listener, address, Arc::new(recorder), runtime);
     Ok(Outcome::Served)
 }
 
@@ -1697,7 +1716,7 @@ mod tests {
         announce_rename(&runtime, &["ctrl+g".to_string()]);
         assert_eq!(
             journalled(&journal),
-            vec!["rename: 1 keys still name haurylau.voice: ctrl+g"]
+            vec!["rename: 1 key still names haurylau.voice: ctrl+g"]
         );
         assert_eq!(
             fake.calls(),
@@ -1733,7 +1752,7 @@ mod tests {
         announce_rename(&runtime, &["ctrl+g".to_string()]);
         assert_eq!(
             journalled(&journal),
-            vec!["rename: 1 keys still name haurylau.voice: ctrl+g"]
+            vec!["rename: 1 key still names haurylau.voice: ctrl+g"]
         );
         assert!(fake.calls().is_empty(), "{:?}", fake.calls());
     }
@@ -1751,7 +1770,7 @@ mod tests {
         assert_eq!(written.len(), 2, "{written:?}");
         assert_eq!(
             written[0],
-            "rename: 1 keys still name haurylau.voice: ctrl+g"
+            "rename: 1 key still names haurylau.voice: ctrl+g"
         );
         assert!(written[1].starts_with("toast failed:"), "{written:?}");
     }
