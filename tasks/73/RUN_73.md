@@ -684,3 +684,49 @@ only branch tracking escapes, which is true of the two multi-line arms and false
 of the function. And the S5 record named no commit, while the code had moved
 since the runs: rather than write the caveat, every measurement was made again
 against the build from `33af41a`, and the section now names it.
+
+### The Windows build, red after the pull request opened
+
+```
+error: constant `SOCKET_FILE` is never used
+```
+
+Both callers are `#[cfg(unix)]` — `transport::address` and
+`setup::legacy_daemon_socket` — so on Windows nothing reaches the constant and
+`-D warnings` rejects it. The fix is the gate its callers already carry, not an
+`allow`: `#[cfg(unix)]` on the constant, with the reason `Address::path` two
+declarations above already states for itself.
+
+This is a class rather than an incident — issue #41 met it two days ago — and it
+is invisible on macOS, where the unix path compiles. It was checked here without
+a Windows machine by disabling every unix-gated block and enabling every
+windows-gated one, then running clippy:
+
+```sh
+find src -name '*.rs' -exec sed -i '' \
+  -e 's/#\[cfg(all(test, unix))\]/#[cfg(any())]/g' \
+  -e 's/#\[cfg(unix)\]/#[cfg(any())]/g' \
+  -e 's/#\[cfg(not(unix))\]/#[cfg(not(any()))]/g' \
+  -e 's/#\[cfg(windows)\]/#[cfg(not(any()))]/g' {} +
+cargo clippy --all-targets -- -D warnings
+```
+
+The instrument was checked before the finding: with the gate taken off again, the
+approximation prints exactly what CI printed, and with it on, nothing. Enabling
+the windows arms matters — disabling the unix ones alone answers with missing
+functions rather than with dead code, which is not the question.
+
+### Two notes from the orchestrating session
+
+The round-3 re-gate read the whole scanner rather than the changed lines, which is
+how the escape case was found: the brief asked for a line where `string_state`
+ends in the wrong state, over the function, not over the diff. This project has
+now recorded twice that a fix introduces the next finding, and reading the whole
+of what a fix touches is what turns the second finding up at a gate rather than
+later.
+
+The 867 generated documents establish agreement with `toml` on documents `toml`
+accepts, and say nothing about documents it rejects — which a person's
+configuration briefly is, while they are editing it. That case never reaches the
+scanner, because `run` reads the file with `inspect` first and stops; the design
+now says so rather than leaving it to be worked out.

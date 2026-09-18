@@ -402,6 +402,13 @@ as rewritten.
 structure, so a `[[keys.command]]` line inside somebody's prose opens no block and
 a `command =` line inside it is not a binding.
 
+The scanner agrees with `toml` on documents `toml` accepts, which is what it was
+checked against and also the whole of what it has to do: a file that does not
+parse never reaches the rewrite. `run` reads the file with `inspect` first and
+stops with "cannot read … as TOML, so nothing was changed" — and a configuration
+half-edited, which is the common way to have one that does not parse, is a
+configuration herdr is already ignoring.
+
 ### Why
 
 The check costs one pass over the text the code already holds, and it makes the

@@ -134,6 +134,11 @@ pub fn state_directory(vars: &Vars) -> Option<PathBuf> {
 
 /// The socket's file name inside the state directory. Named once: `setup` builds
 /// the previous id's socket path too, and two spellings could drift apart.
+///
+/// Unix only, for the reason `Address::path` above gives: on Windows the name
+/// lives in the pipe namespace and no path is built from it, so both callers of
+/// this are `cfg(unix)` and `-D warnings` rejects a constant nothing reaches.
+#[cfg(unix)]
 pub const SOCKET_FILE: &str = "voice.sock";
 
 /// The same directory under the id this plugin had before issue #73, or `None`
