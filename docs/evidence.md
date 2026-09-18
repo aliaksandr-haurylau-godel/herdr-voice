@@ -1249,3 +1249,65 @@ and names no plugin, so the id it was left under makes no difference to it.
 The sidebar token needs no sweep and was not measured again: it is written with a
 time to live of three renewals and lapses within 1.8 seconds once nothing renews
 it, which is recorded above for issue #40.
+
+## The take record and what a take leaves behind, by hand on macOS
+
+Issue #84. macOS 15 on arm64, herdr 0.9.1, the release binary built from
+`2e12124`. Nothing of the machine's own installation was touched: the checkout was
+not linked, no daemon was restarted, no plugin action was invoked, and the runs
+below use a configuration directory and a state directory of their own.
+
+### `doctor` names where records go, in all three states
+
+The seventh line is what makes the record reachable, and it is the one piece of
+this work that no test covers: it is wired inside `doctor::run`, which reads the
+process environment and shells out to herdr, so nothing exercises it without a
+real run. Three runs, each with its own configuration and state directory.
+
+With no configuration file at all:
+
+```
+record   default  off; set [record] transcripts = true to keep each take's transcript and rewrite beside its recording
+```
+
+With `[record] transcripts = true`:
+
+```
+record   ok       on; each take's transcript and rewrite are written to /tmp/<state>/takes, and the last 50 takes are kept
+```
+
+With the key on and none of `HERDR_PLUGIN_STATE_DIR`, `XDG_STATE_HOME` or `HOME`
+set:
+
+```
+record   ok       on; each take's transcript and rewrite are written to takes, and the last 50 takes are kept
+```
+
+The third is the one worth having. It is the state in which `doctor` used to say
+"there is nowhere to write" while the daemon recorded into a relative `takes`
+beside itself — a defect found by the review of this diff, not by a test. Both now
+take the directory from `transport::takes_directory`, and the line names the
+relative path the daemon would use.
+
+The full run prints seven lines in the order the module promises — herdr, daemon,
+config, engine, model, rewrite, record — and `record` never makes the command exit
+non-zero: the exit code of 1 in the first run is `engine` and `rewrite` reporting
+a machine with no recognition command configured, which is unrelated.
+
+### What was not verified by hand, and why
+
+A take driven from a keypress through to a delivered text, with the key off, so
+that the recording is seen to go. It needs the microphone, which the machine's
+owner was dictating with at the time, and it needs a live herdr to deliver into,
+which is the one thing this run may not touch. The take path is covered by tests
+instead — both stages recorded, the key off writing neither, each of the five
+rewrite outcomes, the recording removed on delivery and kept on the four other
+endings, and both failure paths — and every one of those was checked by mutation
+rather than by reading: the guard was removed, the test failed, the guard was put
+back.
+
+What a refused `remove_file` does on Windows is covered by nothing. The two tests
+of that path use a read-only directory, which is how a removal is refused on Unix
+and is not how it is refused on Windows, where an open file refuses deletion
+instead. Both are `#[cfg(unix)]`, so the Windows leg of CI compiles them away.
+That is a gap, and it is recorded here rather than claimed shut.

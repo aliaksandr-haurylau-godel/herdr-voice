@@ -818,9 +818,45 @@ gate:
   stage: S4
   artifact: git diff d83570c..HEAD
   reviewer: code
-  verdict: PENDING
+  verdict: READY
   date: 2026-09-18
+  questions: []
+  blocker: null
 ```
+
+Every mutation claim was traced independently rather than taken on trust, and all
+three hold including "fails exactly one test". One narrower mutation was checked
+that the wording invited and the author had not: dropping only the `Some("json")`
+arm of the extension filter, which is caught by
+`the_bound_keeps_the_newest_fifty_takes_and_removes_both_files_of_an_older_one`
+through the orphaned records of removed takes. Both arms are pinned, not the
+filter as a whole.
+
+One note, recorded and not acted on: the wiring inside `doctor::run` — the two
+lines that take the directory and push the finding — is unobserved, in the same
+way `daemon::start` is, because `run` reads the process environment and shells out
+to herdr. It is not given a test; it is given a run, in `docs/evidence.md`.
+
+### S5 Verify
+
+- artifact: a section in `docs/evidence.md`
+- verified: 2026-09-18, macOS 15 on arm64, herdr 0.9.1, release binary from
+  `2e12124`
+
+`doctor` was run three times, each with a configuration and a state directory of
+its own, and the machine's own installation was not touched. The seventh line
+reads `default` with no configuration file, `ok` naming the directory with the key
+on, and — the run worth having — `ok` naming the relative `takes` when none of the
+three state variables is set. That last is the state in which `doctor` used to say
+there was nowhere to write while the daemon recorded into a relative directory
+beside itself, which is the defect the diff review found and no test could see.
+
+Recorded as not verified by hand, with the reason: a take driven from a keypress
+to a delivered text. It needs the microphone, which the owner was dictating with,
+and a live herdr to deliver into, which this run may not touch. And what a refused
+`remove_file` does on Windows is covered by nothing on any platform — both tests
+of that path use a read-only directory, which is how Unix refuses a removal and
+not how Windows does.
 
 ## Notes
 
