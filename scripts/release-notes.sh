@@ -52,11 +52,14 @@ repo="aliaksandr-haurylau-godel/herdr-voice"
 # v0.0.0 is the repository's placeholder version, and `scripts/release-kind.sh`
 # answers `prerelease` for it on that ground rather than on the hyphen rule. A
 # tag cut from it is not a version of the plugin and is thrown away once it has
-# been used, so it is the one prerelease the text below would be false of.
+# been used, so it is the one prerelease the text below would be false of. No
+# such tag exists now — the one there was went away when the version became
+# 0.1.0-beta.1 — and this branch costs a line against the version returning
+# there.
 if [ "${tag}" = v0.0.0 ]; then
     cat <<'PLACEHOLDER'
-Not a version of the plugin. The manifest and the crate both sit at 0.0.0, which
-is this repository's placeholder for "unreleased".
+Not a version of the plugin. 0.0.0 is this repository's placeholder for
+"unreleased", and nothing cut from it is a version to install.
 
 This tag exists so the install path can be exercised end to end: the manifest's
 build entries fetch the archives below and check each against the `.sha256` file

@@ -24,7 +24,10 @@ with the tag alone rather than "— install-path check".
 `v0.0.0` keeps the old text. It is the one prerelease of which that text is
 true: `scripts/release-kind.sh` answers `prerelease` for it because it is the
 repository's placeholder version, not because of the hyphen rule, and a tag cut
-from it really is thrown away after the install path has been exercised.
+from it really is thrown away after the install path has been exercised. No such
+tag exists — `git ls-remote --tags origin` lists only `v0.1.0-beta.1` — so this
+branch costs a line against the version returning to 0.0.0, and nothing in the
+notes or the tests says that tag is published.
 
 `scripts/test-release-notes.sh` is new and drives the notes script; the
 `scripts` job in `.github/workflows/check.yml` runs it beside the release-kind
@@ -53,6 +56,13 @@ fixes. What it found and what was done:
   install path had been exercised on, and that file records nothing about the
   install path at this tag. The sentence now points at what the file does hold —
   what was verified by hand and on which platform.
+
+  Both sentences were removed for being unestablished, not for being wrong.
+  Neither was shown to be false; there was nothing in the repository, in
+  `herdr plugin install --help` or in a run that made them true, and a published
+  note is the one place where a reader can check a claim and find it empty. That
+  is why the notes are shorter than they could be, and it is the bar for
+  anything added to them later.
 - The script accepted a tag with no prerelease marker and produced a sentence
   claiming one, and it expanded the tag inside a heredoc. Both are refused now,
   with tests.
