@@ -68,19 +68,23 @@ fixes. What it found and what was done:
   with tests.
 - Nothing in CI asserted that the workflow calls the script. Three assertions
   now read `release.yml` directly.
-- The run document claimed the published release had already been corrected. It
-  had not; that work is below, and it waits on the owner.
+- The run document claimed the published release had already been corrected
+  while it had not. It says below what actually happened and when.
 
 ### S5 Verify
 
 Recorded in `docs/evidence.md`, section "The prerelease notes, driven as the
 workflow drives them".
 
-### Still open when this branch was pushed
+### The published release
 
-The already-published `v0.1.0-beta.1` still carries the old notes. Correcting it
-is `gh release edit`, notes and title only — not the tag, not the assets, not the
-prerelease flag — and it publishes outward, so it waits on the owner's word. The
-result goes into `docs/evidence.md` when it happens.
+`v0.1.0-beta.1` was corrected on 2026-09-18, after the owner approved the exact
+text in this session. `gh release edit` with the title and the notes file and
+nothing else: the tag, the ten assets and the prerelease flag were not arguments
+to it. Read back from GitHub afterwards rather than trusted to the exit code; the
+result is in `docs/evidence.md`, section "The notes of `v0.1.0-beta.1`, corrected
+in place".
+
+That approval covered this release's notes and nothing further.
 
 Nothing in this run pushes a tag, cuts a release or re-runs the release workflow.

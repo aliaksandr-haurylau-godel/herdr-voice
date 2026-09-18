@@ -1055,3 +1055,28 @@ which takes the version out of `herdr-plugin.toml` in the checkout, and from the
 manifest's own note that the archive fetched is the one tagged `v` plus that
 version. What herdr does when no `--ref` is given was not established and no
 sentence in the notes claims it.
+
+## The notes of `v0.1.0-beta.1`, corrected in place
+
+Done on 2026-09-18 with
+`gh release edit v0.1.0-beta.1 --title v0.1.0-beta.1 --notes-file <notes>`, where
+the notes file was the output of `sh scripts/release-notes.sh v0.1.0-beta.1`.
+Notes and title only: no `--prerelease` flag, no asset argument, no tag argument.
+
+Read back from GitHub rather than taken from the command's exit code.
+`gh release view v0.1.0-beta.1` after the edit:
+
+| field | value |
+|---|---|
+| tag | `v0.1.0-beta.1` |
+| title | `v0.1.0-beta.1`, previously `v0.1.0-beta.1 — install-path check` |
+| prerelease | true |
+| draft | false |
+| assets | 10, the five archives and their five `.sha256` sidecars |
+
+The published body is the text the script writes: it names the version, says the
+tag carries semver's prerelease marker, carries the install line with
+`--ref v0.1.0-beta.1`, and contains no sentence calling the tag disposable. The
+three sentences that were false of it — that it is not a version of the plugin,
+that the tag exists so the install path can be verified, that it is deleted once
+that check is recorded — are gone.
