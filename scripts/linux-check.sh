@@ -27,7 +27,7 @@
 
 set -eu
 
-PLUGIN_ID="haurylau.voice"
+PLUGIN_ID="herdr-voice"
 REPO_URL="${HERDR_VOICE_REPO:-https://github.com/aliaksandr-haurylau-godel/herdr-voice.git}"
 REF="${HERDR_VOICE_REF:-}"
 WORK="${HERDR_VOICE_WORK:-/tmp/herdr-voice-check}"

@@ -43,9 +43,16 @@ herdr plugin install aliaksandr-haurylau-godel/herdr-voice
 
 herdr plugin manifests cannot declare keybindings, so three blocks go into your
 herdr configuration. Invoke the plugin's `setup` action — from a terminal,
-`herdr plugin action invoke haurylau.voice.setup` — and it opens a pane that
+`herdr plugin action invoke herdr-voice.setup` — and it opens a pane that
 shows the exact blocks, offers to append them, and says what it changed. Running
 it twice changes nothing the second time.
+
+If you used this plugin before its id became `herdr-voice`, your bindings name
+an id that no longer exists and the keys do nothing. The daemon says so once
+when herdr starts it, naming the keys, and `setup` offers to repair them: it
+rewrites those blocks where they are, so the keys and anything you wrote around
+them stay as they were. It also tells you where your old configuration file is,
+and how to end a daemon left running under the old id.
 
 Speech recognition has three engines. The default is `command`: give
 `[stt] command` the program and arguments to run — for example a local

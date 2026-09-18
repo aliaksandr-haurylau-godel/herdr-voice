@@ -15,7 +15,14 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 /// The plugin id, which is also the last component of every derived path.
-pub const PLUGIN_ID: &str = "haurylau.voice";
+pub const PLUGIN_ID: &str = "herdr-voice";
+
+/// The id this plugin had until issue #73. It survives for one purpose: telling
+/// a person who installed the plugin under it what the rename left behind — the
+/// keybindings that name it, the configuration directory nothing reads any more,
+/// and a daemon still holding the old socket. See `tasks/73/DESIGN_73.md`,
+/// section 1.
+pub const LEGACY_PLUGIN_ID: &str = "haurylau.voice";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Address {
@@ -125,6 +132,33 @@ pub fn state_directory(vars: &Vars) -> Option<PathBuf> {
     })
 }
 
+/// The socket's file name inside the state directory. Named once: `setup` builds
+/// the previous id's socket path too, and two spellings could drift apart.
+///
+/// Unix only, for the reason `Address::path` above gives: on Windows the name
+/// lives in the pipe namespace and no path is built from it, so both callers of
+/// this are `cfg(unix)` and `-D warnings` rejects a constant nothing reaches.
+#[cfg(unix)]
+pub const SOCKET_FILE: &str = "voice.sock";
+
+/// The same directory under the id this plugin had before issue #73, or `None`
+/// when `current` is not this plugin's own directory.
+///
+/// Derived from the current directory rather than computed a second time.
+/// `state_directory` above and `config::directory` both return
+/// `HERDR_PLUGIN_STATE_DIR` / `HERDR_PLUGIN_CONFIG_DIR` verbatim when herdr sets
+/// them, and herdr sets both to a path ending in the id it knows the plugin by —
+/// measured against herdr 0.9.1. Running either derivation with
+/// `LEGACY_PLUGIN_ID` would therefore hand back the directory the plugin is
+/// using now, and `setup` would call a live configuration orphaned and tell a
+/// person to kill the daemon they are running.
+pub fn legacy_sibling(current: &std::path::Path) -> Option<PathBuf> {
+    if current.file_name().and_then(|name| name.to_str()) != Some(PLUGIN_ID) {
+        return None;
+    }
+    Some(current.parent()?.join(LEGACY_PLUGIN_ID))
+}
+
 #[cfg(windows)]
 pub fn address(_vars: &Vars) -> Result<Address, TransportError> {
     // The pipe namespace is machine-wide, which is issue #6.
@@ -134,7 +168,7 @@ pub fn address(_vars: &Vars) -> Result<Address, TransportError> {
 #[cfg(unix)]
 pub fn address(vars: &Vars) -> Result<Address, TransportError> {
     let directory = state_directory(vars).ok_or(TransportError::NoStateDirectory)?;
-    let path = directory.join("voice.sock");
+    let path = directory.join(SOCKET_FILE);
     Ok(Address::path(path.to_string_lossy().into_owned()))
 }
 
@@ -241,6 +275,44 @@ mod tests {
     use super::tests_support::probe_address;
     use super::*;
     use std::io::{BufRead, BufReader, Write};
+    use std::path::Path;
+
+    #[test]
+    fn the_legacy_sibling_is_the_same_directory_under_the_old_id() {
+        assert_eq!(
+            legacy_sibling(Path::new("/tmp/x/herdr/plugins/herdr-voice")),
+            Some(PathBuf::from("/tmp/x/herdr/plugins/haurylau.voice"))
+        );
+    }
+
+    /// herdr hands the plugin its directories in HERDR_PLUGIN_CONFIG_DIR and
+    /// HERDR_PLUGIN_STATE_DIR, and both end in the id herdr knows the plugin by.
+    /// Deriving the old location by running the same derivation with the old
+    /// constant would have returned that very directory, so `setup` would have
+    /// called the live configuration orphaned and told the person to kill the
+    /// daemon they are running.
+    #[test]
+    fn the_legacy_sibling_is_never_the_directory_it_was_given() {
+        for given in [
+            "/tmp/x/herdr/plugins/herdr-voice",
+            "/some/place/herdr-voice",
+            "herdr-voice",
+        ] {
+            let current = Path::new(given);
+            assert_ne!(legacy_sibling(current).as_deref(), Some(current), "{given}");
+        }
+    }
+
+    #[test]
+    fn a_directory_that_is_not_this_plugin_s_own_has_no_legacy_sibling() {
+        for given in [
+            "/tmp/x/herdr/plugins/somebody-else",
+            "/tmp/x/herdr/plugins/herdr-voice/models",
+            "/",
+        ] {
+            assert_eq!(legacy_sibling(Path::new(given)), None, "{given}");
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -266,7 +338,7 @@ mod tests {
         };
         assert_eq!(
             address(&vars).unwrap().display(),
-            "/tmp/xdg/herdr/plugins/haurylau.voice/voice.sock"
+            "/tmp/xdg/herdr/plugins/herdr-voice/voice.sock"
         );
 
         let vars = Vars {
@@ -276,7 +348,7 @@ mod tests {
         };
         assert_eq!(
             address(&vars).unwrap().display(),
-            "/tmp/home/.local/state/herdr/plugins/haurylau.voice/voice.sock"
+            "/tmp/home/.local/state/herdr/plugins/herdr-voice/voice.sock"
         );
     }
 

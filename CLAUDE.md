@@ -113,7 +113,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 python3 scripts/check_manifest.py   # the manifest must name commands the binary accepts
 herdr plugin link .                 # install this checkout as a plugin
-herdr plugin log list --plugin haurylau.voice   # what herdr ran and what it returned
+herdr plugin log list --plugin herdr-voice   # what herdr ran and what it returned
 ```
 
 One worktree per line of work. Two agents must not share a checkout: a branch

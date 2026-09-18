@@ -678,6 +678,17 @@ fn discard_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold,
     }
 }
 
+/// One notice per daemon start, when the rename of issue #73 left keys behind.
+/// The journal line goes first and unconditionally; `toast` decides only whether
+/// the person is interrupted, and records its own failure when herdr refuses.
+fn announce_rename(runtime: &Runtime, keys: &[String]) {
+    let Some((title, body)) = rename_notice(keys) else {
+        return;
+    };
+    runtime.journal.write(&rename_notice_line(keys));
+    toast(runtime, &title, &body);
+}
+
 /// A failure the person has to know about: recorded, and raised where they are
 /// looking when `[ui] toasts` is on.
 fn report_failure(runtime: &Runtime, target: &str, why: &str) {
@@ -992,7 +1003,7 @@ pub fn context_note(request: &Request) -> Option<String> {
 }
 
 /// One line per accepted request, on standard error. herdr captures a plugin's
-/// standard error, so `herdr plugin log list --plugin haurylau.voice` shows it.
+/// standard error, so `herdr plugin log list --plugin herdr-voice` shows it.
 pub fn request_line(request: &Request) -> String {
     format!(
         "request command={} entrypoint={} context={} bytes",
@@ -1025,6 +1036,60 @@ pub fn delivering_line(text: &str) -> String {
 /// Written when a delivery attempt is rejected.
 pub fn delivery_failed_line(target: &str, why: &str) -> String {
     format!("delivery failed: pane={target} reason={why}")
+}
+
+/// `ctrl+g, prefix+i and ctrl+shift+g` — a list read in a toast rather than
+/// parsed, so it joins with a word and not a comma at the end.
+fn key_list(keys: &[String]) -> String {
+    match keys.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// "key"/"names" for one, "keys"/"name" for more: a sentence a person reads, in
+/// the toast and in the journal line alike.
+fn count_words(count: usize) -> (&'static str, &'static str) {
+    if count == 1 {
+        ("key", "names")
+    } else {
+        ("keys", "name")
+    }
+}
+
+/// The title and body of the one notice a daemon raises when the rename of issue
+/// #73 left keys behind, or `None` when it left none. See
+/// `tasks/73/DESIGN_73.md`, section 5a, which pins both forms.
+fn rename_notice(keys: &[String]) -> Option<(String, String)> {
+    if keys.is_empty() {
+        return None;
+    }
+    let (noun, verb) = count_words(keys.len());
+    let object = if keys.len() == 1 { "it" } else { "them" };
+    Some((
+        "Dictation: the plugin id changed".to_string(),
+        format!(
+            "{} {noun} still {verb} {}, which no longer exists: {}. Run the setup \
+             action to repair {object}.",
+            keys.len(),
+            crate::setup::LEGACY_PLUGIN_ID,
+            key_list(keys)
+        ),
+    ))
+}
+
+/// Written whether the toast is raised, refused or switched off: `[ui] toasts`
+/// decides whether the person is interrupted, never whether something is
+/// recorded.
+fn rename_notice_line(keys: &[String]) -> String {
+    let (noun, verb) = count_words(keys.len());
+    format!(
+        "rename: {} {noun} still {verb} {}: {}",
+        keys.len(),
+        crate::setup::LEGACY_PLUGIN_ID,
+        key_list(keys)
+    )
 }
 
 /// Written when the toast itself could not be raised — herdr's `notification
@@ -1201,7 +1266,33 @@ pub fn start() -> Result<Outcome, TransportError> {
         activity: std::sync::Mutex::new(Activity::Idle),
         ui: loaded.config.ui.clone(),
     };
-    serve(listener, address, Arc::new(recorder), Arc::new(runtime));
+    // What the rename of issue #73 left in somebody's herdr configuration. Read
+    // here, once, for the same reason the plugin's own configuration is read
+    // here: nothing that runs while a person is speaking touches a file.
+    let superseded = crate::setup::config_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| crate::setup::superseded_keys(&text))
+        .unwrap_or_default();
+
+    let runtime = Arc::new(runtime);
+    // On a thread of its own, because raising it runs `herdr notification show`
+    // through `Command::output()`, which has no timeout, and this is the one
+    // place a toast would be raised before the daemon is serving. A herdr that
+    // is slow to answer — it is starting this process as it starts itself —
+    // would otherwise hold the listener bound and accepting nothing, which
+    // reads as a hang rather than as a late notice.
+    //
+    // Nothing waits for the thread. If the daemon stops before it finishes, the
+    // toast is lost; the journal line is written first, inside `announce_rename`,
+    // so the record is not. Only when there is something to say: the normal start
+    // has nothing, and a thread spawned to return immediately is a thread for
+    // nothing.
+    if !superseded.is_empty() {
+        let runtime = Arc::clone(&runtime);
+        std::thread::spawn(move || announce_rename(&runtime, &superseded));
+    }
+
+    serve(listener, address, Arc::new(recorder), runtime);
     Ok(Outcome::Served)
 }
 
@@ -1565,6 +1656,129 @@ mod tests {
         submit: bool,
     ) -> Runtime {
         runtime_with_clock(deliverer, submit).0
+    }
+
+    /// A runtime whose journal the test can read back, with `[ui] toasts` as
+    /// given.
+    fn runtime_reading_back(
+        fake: crate::delivery::tests_support::FakeDeliverer,
+        toasts: bool,
+    ) -> (Runtime, std::sync::Arc<RecordingJournal>) {
+        let mut runtime = runtime_with(fake, false);
+        runtime.delivery_settings.toasts = toasts;
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        (runtime, journal)
+    }
+
+    fn journalled(journal: &std::sync::Arc<RecordingJournal>) -> Vec<String> {
+        journal.0.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn the_rename_notice_names_the_count_and_the_keys() {
+        let keys = [
+            "ctrl+g".to_string(),
+            "prefix+i".to_string(),
+            "ctrl+shift+g".to_string(),
+        ];
+        let (title, body) = rename_notice(&keys).expect("a notice");
+        assert_eq!(title, "Dictation: the plugin id changed");
+        assert_eq!(
+            body,
+            "3 keys still name haurylau.voice, which no longer exists: ctrl+g, \
+             prefix+i and ctrl+shift+g. Run the setup action to repair them."
+        );
+    }
+
+    #[test]
+    fn one_key_gives_the_notice_in_the_singular_and_names_only_that_key() {
+        let (_, body) = rename_notice(&["prefix+i".to_string()]).expect("a notice");
+        assert_eq!(
+            body,
+            "1 key still names haurylau.voice, which no longer exists: prefix+i. \
+             Run the setup action to repair it."
+        );
+    }
+
+    #[test]
+    fn no_superseded_key_is_no_notice() {
+        assert!(rename_notice(&[]).is_none());
+    }
+
+    #[test]
+    fn the_rename_journal_line_carries_the_same_count_and_keys() {
+        let keys = ["ctrl+g".to_string(), "prefix+i".to_string()];
+        assert_eq!(
+            rename_notice_line(&keys),
+            "rename: 2 keys still name haurylau.voice: ctrl+g and prefix+i"
+        );
+    }
+
+    #[test]
+    fn the_rename_notice_is_journalled_and_raised_once() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, journal) = runtime_reading_back(fake.clone(), true);
+        announce_rename(&runtime, &["ctrl+g".to_string()]);
+        assert_eq!(
+            journalled(&journal),
+            vec!["rename: 1 key still names haurylau.voice: ctrl+g"]
+        );
+        assert_eq!(
+            fake.calls(),
+            vec![crate::delivery::tests_support::Call::Notify(
+                "Dictation: the plugin id changed".into(),
+                "1 key still names haurylau.voice, which no longer exists: ctrl+g. \
+                 Run the setup action to repair it."
+                    .into()
+            )],
+            "once per daemon start, and exactly the body the design pins"
+        );
+    }
+
+    #[test]
+    fn no_superseded_key_raises_nothing_and_records_nothing() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, journal) = runtime_reading_back(fake.clone(), true);
+        announce_rename(&runtime, &[]);
+        assert!(
+            journalled(&journal).is_empty(),
+            "{:?}",
+            journalled(&journal)
+        );
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+    }
+
+    /// The rule the file already states above `toast`: `[ui] toasts` decides
+    /// whether the person is interrupted, never whether something is recorded.
+    #[test]
+    fn with_toasts_off_the_rename_notice_is_still_journalled() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, journal) = runtime_reading_back(fake.clone(), false);
+        announce_rename(&runtime, &["ctrl+g".to_string()]);
+        assert_eq!(
+            journalled(&journal),
+            vec!["rename: 1 key still names haurylau.voice: ctrl+g"]
+        );
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+    }
+
+    /// A notice herdr refuses is recorded rather than lost, and the start goes
+    /// on.
+    #[test]
+    fn a_refused_rename_notice_is_recorded_and_the_start_continues() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok().and_notify_fails(
+            crate::delivery::DeliveryError::Rejected("ui_busy".to_string()),
+        );
+        let (runtime, journal) = runtime_reading_back(fake, true);
+        announce_rename(&runtime, &["ctrl+g".to_string()]);
+        let written = journalled(&journal);
+        assert_eq!(written.len(), 2, "{written:?}");
+        assert_eq!(
+            written[0],
+            "rename: 1 key still names haurylau.voice: ctrl+g"
+        );
+        assert!(written[1].starts_with("toast failed:"), "{written:?}");
     }
 
     #[test]
