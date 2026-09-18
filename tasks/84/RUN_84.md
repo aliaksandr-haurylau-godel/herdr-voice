@@ -779,6 +779,45 @@ gate:
   stage: S4
   artifact: git diff d83570c..HEAD
   reviewer: code
+  verdict: QUESTIONS
+  date: 2026-09-18
+  questions:
+    - the bound's own journal line has one caller and no test
+    - the extension filter has no fixture with a third extension
+    - transport::takes_directory has no test at all
+  blocker: null
+```
+
+No defect was found this round. All three questions were the same shape — new
+code nothing was watching — and all three are closed in `2e12124` rather than
+argued down, because each cost two lines and the fixture for the first was already
+sitting in the test beside it.
+
+- **The bound's journal line.** Every daemon test held either one take or
+  fifty-one removable ones, so `bound` returned `None` in all of them; the test
+  that locks the directory had one take in it, so the loop broke before a single
+  removal was attempted. It seeds fifty-one older takes before the lock now, and
+  one fixture covers both lines: the recording that could not be removed, and the
+  bound that could not do its own work.
+- **The extension filter.** No fixture anywhere put a third extension in a
+  directory `bound` reads, so removing the filter left every test green while a
+  `.tmp` or an editor swap file would have been counted as a take and deleted. The
+  filter exists for what something *else* leaves behind, which is exactly what a
+  fixture has to stand in for.
+- **`transport::takes_directory`.** It had no test after the tautological `doctor`
+  one was deleted, and the relative fallback is the branch that made `doctor` and
+  the daemon disagree in the first place. Both branches are pinned.
+
+Each was checked by mutation: dropping the filter, the journal line or the
+directory name fails exactly one test and no other.
+
+Gate, round 5:
+
+```yaml
+gate:
+  stage: S4
+  artifact: git diff d83570c..HEAD
+  reviewer: code
   verdict: PENDING
   date: 2026-09-18
 ```
