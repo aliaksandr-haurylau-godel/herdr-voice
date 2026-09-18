@@ -120,6 +120,7 @@ function RunMain {
 `$TestSidecar = '$script:TestSidecar'
 `$TestDigest = '$script:TestDigest'
 `$TestNoCargo = '$script:TestNoCargo'
+`$TestArchiveFile = '$script:TestArchiveFile'
 function Get-HvRoot { `$checkout }
 function Invoke-HvFetch([string]`$Url, [string]`$Destination) {
     if (`$Destination -like '*.sha256') {
@@ -128,7 +129,7 @@ function Invoke-HvFetch([string]`$Url, [string]`$Destination) {
         return 'ok'
     }
     if (`$TestArchive -ne 'ok') { return `$TestArchive }
-    Copy-Item `$fakeArchive `$Destination -Force
+    Copy-Item `$TestArchiveFile `$Destination -Force
     return 'ok'
 }
 if (`$TestNoCargo -eq '1') { function Test-HvCargo { `$false } }
@@ -182,6 +183,21 @@ CheckContains 'it named the expected digest' $LastSaid '0000000000000000'
 if (Test-Path $installedExe) {
     Write-Host 'FAIL  a mismatched archive was unpacked anyway'; $failures++
 } else { Write-Host 'ok    a mismatched archive is not unpacked' }
+
+# An archive that passes its own digest check but is not a real gzip
+# tarball still stops the install, after the fix removed -C from the tar
+# call - the check that used to read $LASTEXITCODE right after `-C $tmp`
+# must still read it right after the relative-filename call.
+Remove-Item -Recurse -Force $targetDir -ErrorAction SilentlyContinue
+$TestArchive = 'ok'; $TestSidecar = 'ok'
+$TestArchiveFile = $corruptArchive
+$TestDigest = (Get-FileHash $corruptArchive -Algorithm SHA256).Hash.ToLower()
+Check 'a corrupt archive fails to unpack' (RunMain) 1
+CheckContains 'it named the archive as unpacked' $LastSaid 'could not be unpacked'
+if (Test-Path $installedExe) {
+    Write-Host 'FAIL  a corrupt archive was reported as installed'; $failures++
+} else { Write-Host 'ok    a corrupt archive is not installed' }
+$TestArchiveFile = $fakeArchive
 
 # An archive whose digest is absent stops without unpacking.
 Remove-Item -Recurse -Force $targetDir -ErrorAction SilentlyContinue
