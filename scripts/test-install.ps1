@@ -73,9 +73,25 @@ $stage = Join-Path $fixture 'stage'
 $inner = Join-Path $stage "herdr-voice-v0.4.2-$target"
 New-Item -ItemType Directory -Path $inner | Out-Null
 'fake' | Set-Content -Path (Join-Path $inner 'herdr-voice.exe')
-$fakeArchive = Join-Path $fixture 'archive.tar.gz'
-tar -C $stage -czf $fakeArchive "herdr-voice-v0.4.2-$target"
+$fakeArchiveName = 'archive.tar.gz'
+$fakeArchive = Join-Path $fixture $fakeArchiveName
+# Built with the working directory set to $fixture and a bare relative
+# filename, not $fakeArchive's absolute path - the same reason
+# scripts/install.ps1's own extraction avoids one; see its comment in
+# Invoke-HvMain. -C $stage is unaffected: it is a directory-change argument,
+# not the archive path, and is not what tar reads as a remote-archive spec.
+Push-Location $fixture
+try {
+    tar -C $stage -czf $fakeArchiveName "herdr-voice-v0.4.2-$target"
+    $fixtureTarExitCode = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+Check 'the fixture archive was created' ($fixtureTarExitCode -eq 0 -and (Test-Path $fakeArchive)) $true
 $goodDigest = (Get-FileHash $fakeArchive -Algorithm SHA256).Hash.ToLower()
+
+$corruptArchive = Join-Path $fixture 'corrupt.tar.gz'
+'this is not a gzip tarball' | Set-Content -Path $corruptArchive
 
 $checkout = Join-Path $fixture 'checkout'
 New-Item -ItemType Directory -Path $checkout | Out-Null
@@ -141,6 +157,7 @@ Invoke-HvMain
 }
 
 $TestNoCargo = '0'
+$TestArchiveFile = $fakeArchive
 
 # The good path.
 Remove-Item -Recurse -Force $targetDir -ErrorAction SilentlyContinue
