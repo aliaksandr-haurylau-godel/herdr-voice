@@ -338,3 +338,22 @@ Four takes, both columns, each run twice, the two runs agreeing on every case.
 Before the change, two of the four were carried out rather than corrected; after
 it, all four are corrected and the two that already worked are unchanged. The
 forged-marker take is recorded as a limit the escaping does not remove.
+
+## Rebase onto `main` at `98a6073`
+
+Done on 2026-09-18, after #79 landed and GitHub refused #80 for a conflict. The
+conflict was in `docs/evidence.md` and was the shape it looks like: #79's
+section "The notes of `v0.1.0-beta.1`, corrected in place" and this branch's
+section both append at the end of the file. Both are kept, #79's first, because
+a measurement removed in a rebase is one nobody can find again.
+
+The four gates were run again from scratch on the rebased tree rather than on
+the pre-rebase result: `cargo test` 503 + 2 passed, `cargo clippy --all-targets
+-- -D warnings`, `cargo fmt --check`, `python3 scripts/check_manifest.py`.
+
+The Windows class was checked too — an item reachable only from a `#[cfg(unix)]`
+path is dead code in the Windows build, and CI compiles with `-D warnings`. With
+every unix gate disabled and every windows gate enabled, `cargo clippy
+--all-targets -- -D warnings` is clean. Nothing this branch adds sits behind a
+platform gate: the flip changed `src/setup.rs` and `src/transport.rs` and did
+not touch `src/rewrite/http.rs`. The edit was thrown away, not committed.
