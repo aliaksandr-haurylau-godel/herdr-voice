@@ -640,6 +640,100 @@ task 10, and the table now says plainly that the remaining two — transcription
 failing and the daemon stopping with the key down — hold by construction and have
 no test.
 
+### S4 Implement — round 2, the widening
+
+- produced: 2026-09-18
+- commits: `728e553` the bound, `83834f2` the deletion, `0b4bb19` the
+  documentation and the run's artifacts, `8ff988c` the answers to the review
+
+Tasks 8 and 9 landed in one commit for the reason the plan declared: task 8 alone
+leaves `src/daemon.rs` naming a field that no longer exists.
+
+Gate, round 2 — a review of the whole diff:
+
+```yaml
+gate:
+  stage: S4
+  artifact: git diff d83570c..HEAD
+  reviewer: code
+  verdict: QUESTIONS
+  date: 2026-09-18
+  questions:
+    - two tests the design names do not exist, and they are the only two that would touch the new failure paths
+    - the subdirectory test is vacuous: the intruder sorts last and the loop never reaches it
+    - the doctor test is tautological and cannot observe the disagreement it is named for
+    - decisions.md says the bound runs on every ending; it does not run for a shutdown-ended take
+    - an undeletable file writes a journal line on every take, and a read-only directory writes one per file
+    - doctor hard-codes the number the bound reads from KEEP
+    - a recording already gone is reported as one that could not be removed
+    - design.md overstates: not everything is conditional on the key
+  blocker: null
+```
+
+**Writing the first missing test found a defect rather than confirming
+behaviour.** A directory nothing can be removed from made `bound` walk every file
+and write a journal line for each — the test put 52 lines where one was wanted,
+which is the reviewer's own prediction, reproduced. `bound` now returns
+`Option<String>`: one line saying how many takes could not be removed and naming
+the oldest of them. The count and the oldest name are what a person can act on;
+the rest is noise on every take for ever.
+
+**Three tests proved nothing.**
+
+- The subdirectory intruder was named `not-a-take.json`, and `n` sorts after `1`,
+  so it was the newest entry and the loop broke before reaching it. Deleting the
+  `is_file` guard left the test green. It is now named `0000000000000-1-0.json`,
+  and deleting the guard was tried again: the test fails.
+- The `doctor` test asserted that a function includes its own argument in its
+  output. It is deleted rather than repaired. That `doctor` and the daemon agree
+  rests on both calling `transport::takes_directory`, and that is read off the
+  code: no test can observe it without running `daemon::start`, which none does.
+  Saying so is better than a green test that watches nothing.
+- The second missing test — a recording that cannot be removed after delivery —
+  now exists and reaches `recording_kept_line`, which until then had one caller
+  and no test at all.
+
+**One half of a design requirement is not reachable and is recorded rather than
+faked.** `DESIGN_84.md` section 14 asks for "a removal that fails is reported and
+the next oldest is tried". The report is tested. The "next oldest" half is not: on
+Unix a refusal is a property of the directory, not of the file, so there is no way
+to have one removable and one refused file in the same directory. A test was
+written for it, asserted nothing, and was deleted rather than left standing.
+
+Four smaller answers: `doctor` reads `record::KEEP` instead of printing fifty as a
+literal; a recording already gone is no longer reported as one that could not be
+removed, because that is the outcome the deletion wanted and naming an absent file
+is worse than silence; `docs/design.md` no longer claims nothing is kept unless
+the key says so, which was false of the four endings; and `docs/decisions.md` now
+says the bound runs on every ending *of the pipeline*, and states what that leaves
+out — a take ended by the daemon's own shutdown, which sits one over the cap until
+the next take is served. The commit subject of `728e553` carries the same
+overstatement and is left as it is: rewriting a landed commit's message to correct
+a sentence its own successor corrects is worse than the sentence.
+
+Two findings were recorded rather than acted on. Two pipelines can run the bound
+concurrently and each protects only its own take, so a second take in flight is
+defended by recency alone — reachable only if the clock steps backwards far
+enough to name it among the oldest fifty. And a file whose name is not UTF-8 is
+neither counted nor removed; nothing here creates one, and a name this cannot read
+is a name it must not delete. Both are in the doc comment of `bound`.
+
+The Cyrillic test fixtures were raised a second time and the answer is unchanged:
+they match `src/rewrite/skip.rs:63`, which predates this run, and
+`rewrite::skip::plain` refuses any text with two consecutive ASCII letters, so the
+gate cannot be demonstrated in English.
+
+Gate, round 3:
+
+```yaml
+gate:
+  stage: S4
+  artifact: git diff d83570c..HEAD
+  reviewer: code
+  verdict: PENDING
+  date: 2026-09-18
+```
+
 ## Notes
 
 Two questions the design has to answer and the criteria deliberately do not:
