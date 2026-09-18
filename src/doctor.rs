@@ -1,9 +1,9 @@
 //! What is missing, and what to do about it.
 //!
-//! Six lines in a fixed order: herdr, daemon, config, engine, model, rewrite. The
-//! prototype's worst failure was silence: a parse error produced no output and
-//! looked like a hang for a morning, so every line that is not `ok` names the next
-//! action. See `tasks/3/DESIGN_3.md`, section 4.
+//! Seven lines in a fixed order: herdr, daemon, config, engine, model, rewrite,
+//! record. The prototype's worst failure was silence: a parse error produced no
+//! output and looked like a hang for a morning, so every line that is not `ok`
+//! names the next action. See `tasks/3/DESIGN_3.md`, section 4.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -294,6 +294,41 @@ fn engine_and_model_findings(stt: &config::Stt, models: &Path) -> (Finding, Find
     (engine, model_line)
 }
 
+/// Where a take's record goes, and whether anything is being written there.
+///
+/// Never `Missing`: `Missing` is what makes this command exit non-zero
+/// (`exit_code`), and a key sitting at its own default is not a fault to go and
+/// fix.
+pub fn record_finding(record: &config::Record, takes: Option<&Path>) -> Finding {
+    if !record.transcripts {
+        return Finding {
+            name: "record",
+            state: State::Default,
+            detail: "off; set [record] transcripts = true to keep each take's \
+                     transcript and rewrite beside its recording"
+                .to_string(),
+        };
+    }
+    match takes {
+        Some(directory) => Finding {
+            name: "record",
+            state: State::Ok,
+            detail: format!(
+                "on; each take's transcript and rewrite are written to {}, and the \
+                 last 50 are kept",
+                directory.display()
+            ),
+        },
+        None => Finding {
+            name: "record",
+            state: State::Default,
+            detail: "on, but there is nowhere to write: neither HERDR_PLUGIN_STATE_DIR, \
+                     XDG_STATE_HOME nor HOME is set"
+                .to_string(),
+        },
+    }
+}
+
 pub fn rewrite_finding(rewrite: &config::Rewrite) -> Finding {
     match rewrite.engine.as_str() {
         "off" => Finding {
@@ -410,6 +445,9 @@ pub fn run() -> u8 {
         }
     }
     findings.push(rewrite_finding(&loaded.config.rewrite));
+    let takes =
+        transport::state_directory(&transport::Vars::from_env()).map(|state| state.join("takes"));
+    findings.push(record_finding(&loaded.config.record, takes.as_deref()));
     print!("{}", render(&findings));
     exit_code(&findings)
 }
@@ -418,6 +456,41 @@ pub fn run() -> u8 {
 mod tests {
     use super::*;
     use crate::stt::model;
+
+    #[test]
+    fn recording_off_is_a_default_and_never_a_failure() {
+        let finding = record_finding(&config::Record::default(), Some(Path::new("/state/takes")));
+        assert_eq!(finding.name, "record");
+        assert_eq!(finding.state, State::Default);
+        assert!(
+            finding.detail.contains("[record] transcripts"),
+            "it names the key that turns it on: {}",
+            finding.detail
+        );
+        assert_eq!(exit_code(&[finding]), 0);
+    }
+
+    #[test]
+    fn recording_on_names_the_directory() {
+        let finding = record_finding(
+            &config::Record { transcripts: true },
+            Some(Path::new("/state/takes")),
+        );
+        assert_eq!(finding.state, State::Ok);
+        assert!(
+            finding.detail.contains("/state/takes"),
+            "it names where to look: {}",
+            finding.detail
+        );
+        assert_eq!(exit_code(&[finding]), 0);
+    }
+
+    #[test]
+    fn recording_on_with_nowhere_to_write_says_so_without_failing_the_run() {
+        let finding = record_finding(&config::Record { transcripts: true }, None);
+        assert_ne!(finding.state, State::Missing);
+        assert!(!finding.detail.is_empty());
+    }
 
     #[test]
     fn a_version_is_read_out_of_what_herdr_prints() {
