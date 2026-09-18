@@ -1141,3 +1141,109 @@ same was not measured either — this drove the engine's request directly, the
 same gap the earlier rewrite measurement in this file records. And the four to
 thirteen seconds each call takes is unchanged and is not what was being
 measured.
+## The rename to `herdr-voice`, by hand on macOS
+
+macOS 15 on arm64, herdr 0.9.1, the release binary of this branch. Paths are
+written as `<scratch>`, `<config>` and `<state>`; nothing here ran against the
+configuration or the plugin of the machine's own installation, and the plugin
+already installed there was neither unlinked, restarted nor invoked.
+
+### herdr registers the new id
+
+`herdr plugin link .` on a copy of this branch's checkout answered with
+`"plugin_id":"herdr-voice"`, `"name":"Voice"`, `"version":"0.1.0-beta.1"`.
+`herdr plugin list` then showed
+
+```
+- herdr-voice (Voice) enabled [local:<scratch>/checkout]
+  config: <config>/herdr/plugins/config/herdr-voice
+```
+
+and `herdr plugin config-dir herdr-voice` printed that same directory. Linking
+started no daemon: the only `herdr-voice daemon` process on the machine before
+and after was the one belonging to the installation already there. The copy was
+unlinked afterwards and the two directories herdr created for it were removed.
+
+An id with no dot is accepted, which was checked first with a throwaway plugin of
+another name; two plugins already installed on that machine carry dotless ids.
+
+### `setup` against a real hand-written configuration
+
+The fixture is a copy of a 4017-byte configuration written by hand, carrying the
+three bindings under the old id, comments above and between them, and other
+plugins' bindings. `setup` was run in a pseudo-terminal, with `HERDR_CONFIG_PATH`
+pointing at the copy, and answered `y`.
+
+What it said, with the paths shortened:
+
+```
+superseded: ctrl+g in <scratch>/work.toml carries this plugin's previous id,
+haurylau.voice.ptt. The id is now herdr-voice, so that key does nothing when it
+is pressed.
+superseded: prefix+i in <scratch>/work.toml carries this plugin's previous id,
+haurylau.voice.dictate. …
+superseded: ctrl+shift+g in <scratch>/work.toml carries this plugin's previous
+id, haurylau.voice.cancel. …
+
+rewrite 3 bindings to name herdr-voice in the file named above? [y/N] then Enter: y
+
+in <scratch>/work.toml:
+  herdr-voice.ptt rewritten on ctrl+g
+  herdr-voice.dictate rewritten on prefix+i
+  herdr-voice.cancel rewritten on ctrl+shift+g
+
+the running herdr does not see this until you run `herdr server reload-config`,
+or press prefix+shift+r.
+
+your configuration from before the rename is still at
+<config>/herdr/plugins/config/haurylau.voice/config.toml, and this plugin now
+reads <config>/herdr/plugins/config/herdr-voice. Move it with:
+  mkdir -p <config>/…/herdr-voice && mv <config>/…/haurylau.voice/config.toml <config>/…/herdr-voice/
+```
+
+| claim | how it was established |
+|---|---|
+| Only the three command values changed | `diff` against the original: three lines, `command = "haurylau.voice.X"` to `command = "herdr-voice.X"`, and nothing else |
+| Nothing else moved by a byte | 4017 bytes became 4008 — three replacements of a 14-character id by an 11-character one, and no other difference |
+| The comment above `ctrl+g` still describes the binding under it | the three lines recording why that key was chosen, including `alt+v gave nothing, alt+g gave ©`, sit directly above the same `[[keys.command]]` block, whose key is unchanged |
+| herdr accepts the result | `herdr config check` on the rewritten file: `config: ok`, exit 0 |
+| No daemon was reported, because none was listening | the legacy socket the run probed had nothing behind it, and the report named the configuration file and nothing else |
+
+### The notice at daemon start
+
+The daemon was run against a stand-in for herdr that records its argument lists,
+so a live herdr was neither called nor needed. With `HERDR_CONFIG_PATH` pointing
+at the configuration that still carries the three old bindings, the daemon wrote
+
+```
+rename: 3 keys still name haurylau.voice: ctrl+g, prefix+i and ctrl+shift+g
+```
+
+and asked for exactly one toast:
+
+```
+notification show Dictation: the plugin id changed --body 3 keys still name
+haurylau.voice, which no longer exists: ctrl+g, prefix+i and ctrl+shift+g. Run
+the setup action to repair them.
+```
+
+Run again against the rewritten configuration, it wrote no such line and asked
+for no toast. Both runs made the same two other calls, `tab list` and
+`tab rename`, which are the start-up sweep.
+
+**What this does not establish.** That the toast reaches the screen when herdr
+itself starts the daemon from the manifest's `[[startup]]` entry. That is the one
+claim only a person in front of a running herdr can confirm, and it has not been
+confirmed.
+
+### A decoration left under the old id does not survive
+
+In the same run, the stand-in answered `tab list` with a tab labelled
+`1 🎙️🔴 REC 0:12` — the form a daemon killed mid-take leaves behind. The daemon
+under the new id answered with `tab rename w1:t1 1`: the marker and everything
+after it cut off, the label restored. The sweep keys off the microphone marker
+and names no plugin, so the id it was left under makes no difference to it.
+
+The sidebar token needs no sweep and was not measured again: it is written with a
+time to live of three renewals and lapses within 1.8 seconds once nothing renews
+it, which is recorded above for issue #40.

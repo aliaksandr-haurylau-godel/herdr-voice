@@ -247,19 +247,102 @@ pub fn superseded_keys(text: &str) -> Vec<String> {
 /// hand-written and commented, the reason a key was chosen sits above the block
 /// that uses it, and a value tree keeps neither comments nor layout. The key does
 /// not change, so the comment goes on describing the binding under it.
+/// Which kind of multi-line string a line ended inside, if any. A basic one is
+/// closed only by `\"\"\"` and a literal one only by `'''`, so a `'''` inside a
+/// `\"\"\"` block is text and closes nothing.
+#[derive(PartialEq, Clone, Copy)]
+enum Multiline {
+    Basic,
+    Literal,
+}
+
+/// Walks one line and answers what the line ends inside, given what it started
+/// inside. A single-quoted or double-quoted string cannot span a line in TOML,
+/// so only the two multi-line forms carry over; `#` outside a string starts a
+/// comment, and nothing after it counts.
+///
+/// This is a scanner over string state, not a parser: it builds no value and
+/// reads no key. It exists because the line edit below must not treat a
+/// `[[keys.command]]` line inside somebody's prose as a block, nor a `\"\"\"` in a
+/// comment as the start of one.
+fn string_state(line: &str, inside: Option<Multiline>) -> Option<Multiline> {
+    let bytes = line.as_bytes();
+    let mut at = 0;
+    let mut state = inside;
+    while at < bytes.len() {
+        let rest = &line[at..];
+        match state {
+            Some(Multiline::Basic) => {
+                if rest.starts_with("\"\"\"") {
+                    state = None;
+                    at += 3;
+                    continue;
+                }
+            }
+            Some(Multiline::Literal) => {
+                if rest.starts_with("'''") {
+                    state = None;
+                    at += 3;
+                    continue;
+                }
+            }
+            None => {
+                if rest.starts_with('#') {
+                    return None;
+                }
+                if rest.starts_with("\"\"\"") {
+                    state = Some(Multiline::Basic);
+                    at += 3;
+                    continue;
+                }
+                if rest.starts_with("'''") {
+                    state = Some(Multiline::Literal);
+                    at += 3;
+                    continue;
+                }
+                // A single-line string. It cannot reach the end of the line, so
+                // it is skipped whole rather than tracked across lines.
+                if let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                    let mut chars = rest.char_indices().skip(1);
+                    let mut escaped = false;
+                    for (offset, c) in chars.by_ref() {
+                        if quote == '"' && c == '\\' && !escaped {
+                            escaped = true;
+                            continue;
+                        }
+                        if c == quote && !escaped {
+                            at += offset;
+                            break;
+                        }
+                        escaped = false;
+                    }
+                }
+            }
+        }
+        at += line[at..].chars().next().map_or(1, char::len_utf8);
+    }
+    state
+}
+
+/// Every `command` value naming this plugin's previous id, inside a
+/// `[[keys.command]]` block, rewritten to name the current one. Every other byte
+/// of the file is copied through.
+///
+/// A line edit rather than a pass through a TOML document: the file is
+/// hand-written and commented, the reason a key was chosen sits above the block
+/// that uses it, and a value tree keeps neither comments nor layout. The key does
+/// not change, so the comment goes on describing the binding under it.
 pub fn rewrite_commands(original: &str) -> String {
     let mut out = String::with_capacity(original.len());
     let mut in_block = false;
-    let mut in_multiline = false;
+    let mut inside: Option<Multiline> = None;
     for line in original.split_inclusive('\n') {
         // A multi-line string can hold anything, a `[[keys.command]]` line and a
         // `command =` line included. Nothing inside one is read as structure and
         // nothing inside one is rewritten: it is somebody's text, not a binding.
-        let was_inside = in_multiline;
-        if (line.matches("\"\"\"").count() + line.matches("'''").count()) % 2 == 1 {
-            in_multiline = !in_multiline;
-        }
-        if was_inside || in_multiline {
+        let was_inside = inside.is_some();
+        inside = string_state(line, inside);
+        if was_inside {
             out.push_str(line);
             continue;
         }
@@ -856,6 +939,21 @@ pub fn run(
                     let _ = writeln!(out, "  {} rewritten on {key}", binding.command());
                 }
             }
+            // A key the loop above did not cover: `decide` reports one key per
+            // action and the read-back finds the first block still naming the
+            // old id, so a file with two blocks for one action can leave a key
+            // neither of them names. Failing and saying nothing about why is the
+            // same defect as saying a dead key was repaired.
+            for key in &left_as_it_was {
+                if !decision.superseded.iter().any(|(_, named)| named == key) {
+                    let _ = writeln!(
+                        out,
+                        "  {key} was left as it was: it names {LEGACY_PLUGIN_ID} in a \
+                         form this does not edit, and another key carries the same \
+                         action. Change the value on that line by hand."
+                    );
+                }
+            }
             for binding in &decision.to_add {
                 let _ = writeln!(out, "  {} added on {}", binding.command(), binding.key);
             }
@@ -1407,6 +1505,78 @@ mod tests {
                         command = \"haurylau.voice.ptt\"\n\
                         \"\"\"\n";
         assert_eq!(rewrite_commands(original), original);
+    }
+
+    /// A `\"\"\"` in a comment is prose. Counting delimiters without knowing
+    /// whether they are delimiters left every block after such a line
+    /// unrewritten, and the report then blamed a line that was written exactly
+    /// as the rewrite expects.
+    #[test]
+    fn a_multi_line_delimiter_inside_a_comment_opens_nothing() {
+        let original = "# a value can be written \"\"\"like this\"\"\", or \"\"\"\n\
+                        [[keys.command]]\n\
+                        key = \"ctrl+g\"\n\
+                        command = \"haurylau.voice.ptt\"\n";
+        let after = rewrite_commands(original);
+        assert!(after.contains("command = \"herdr-voice.ptt\""), "{after}");
+        assert!(after.starts_with("# a value can be written"), "{after}");
+    }
+
+    /// A basic multi-line string is closed by \"\"\" and by nothing else. Treating
+    /// a ''' inside one as a delimiter ended the string early and rewrote a line
+    /// of somebody's prose — the one outcome worse than leaving a line alone.
+    #[test]
+    fn the_other_delimiter_inside_a_multi_line_string_closes_nothing() {
+        let original = "[notes]\n\
+                        text = \"\"\"\n\
+                        he said '''\n\
+                        [[keys.command]]\n\
+                        key = \"ctrl+g\"\n\
+                        command = \"haurylau.voice.ptt\"\n\
+                        \"\"\"\n";
+        assert_eq!(rewrite_commands(original), original);
+    }
+
+    #[test]
+    fn a_single_line_string_holding_a_delimiter_opens_nothing() {
+        let original = "message = '''he said \"\"\"'''\n\
+                        [[keys.command]]\n\
+                        key = \"ctrl+g\"\n\
+                        command = \"haurylau.voice.ptt\"\n";
+        let after = rewrite_commands(original);
+        assert!(after.contains("command = \"herdr-voice.ptt\""), "{after}");
+    }
+
+    /// `decide` reports one key per action and the read-back finds the first
+    /// block still naming the old id. When those are different keys, the one
+    /// left behind was named by neither: the run failed and said nothing about
+    /// why, which is the silent failure this repository weighs the same as a
+    /// wrong transcript.
+    #[test]
+    fn a_key_left_behind_is_named_even_when_another_key_for_it_was_repaired() {
+        let path = scratch("rewrite-two-blocks");
+        std::fs::write(
+            &path,
+            "[[keys.command]]\nkey = \"ctrl+g\"\ncommand = \"haurylau.voice.ptt\"\n\n\
+             [[keys.command]]\nkey = \"ctrl+h\"\ncommand = '''haurylau.voice.ptt'''\n",
+        )
+        .unwrap();
+        let mut said = Vec::new();
+        let mut answer = || Some("y\n".to_string());
+        let code = run(
+            &FakeHerdr::clean(),
+            Some(path),
+            &Legacy::default(),
+            true,
+            &mut answer,
+            &mut said,
+        );
+        let said = String::from_utf8(said).unwrap();
+        assert_eq!(code, 1, "{said}");
+        assert!(
+            said.contains("ctrl+h was left as it was"),
+            "the key nothing repaired must be named: {said}"
+        );
     }
 
     #[test]

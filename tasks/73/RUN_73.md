@@ -512,3 +512,65 @@ changes it next.
 
 Four gates after: `cargo test` 522 + 2 passed, clippy clean, `fmt --check` clean,
 `check_manifest.py` 12 entries.
+
+## S4 gate, round 2
+
+```yaml
+gate:
+  stage: S4
+  artifact: the diff 87950a2..e5bd133
+  reviewer: code
+  verdict: QUESTIONS
+  round: 2
+  date: 2026-09-18
+  questions:
+    - "`setup` can exit 1 having said nothing about why. The report walks `decision.superseded`, which holds at most one key per action, and `left_as_it_was` is built by `superseded_keys`, which also takes the first match. A file with two legacy blocks for one action, the first rewritable and the second not, leaves a key named by neither list: the run fails and never mentions it. That is the repository's own rule inverted a second time — not a failure announcing success, but a failure announcing nothing."
+    - "The multi-line tracking desynchronises on any line carrying an odd number of `\"\"\"` or `'''` that are not delimiters. A `\"\"\"` in a comment opens a phantom string and every block after it is skipped, so the file is left unrepaired and the report blames a line written exactly the way the rewrite expects. A `'''` inside a `\"\"\"` block closes it early and the rewrite then edits a `command` line inside somebody's prose — the case DESIGN_73.md section 5b names as the worse one."
+  blocker: null
+```
+
+The reviewer reproduced both by copying the worktree with `git archive` and running
+probes there, and confirmed that the read-back itself closes what round 1 found:
+no input it could build makes `setup` claim a key was repaired while the file
+still names the old id.
+
+### How the findings were answered
+
+Both were reproduced here before either was fixed:
+
+```
+comment_unchanged=true prose_rewritten=true
+```
+
+— the binding under a comment containing `"""` was not rewritten, and the
+`command` line inside a `"""` block containing `'''` was.
+
+**Counting delimiters is replaced by reading string state.** `string_state` walks
+a line and answers what it ends inside, given what it started inside: a basic
+multi-line string is closed only by `"""` and a literal one only by `'''`, `#`
+outside a string ends the line, and a single-line string is skipped whole because
+it cannot span lines in TOML. It builds no value and reads no key — it is a
+scanner over string state, which is exactly what a line edit needs and no more.
+
+**Every key left behind is named.** After the per-action report, any key the
+read-back found that the first loop did not cover is named with the same
+instruction.
+
+Four tests, each measured by mutation: letting either delimiter close either kind
+of string, scanning a comment like code, and dropping the second report loop each
+turn exactly one of them red.
+
+Two minor findings taken: the notice's thread is spawned only when there is
+something to say, and the design now states that nothing waits for it — if the
+daemon stops first the toast is lost, and the journal line, written before the
+outward call, is not.
+
+**Why a thread and not a synchronous call**, stated here because the next person
+to add something to daemon start-up will reach for the synchronous one: raising a
+toast runs a herdr command through `Command::output()`, which has no timeout, and
+this is the only toast raised before the daemon serves. `docs/decisions.md` already
+records the client's two-second bound existing for the same reason — "a hang is
+the failure the bound exists to prevent" (2026-08-24, #3).
+
+Four gates after: `cargo test` 526 + 2 passed, clippy clean, `fmt --check` clean,
+`check_manifest.py` 12 entries.

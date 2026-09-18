@@ -355,7 +355,10 @@ The notice is raised on a thread of its own. `toast` runs
 this is the only place a toast would be raised before the daemon is serving: a
 herdr slow to answer — it is starting this process as it starts itself — would
 otherwise hold the listener bound and accepting nothing, which reads as a hang
-rather than as a late notice.
+rather than as a late notice. Nothing waits for that thread, and it is spawned
+only when there is something to say: if the daemon stops before the thread
+finishes, the toast is lost and the journal line, written first inside
+`announce_rename`, is not.
 
 Once per daemon start, and nowhere near a take: reading a configuration file on
 the path that runs while somebody is speaking is what `start` already avoids by

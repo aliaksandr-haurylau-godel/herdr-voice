@@ -1281,7 +1281,13 @@ pub fn start() -> Result<Outcome, TransportError> {
     // is slow to answer — it is starting this process as it starts itself —
     // would otherwise hold the listener bound and accepting nothing, which
     // reads as a hang rather than as a late notice.
-    {
+    //
+    // Nothing waits for the thread. If the daemon stops before it finishes, the
+    // toast is lost; the journal line is written first, inside `announce_rename`,
+    // so the record is not. Only when there is something to say: the normal start
+    // has nothing, and a thread spawned to return immediately is a thread for
+    // nothing.
+    if !superseded.is_empty() {
         let runtime = Arc::clone(&runtime);
         std::thread::spawn(move || announce_rename(&runtime, &superseded));
     }
