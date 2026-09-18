@@ -73,9 +73,25 @@ $stage = Join-Path $fixture 'stage'
 $inner = Join-Path $stage "herdr-voice-v0.4.2-$target"
 New-Item -ItemType Directory -Path $inner | Out-Null
 'fake' | Set-Content -Path (Join-Path $inner 'herdr-voice.exe')
-$fakeArchive = Join-Path $fixture 'archive.tar.gz'
-tar -C $stage -czf $fakeArchive "herdr-voice-v0.4.2-$target"
+$fakeArchiveName = 'archive.tar.gz'
+$fakeArchive = Join-Path $fixture $fakeArchiveName
+# Built with the working directory set to $fixture and a bare relative
+# filename, not $fakeArchive's absolute path - the same reason
+# scripts/install.ps1's own extraction avoids one; see its comment in
+# Invoke-HvMain. -C $stage is unaffected: it is a directory-change argument,
+# not the archive path, and is not what tar reads as a remote-archive spec.
+Push-Location $fixture
+try {
+    tar -C $stage -czf $fakeArchiveName "herdr-voice-v0.4.2-$target"
+    $fixtureTarExitCode = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+Check 'the fixture archive was created' ($fixtureTarExitCode -eq 0 -and (Test-Path $fakeArchive)) $true
 $goodDigest = (Get-FileHash $fakeArchive -Algorithm SHA256).Hash.ToLower()
+
+$corruptArchive = Join-Path $fixture 'corrupt.tar.gz'
+'this is not a gzip tarball' | Set-Content -Path $corruptArchive
 
 $checkout = Join-Path $fixture 'checkout'
 New-Item -ItemType Directory -Path $checkout | Out-Null
@@ -104,6 +120,7 @@ function RunMain {
 `$TestSidecar = '$script:TestSidecar'
 `$TestDigest = '$script:TestDigest'
 `$TestNoCargo = '$script:TestNoCargo'
+`$TestArchiveFile = '$script:TestArchiveFile'
 function Get-HvRoot { `$checkout }
 function Invoke-HvFetch([string]`$Url, [string]`$Destination) {
     if (`$Destination -like '*.sha256') {
@@ -112,7 +129,7 @@ function Invoke-HvFetch([string]`$Url, [string]`$Destination) {
         return 'ok'
     }
     if (`$TestArchive -ne 'ok') { return `$TestArchive }
-    Copy-Item `$fakeArchive `$Destination -Force
+    Copy-Item `$TestArchiveFile `$Destination -Force
     return 'ok'
 }
 if (`$TestNoCargo -eq '1') { function Test-HvCargo { `$false } }
@@ -141,6 +158,7 @@ Invoke-HvMain
 }
 
 $TestNoCargo = '0'
+$TestArchiveFile = $fakeArchive
 
 # The good path.
 Remove-Item -Recurse -Force $targetDir -ErrorAction SilentlyContinue
@@ -165,6 +183,21 @@ CheckContains 'it named the expected digest' $LastSaid '0000000000000000'
 if (Test-Path $installedExe) {
     Write-Host 'FAIL  a mismatched archive was unpacked anyway'; $failures++
 } else { Write-Host 'ok    a mismatched archive is not unpacked' }
+
+# An archive that passes its own digest check but is not a real gzip
+# tarball still stops the install, after the fix removed -C from the tar
+# call - the check that used to read $LASTEXITCODE right after `-C $tmp`
+# must still read it right after the relative-filename call.
+Remove-Item -Recurse -Force $targetDir -ErrorAction SilentlyContinue
+$TestArchive = 'ok'; $TestSidecar = 'ok'
+$TestArchiveFile = $corruptArchive
+$TestDigest = (Get-FileHash $corruptArchive -Algorithm SHA256).Hash.ToLower()
+Check 'a corrupt archive fails to unpack' (RunMain) 1
+CheckContains 'it named the archive as unpacked' $LastSaid 'could not be unpacked'
+if (Test-Path $installedExe) {
+    Write-Host 'FAIL  a corrupt archive was reported as installed'; $failures++
+} else { Write-Host 'ok    a corrupt archive is not installed' }
+$TestArchiveFile = $fakeArchive
 
 # An archive whose digest is absent stops without unpacking.
 Remove-Item -Recurse -Force $targetDir -ErrorAction SilentlyContinue

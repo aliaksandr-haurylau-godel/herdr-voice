@@ -1311,3 +1311,91 @@ of that path use a read-only directory, which is how a removal is refused on Uni
 and is not how it is refused on Windows, where an open file refuses deletion
 instead. Both are `#[cfg(unix)]`, so the Windows leg of CI compiles them away.
 That is a gap, and it is recorded here rather than claimed shut.
+
+## The Windows install script's tar/PATH fix, for issue #83
+
+Verified on 2026-09-18 on the Windows 11 Home machine issue #83 was filed
+against ($PSVersionTable.PSVersion `5.1.26100.9444`), on
+`fix/83-windows-install-tar` at `5a5c5e6`. No Rust source is touched by
+this issue's diff — only `scripts/install.ps1` and `scripts/test-install.ps1`
+— so this entry's scope is narrower than the usual four-gate table, and says
+plainly what could and could not be run on this machine.
+
+**`cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt
+--check`: not run, and not claimed.** This development machine has no Rust
+toolchain at all — `cargo`/`rustc` resolve to nothing on `PATH`, and neither
+`~/.cargo` nor `~/.rustup` exists. This is not new: `docs/evidence.md`'s own
+"What the Windows job established" section already records that "the
+`x86_64-pc-windows-msvc` target is not installed on the development machine
+and `rustup` is absent." `git diff --stat d83570c..HEAD` (this issue's full
+diff) shows two files, both `scripts/*.ps1`, zero `.rs` files — so the three
+cargo-based gates are inapplicable to this diff by content, not merely
+unrun; whether they pass is unaffected by anything in this issue and is
+whatever the last commit that touched Rust source already established. This
+gap is recorded rather than glossed over, per this project's own rule that
+a claim needs a command and output beside it.
+
+**`python3 scripts/check_manifest.py`: run, passed.**
+
+```
+manifest: 12 entries, all commands known
+```
+Exit 0.
+
+**`scripts/test-install.ps1`: run fresh under both interpreters, all green.**
+
+Windows PowerShell 5.1 (`powershell -NoProfile -ExecutionPolicy Bypass -File
+scripts/test-install.ps1`): 26 `Check`/`CheckContains` lines, all `ok`,
+ending `all install.ps1 assertions passed`, exit 0. Includes the three new
+lines this issue's Task 3 added: `ok    a corrupt archive fails to unpack`,
+`ok    it named the archive as unpacked`, `ok    a corrupt archive is not
+installed`.
+
+`pwsh` 7 (`pwsh -NoProfile -ExecutionPolicy Bypass -File
+scripts/test-install.ps1`): identical — 26/26 `ok`, exit 0.
+
+**Which `tar` resolves first matters to what this proves, so it is named
+explicitly, per this run's own code review.** On this machine, under both
+interpreters, `(Get-Command tar -All).Source` and `where tar` agree:
+`C:\programs\PortableGit\usr\bin\tar.exe` resolves before
+`C:\Windows\System32\tar.exe`. That is the MSYS/Cygwin build whose
+`[user@]host:file` remote-archive parsing is the entire subject of this
+issue, so this machine's run of `scripts/test-install.ps1` genuinely
+exercises the fix against the tar implementation that broke it — not a
+"trivially true" pass against a `tar` that was never broken. (A reviewer
+running the same suite in a different shell environment during S4 found the
+opposite ordering — System32's native `tar` resolving first there — and
+had to confirm the fix by invoking the MSYS binary directly by hand instead;
+recorded in `tasks/83/RUN_83.md`'s Gate S4 section. The suite's own
+regression guard for this specific defect is only as strong as whichever
+machine's `PATH` runs it, which is why this line names the ordering rather
+than assuming it.)
+
+**The root cause and the fix, reproduced directly, independent of the
+suite.** Before either fix, `tar -xzf` (or `-czf`) given an absolute Windows
+path as its archive argument fails on this machine's MSYS `tar`:
+
+```
+tar (child): Cannot connect to C: resolve failed
+gzip: stdin: unexpected end of file
+/usr/bin/tar: Child returned status 128
+/usr/bin/tar: Error is not recoverable: exiting now
+```
+
+With the working directory set to the target folder and a bare relative
+filename — the fix's exact shape — the same `tar` binary succeeds, exit 0,
+for both archive creation and extraction, confirmed with a scratch
+create/extract round trip before any script was touched (`tasks/83/RUN_83.md`,
+S1). The corrupt-fixture case this issue's Task 3 added was sanity-checked
+the same way: a non-gzip file given a relative filename with the right
+working directory fails with `gzip: stdin: not in gzip format`, exit 2 — a
+genuine content failure, not the PATH bug reappearing.
+
+**What this does not establish.** Any platform but this one Windows 11
+machine — the fix is PowerShell/Windows-specific and the `sh` install path
+is untouched by this issue. Whether GitHub's `windows-latest` CI runner's
+own `PATH` ever puts an MSYS `tar` ahead of the native one; nothing in this
+issue's evidence answers that, since CI apparently never hit this bug
+before or after (`tasks/83/AC_83.md`). And, per the Rust-toolchain gap
+above, whether the three cargo gates pass — not established here because
+this issue's diff cannot affect them.
