@@ -1,6 +1,6 @@
 id = "haurylau.voice"
 name = "Voice"
-version = "0.0.0"
+version = "0.1.0-beta.1"
 min_herdr_version = "0.8.0"
 description = "Hold a key, speak, and the text lands in your agent's input box"
 platforms = ["macos", "linux", "windows"]
