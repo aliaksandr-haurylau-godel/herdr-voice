@@ -339,7 +339,45 @@ daemon starting.
 
 Keybindings are **not** part of this file. A herdr plugin manifest cannot declare
 keys, so they live in the user's herdr configuration; the `setup` action prints
-the exact snippet and offers to append it.
+the exact snippet and offers to append it, and repairs bindings left by the
+plugin's previous id — see section 7a.
+
+## 7a. The id, and what a machine carries from before it changed
+
+The plugin's id is `herdr-voice`. It was `haurylau.voice` until issue #73, and the
+id is not internal: a keybinding names it, herdr names a configuration directory
+after it, and the socket and the state directory are derived from it.
+
+A machine that had the plugin under the old id therefore carries three things the
+rename leaves behind, and each is answered rather than left:
+
+- **Keybindings that name an id herdr no longer knows.** `setup` reports each one,
+  offers in one question to rewrite those blocks and append whatever is missing,
+  and does both in one write. The rewrite replaces the quoted value on the
+  `command` line and nothing else, so the block does not move, the key does not
+  change, and a comment above it goes on describing the binding under it. What was
+  written is read back before it is written: a value spelled some other way that
+  TOML allows is reported as left alone, with the line to change, and the run
+  exits non-zero. A key that is still dead is a failure, whatever else landed.
+- **A configuration file in a directory nothing reads.** `setup` names it, names
+  the directory the plugin reads now, and gives the command that moves it. It does
+  not move it: one question, one action.
+- **A daemon from the old build, holding the old socket.** It is reparented to the
+  init process, so no herdr restart ends it. `setup` connects to the old socket and,
+  when something answers, names it and how to end it. On Windows the address is a
+  name in the pipe namespace with no path, and that sentence is not printed.
+
+Nothing of this reaches a person who does not run `setup`, so the daemon reads the
+herdr configuration once at start and, when a binding still names the old id,
+raises one notice saying how many keys, which ones, and that `setup` repairs them.
+The trigger is the dead bindings themselves, so it stops when they are repaired.
+It is raised on a thread of its own: the call it makes has no timeout, and it is
+the one notice raised before the daemon is serving.
+
+The old id lives in one constant. The old locations are found as siblings of the
+ones in use rather than derived a second time — herdr hands a plugin its
+directories in environment variables that end in the id herdr knows it by, so the
+second derivation would answer with the paths in use today.
 
 ## 8. Distribution
 
