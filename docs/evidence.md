@@ -1399,3 +1399,73 @@ issue's evidence answers that, since CI apparently never hit this bug
 before or after (`tasks/83/AC_83.md`). And, per the Rust-toolchain gap
 above, whether the three cargo gates pass — not established here because
 this issue's diff cannot affect them.
+
+## Capture from a 24-bit microphone, for issue #90
+
+Run on 2026-09-19 on Windows 11 Home, with Rust 1.98.1 (`x86_64-pc-windows-msvc`,
+installed for this run; the machine had no toolchain before it), `cpal` 0.18.2, on
+`fix/90-capture-i24` at `490f53b`. The device is the machine's default input,
+`Microphone Array (Realtek(R) Audio)`.
+
+**The defect, reproduced from source.** A temporary test, not kept, started
+`CpalSource` on the default input and read what it delivered for two seconds. On
+unmodified `main` it stopped at `start` with:
+
+```
+"Microphone Array (Realtek(R) Audio)" delivers I24 samples, which this build does not read
+```
+
+That is the sentence the installed `v0.1.0-beta.3` produced through herdr's log
+for two `dictate` invocations, so the build under test and the installed one agree.
+
+**The conversion is pinned in both directions.** Three tests were written before the
+function existed and failed to compile (`E0425`, three times). With a divisor of
+`8_388_607.0` two failed (`left: -1.0000001, right: -1.0`; `left: 1.0, right:
+0.9999999`); with the sign dropped by `.abs()` one failed (`left: 1.0, right: -1.0`);
+with the divisor `8_388_608.0`, the scale `dasp_sample` uses, all three pass.
+
+**The same test with the fix, on the real device.**
+
+| what | value |
+|---|---|
+| result | started, ran, stopped; the test passed |
+| format the device reported | 48 000 Hz, 4 channels |
+| samples in two seconds | 382 080 (2 s × 48 000 × 4 is 384 000; the rest is start-up) |
+| peak | 0.0136, about −37.3 dBFS |
+
+Nobody was asked to speak, so the peak is the level of the room and the keyboard, above
+digital silence and far below speech. What this shows is that the device opens and
+delivers a continuous stream of non-zero samples as `f32`; it does not show that speech
+through this input is recognised. The recorder averages any number of channels into
+one (`src/audio/resample.rs:42`), so four channels need nothing further.
+
+**Gates.** `cargo fmt --check` exit 0. `cargo clippy --all-targets -- -D warnings`
+exit 0. `python scripts/check_manifest.py`: `manifest: 12 entries, all commands
+known`. `cargo test`: **550 passed; 3 failed; 1 ignored** — and that is not green, so
+it is not called green here. The three failures are
+`bias::tests::auto_falls_back_to_the_pane_when_the_transcript_misses`,
+`auto_tries_both_on_a_double_miss` and
+`transcript_source_on_a_miss_attempts_only_transcript`; on unmodified `main` at
+`7443094` the same three fail (547 passed, 3 failed, 1 ignored), so the change adds
+three passing tests and no failure. Each expects a transcript miss and gets a hit,
+and the likely cause is that they find real session files under this machine's home
+directory; that was not investigated. Without Git's Unix tools on `PATH`, unmodified
+`main` gives 545 passed and 5 failed, the extra failures being tests that run `echo`
+or `true`; that configuration was not run on the branch.
+
+**What this does not establish.**
+
+- A take through the daemon and herdr. On Windows the daemon's pipe name is one
+  machine-wide constant (`src/transport.rs:178-181`, issue #6), so a second daemon
+  cannot run beside the installed one, and the installed one runs the release
+  archive. Reaching this fix through `herdr plugin install` needs a release, which the
+  owner cuts.
+- Recognition. `doctor` on the same machine reports `engine missing`, because `[stt]
+  command` is empty and no model is installed; a take that captures will meet that next.
+- That a refusal reaches a person. The machine's herdr configuration has `[ui.toast]
+  delivery = "terminal"`, under which the toast raised for the original refusal did
+  not appear; that is issue #85.
+- The `the daemon did not answer within 2 seconds` replies seen while the device was
+  being refused. Whether they were a consequence of the refusal is not established;
+  a take on the fixed build is the place to look.
+- The Windows CI job. It compiles this change only when the pull request runs it.
