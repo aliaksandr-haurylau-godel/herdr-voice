@@ -94,6 +94,16 @@ impl Source for CpalSource {
                 on_error,
                 None,
             ),
+            cpal::SampleFormat::I24 => picked.build_input_stream::<cpal::I24, _, _>(
+                stream_config,
+                move |data, _| {
+                    sink.push(Event::Samples(
+                        data.iter().map(|s| i24_to_f32(*s)).collect(),
+                    ))
+                },
+                on_error,
+                None,
+            ),
             other => {
                 return Err(format!(
                     "{label:?} delivers {other:?} samples, which this build does not read"
@@ -139,4 +149,34 @@ fn describe(ranges: &[cpal::SupportedStreamConfigRange]) -> String {
         .map(|r| format!("{}-{} Hz", r.min_sample_rate(), r.max_sample_rate()))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// A 24-bit sample as a float in `-1.0..=1.0`, scaled the way `dasp_sample` does.
+fn i24_to_f32(sample: cpal::I24) -> f32 {
+    sample.inner() as f32 / 8_388_608.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_lowest_sample_is_minus_one() {
+        let lowest = cpal::I24::new(-8_388_608).unwrap();
+        assert_eq!(i24_to_f32(lowest), -1.0);
+    }
+
+    #[test]
+    fn silence_is_zero() {
+        let silence = cpal::I24::new(0).unwrap();
+        assert_eq!(i24_to_f32(silence), 0.0);
+    }
+
+    #[test]
+    fn the_highest_sample_is_just_under_one() {
+        let highest = cpal::I24::new(8_388_607).unwrap();
+        let converted = i24_to_f32(highest);
+        assert_eq!(converted, 8_388_607.0 / 8_388_608.0);
+        assert!(converted < 1.0);
+    }
 }
