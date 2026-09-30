@@ -165,6 +165,12 @@ without the fix. The run stopped and told the orchestrator; the value was
 restored to the relative `.githooks`, so each worktree runs its own hook. The
 commit was made after that, with the value read again from this worktree.
 
+Cause, reported by the orchestrator and not verified by reproduction: two other
+runs started subagents with `isolation: "worktree"` at 12:42 and 12:44, and that
+option sets the shared `core.hooksPath` to an absolute path. The brief now forbids
+the option. A `core.hooksPath` that points at another checkout's hook is a second
+way for a worktree to run a gate other than its own; this run does not address it.
+
 Gates run fresh before the commit: `cargo test` (571 + 2 passed), `cargo clippy
 --all-targets -- -D warnings`, `cargo fmt --check`, `python3
 scripts/check_manifest.py`, `sh scripts/test-pre-commit.sh` — all green.
