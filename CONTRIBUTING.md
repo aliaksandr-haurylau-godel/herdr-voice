@@ -11,9 +11,12 @@ Two gates enforce it:
 
 ```sh
 git config core.hooksPath .githooks   # once per clone
-cp .leakwords.example .leakwords      # then fill in the names that must never be committed
+cp .leakwords.example .leakwords      # required; then fill in the names that must never be committed
 brew install gitleaks                 # optional; without it the hook checks fewer patterns
 ```
+
+The hook refuses to run while `.leakwords` is missing, in every checkout and every
+new worktree. An unchanged copy of the example is a valid, empty list.
 
 `.gitleaks.toml` is tracked and generic. `.leakwords` is untracked, because a list
 of employer and client names inside a public repository would disclose what it is

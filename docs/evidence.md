@@ -1470,6 +1470,146 @@ or `true`; that configuration was not run on the branch.
   a take on the fixed build is the place to look.
 - The Windows CI job. It compiles this change only when the pull request runs it.
 
+## A daemon whose herdr has gone, for issue #93
+
+Run on 2026-09-30 on macOS (Darwin 25.6.0, arm64), debug builds of `0.1.0-beta.4`:
+the fixed one from `fix/93-daemon-stderr` at `a40fc41` (plus this entry), the other from
+`main` at `13733c5`, built from `git archive` into a scratch directory.
+
+**Method: a daemon started by hand, not a herdr restart.** An isolated herdr server
+could not be arranged safely. `herdr --session <name>` names a session, but the plugin
+registry `herdr plugin link` writes to is shared with the person's own herdr, and no
+documented setting moves it. So the condition a restart leaves was reproduced directly:
+the daemon is started with its standard error on a pipe, and the read end of that pipe
+is closed after the daemon is listening. That is the state the issue describes — a live
+daemon, its socket held, nobody reading its standard error. What this does not show is
+herdr itself starting a new daemon after a restart and that daemon finding the old one;
+that step rests on the issue's own diagnosis and on `start()` connecting before it
+listens (`docs/decisions.md`).
+
+The daemon ran with `HERDR_PLUGIN_STATE_DIR` and `HERDR_PLUGIN_CONFIG_DIR` set to a
+scratch directory, `HERDR_BIN_PATH` naming a program that does not exist, and every other
+`HERDR_*` variable removed, so nothing it did could reach a running herdr. The same
+script drove each case (a Python `subprocess` script kept outside the repository):
+start `herdr-voice daemon`, wait until it accepts, run `herdr-voice cancel`, close the
+read end of the daemon's standard error, run `herdr-voice cancel` and `herdr-voice
+doctor` again.
+
+**The instrument, checked first.** On `main` at `13733c5` the script reproduces the
+issue's own line:
+
+```
+-- before the pipe is closed
+cancel exit 0 stdout 'nothing to cancel\n' stderr ''
+-- after the read end of its standard error is closed (what a herdr restart leaves)
+cancel exit 1 stdout '' stderr 'the daemon spoke something unexpected: malformed header: ""\n'
+doctor exit 1
+doctor line: daemon   ok       listening at <scratch>/voice.sock
+daemon still running: True
+```
+
+**On the fixed build:**
+
+```
+-- before the pipe is closed
+cancel exit 0 stdout 'nothing to cancel\n' stderr ''
+-- after the read end of its standard error is closed (what a herdr restart leaves)
+cancel exit 0 stdout 'nothing to cancel\n' stderr ''
+doctor exit 1
+doctor line: daemon   ok       listening at <scratch>/voice.sock
+daemon still running: True
+```
+
+`doctor` exits 1 in both runs because other lines are `missing` on the scratch
+environment (herdr, engine); the line that matters is the `daemon` one.
+
+**The upgrade case: the daemon from `main`, the client and `doctor` from the fixed
+build.** This is a machine that upgrades the plugin while the old daemon is still
+running with a dead standard error:
+
+```
+cancel exit 1 stdout '' stderr 'the daemon spoke something unexpected: malformed header: ""\n'
+doctor exit 1
+doctor line: daemon   missing  did not answer a request at <scratch>/voice.sock: the daemon spoke something unexpected: malformed header: ""; end it with `pkill -f 'herdr-voice daemon'`, then restart herdr or run `herdr-voice daemon`
+```
+
+Before this change the same daemon read `ok`. `doctor` now fails on it and names what to
+do.
+
+**Also run, and not the same as the above.** `tests/daemon_dead_stderr.rs` starts the
+built binary the same way and asserts on the reply, on `doctor`, and on the lines the
+daemon really writes to a file. With the writer changed to panic on a failed write, both
+of its dead-pipe tests fail; with `line()` writing nothing or writing to standard output,
+the tests that read the file fail.
+
+**What this does not establish.**
+
+- A real herdr restart. The step where herdr starts a second daemon that finds the first
+  is not exercised (see the method above).
+- Whether the environment an old daemon was started with (`HERDR_*`) still reaches the
+  herdr that replaced the one that started it. `docs/design.md` section 9, question 6,
+  stays open: this run gave the daemon no herdr at all.
+- Windows. The doctor tests that need a listener are Unix only. On a Windows named pipe
+  the bare connect that precedes the `ping` may find the pipe busy and `doctor` may
+  report "nothing is listening" for a healthy daemon; not reproduced.
+- The duplicate-device notice in `src/capture/cpal_source.rs` now goes through the
+  writer; it needs two inputs with one name and was not run.
+
+## The leak gate refuses to run without `.leakwords`, for issue #64
+
+Verified on macOS (Darwin 25.6.0, arm64), with gitleaks installed, in a scratch
+clone of branch `fix/64-leak-gate-silence` at `1e0a37a` in a temporary directory,
+using real `git commit` with `core.hooksPath` set to `.githooks`. The clone had no
+`.leakwords`, as any fresh clone does.
+
+**Before the change** (`13733c5`, from the unit test run against the unchanged
+hook, `sh scripts/test-pre-commit.sh`): in a checkout without `.leakwords` the
+hook exited 0 and printed nothing, so the "absent" group reported
+`FAIL absent: exit 0, expected 1` and two `FAIL … stderr lacks …` lines, while the
+three groups for a present file passed.
+
+**After the change**, four real commits:
+
+| Case | Command | Result |
+|---|---|---|
+| A. fresh clone, no `.leakwords` | `git commit -m "scratch A"` with `README.md` staged | exit 1, no commit created |
+| B. after `cp .leakwords.example .leakwords` | `git commit -q -m "scratch B"` | exit 0, commit `77bdb47` created |
+| C. `.leakwords` holds `zebra-marker`, staged diff contains it | `git commit -m "scratch C"` | exit 1, no commit created |
+| D. `git worktree add ../wt-new -b scratch-d` from that clone, then a commit | `git commit -m "scratch D"` | exit 1, no commit created |
+
+Standard error in case A and case D, identical:
+
+```
+leak gate: .leakwords is missing, so the private word list was not checked
+create it with: cp .leakwords.example .leakwords
+then list the names that must never be committed; an empty list is allowed
+```
+
+Standard error in case C, the messages the hook printed before the change:
+
+```
+leak gate: staged changes match a private word-list entry
+the matching pattern is in .leakwords; nothing is printed here on purpose
+```
+
+Case B printed nothing beyond gitleaks' own three lines (`no leaks found`). Case D
+shows the situation the issue was filed for: a new worktree starts without the file,
+and the first commit there now stops instead of passing.
+
+`sh scripts/test-pre-commit.sh` on the branch: 23 checks, all `ok`, exit 0; the
+worktree's own `.leakwords` has the same `shasum` before and after.
+
+**What this does not establish.**
+
+- The Ubuntu and macOS runners of the `scripts` job. The step is added to
+  `.github/workflows/check.yml`, and it runs there only when the pull request does.
+  The test does not depend on gitleaks being installed: it puts a stub first on
+  `PATH`.
+- A `.leakwords` whose last line has no trailing newline. The hook's `read` loop
+  skips that line without a word (found by the code review of this change). It is on
+  the present-file path, which this change leaves as it was, and is not covered here.
+- `git commit --no-verify`, which skips the whole hook, as before.
+
 ## The README's install instructions, checked against the published release, for issue #67
 
 Verified on macOS (Darwin 25.6.0, arm64) on 2026-09-30, against the published release
