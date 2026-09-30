@@ -568,6 +568,11 @@ mod tests {
         );
         assert!(message.contains("not on the PATH"), "got {message}");
         assert!(message.contains("HERDR_BIN_PATH"), "got {message}");
+        // The PATH that was searched is named, not an empty one.
+        assert!(
+            message.contains(&format!("{:?}", std::env::var("PATH").unwrap_or_default())),
+            "got {message}"
+        );
     }
 
     #[test]

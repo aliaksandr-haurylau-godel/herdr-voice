@@ -211,6 +211,15 @@ mod tests {
         status_line: &'static str,
         response_body: &'static str,
     ) -> (String, std::thread::JoinHandle<String>) {
+        serve_once(format!(
+            "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        ))
+    }
+
+    /// Serves one fixed, complete HTTP response text to one connection.
+    fn serve_once(response: String) -> (String, std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let url = format!("http://{addr}/v1/audio/transcriptions");
@@ -246,11 +255,6 @@ mod tests {
                 buf.extend_from_slice(&chunk[..n]);
             }
             let request = String::from_utf8_lossy(&buf).to_string();
-            let response = format!(
-                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
             request
@@ -627,6 +631,15 @@ mod tests {
             "got {error:?}"
         );
         assert!(message.contains("stt-http-test-missing-"), "got {message}");
+        // The file first, then the operating system's reason, in that order.
+        assert!(
+            message.starts_with(&format!(
+                "cannot read the recording {:?}: ",
+                missing.display().to_string()
+            )),
+            "got {message}"
+        );
+        assert!(message.contains("os error 2"), "got {message}");
         assert!(
             message.contains("cannot read the recording"),
             "got {message}"
@@ -648,7 +661,14 @@ mod tests {
             "auto".to_string(),
             Duration::from_millis(200),
         );
+        let started = std::time::Instant::now();
         let message = failure_of(&engine, "a_reply_that_never_comes");
+        // The bound reaches the socket, not only the message.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
         assert!(message.contains(&url), "got {message}");
         assert!(
             message.contains("did not reply within 200 milliseconds"),
@@ -799,6 +819,7 @@ mod tests {
     #[test]
     fn a_2xx_body_that_is_not_json_is_quoted() {
         let (_, message) = unreadable_message("not json at all", "a_2xx_not_json");
+        assert!(message.contains("line 1 column"), "got {message}");
         assert!(
             message.contains("the server said: not json at all"),
             "got {message}"
@@ -839,6 +860,37 @@ mod tests {
             .transcribe(&wav_path("a_successful_transcript_longer"), "")
             .expect("text");
         assert_eq!(text, answer);
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_refusal_body_is_read_only_up_to_its_byte_bound() {
+        // 2040 blanks, then ten letters: a read of 2048 bytes reaches the first
+        // eight and no more. Leaked so the test double can serve it.
+        let body: &'static str =
+            Box::leak(format!("{}abcdefghij", " ".repeat(2040)).into_boxed_str());
+        let (url, handle) = respond_once_with_status("400 Bad Request", body);
+        let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
+        let message = failure_of(&engine, "a_refusal_body_is_read_only_up_to");
+        assert!(message.contains("abcdefgh"), "got {message}");
+        assert!(!message.contains("abcdefghi"), "got {message}");
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_body_cut_off_mid_read_names_the_read_failure() {
+        let (url, handle) =
+            serve_once("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789".to_string());
+        let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
+        let error = engine
+            .transcribe(&wav_path("a_body_cut_off_mid_read"), "")
+            .expect_err("must fail");
+        assert!(
+            matches!(&error, EngineError::Http(HttpError::Unreadable { .. })),
+            "got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(!message.ends_with("could not read: "), "got {message}");
         handle.join().expect("server thread");
     }
 }

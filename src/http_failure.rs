@@ -407,4 +407,35 @@ mod tests {
             format!("the server said: {}...", "a".repeat(EXPLANATION_CHARS))
         );
     }
+
+    /// An error whose only job is to have a `source()`.
+    #[derive(Debug)]
+    struct Wrapper(Option<Box<dyn std::error::Error + 'static>>);
+
+    impl std::fmt::Display for Wrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "wrapper")
+        }
+    }
+
+    impl std::error::Error for Wrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.0.as_deref()
+        }
+    }
+
+    #[test]
+    fn an_io_error_deeper_in_the_chain_is_found() {
+        // ureq puts the `io::Error` first in the chain today; a wrapper added
+        // between would otherwise turn every timeout into the last row.
+        let inner = Wrapper(Some(Box::new(io::Error::from(io::ErrorKind::TimedOut))));
+        let outer = Wrapper(Some(Box::new(inner)));
+        assert_eq!(io_kind(&outer), Some(io::ErrorKind::TimedOut));
+    }
+
+    #[test]
+    fn a_chain_with_no_io_error_has_no_kind() {
+        let outer = Wrapper(Some(Box::new(Wrapper(None))));
+        assert_eq!(io_kind(&outer), None);
+    }
 }
