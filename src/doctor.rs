@@ -1,9 +1,9 @@
 //! What is missing, and what to do about it.
 //!
-//! Seven lines in a fixed order: herdr, daemon, config, engine, model, rewrite,
-//! record. The prototype's worst failure was silence: a parse error produced no
-//! output and looked like a hang for a morning, so every line that is not `ok`
-//! names the next action. See `tasks/3/DESIGN_3.md`, section 4.
+//! Eight lines in a fixed order: herdr, daemon, notifications, config, engine,
+//! model, rewrite, record. The prototype's worst failure was silence: a parse
+//! error produced no output and looked like a hang for a morning, so every line
+//! that is not `ok` names the next action. See `tasks/3/DESIGN_3.md`, section 4.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,6 +28,9 @@ pub enum State {
     /// not built, or its argument list has no `{model}` placeholder. Distinct from
     /// `Missing`, which would send somebody to download a file nothing would read.
     NotUsed,
+    /// Something that may work but cannot be confirmed from here. Unlike
+    /// `Missing` it does not fail the exit code.
+    Warning,
 }
 
 impl State {
@@ -37,6 +40,7 @@ impl State {
             State::Default => "default",
             State::Missing => "missing",
             State::NotUsed => "unused",
+            State::Warning => "warning",
         }
     }
 }
@@ -80,7 +84,7 @@ pub fn render(findings: &[Finding]) -> String {
     let mut out = String::new();
     for finding in findings {
         out.push_str(&format!(
-            "{:<8} {:<8} {}\n",
+            "{:<13} {:<8} {}\n",
             finding.name,
             finding.state.word(),
             finding.detail
@@ -411,9 +415,248 @@ fn models_directory() -> Option<PathBuf> {
     transport::state_directory(&transport::Vars::from_env()).map(|state| state.join("models"))
 }
 
+/// Where herdr's own configuration file is expected to be.
+#[derive(Debug, PartialEq, Eq)]
+enum Location {
+    Path(PathBuf),
+    Unknown,
+}
+
+/// herdr's order for its configuration file: `HERDR_CONFIG_PATH`, then on
+/// Windows `%APPDATA%\herdr\config.toml` (from herdr's documentation, not
+/// verified on Windows), elsewhere `XDG_CONFIG_HOME/herdr/config.toml`, then
+/// `~/.config/herdr/config.toml`. Takes the values rather than reading them, so
+/// the tests do not mutate an environment the parallel suite shares.
+fn herdr_config_path_from(
+    explicit: Option<String>,
+    xdg: Option<String>,
+    home: Option<String>,
+    appdata: Option<String>,
+    windows: bool,
+) -> Location {
+    let non_empty = |v: Option<String>| v.filter(|s| !s.is_empty());
+    if let Some(path) = non_empty(explicit) {
+        return Location::Path(PathBuf::from(path));
+    }
+    let file = |dir: PathBuf| Location::Path(dir.join("herdr").join("config.toml"));
+    if windows {
+        return match non_empty(appdata) {
+            Some(dir) => file(PathBuf::from(dir)),
+            None => Location::Unknown,
+        };
+    }
+    if let Some(dir) = non_empty(xdg) {
+        return file(PathBuf::from(dir));
+    }
+    match non_empty(home) {
+        Some(home) => file(PathBuf::from(home).join(".config")),
+        None => Location::Unknown,
+    }
+}
+
+/// The values herdr documents for `[ui.toast] delivery`.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Delivery {
+    Off,
+    Herdr,
+    Terminal,
+    System,
+}
+
+/// What herdr's configuration says about `[ui.toast] delivery`.
+#[derive(Debug, PartialEq, Eq)]
+enum Configured {
+    Value(Delivery),
+    /// The key is not there. herdr's default is then `off`.
+    Absent,
+    /// Present, but not one of the four documented values; holds the value as
+    /// TOML text.
+    Other(String),
+    Unparsable(String),
+}
+
+fn read_delivery(text: &str) -> Configured {
+    let parsed: toml::Value = match toml::from_str(text) {
+        Ok(parsed) => parsed,
+        Err(e) => return Configured::Unparsable(e.to_string()),
+    };
+    let Some(value) = parsed
+        .get("ui")
+        .and_then(|ui| ui.get("toast"))
+        .and_then(|toast| toast.get("delivery"))
+    else {
+        return Configured::Absent;
+    };
+    match value.as_str() {
+        Some("off") => Configured::Value(Delivery::Off),
+        Some("herdr") => Configured::Value(Delivery::Herdr),
+        Some("terminal") => Configured::Value(Delivery::Terminal),
+        Some("system") => Configured::Value(Delivery::System),
+        _ => Configured::Other(value.to_string()),
+    }
+}
+
+/// Why herdr's configuration file gave no text.
+enum ReadFailure {
+    Absent,
+    Other(String),
+}
+
+/// The first line of `text`, trimmed. The `toml` crate's error text spans
+/// several lines and a finding is one.
+fn one_line(text: &str) -> String {
+    text.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// The advice every line that is not `ok` carries, so the person is told what to
+/// change and where the messages are written when herdr does not show them.
+const NOTIFICATIONS_ADVICE: &str = "to have herdr show this plugin's messages itself, \
+    set `[ui.toast] delivery = \"herdr\"` in herdr's configuration and run \
+    `herdr server reload-config`; they are also written to the plugin log: \
+    `herdr plugin log list --plugin herdr-voice`";
+
+/// Where herdr is configured to send notifications, and whether this plugin's
+/// own messages can be expected to arrive. herdr has no command that reports the
+/// setting, and the reply of `herdr notification show` is the same for every
+/// value once a client is attached, so the configuration file is the only
+/// source (`tasks/85/AC_85.md`). What is said is what is configured there, never
+/// that it is in effect: a server that has not reloaded can differ.
+fn notifications_finding(
+    plugin_toasts: bool,
+    location: &Location,
+    file: Result<String, ReadFailure>,
+) -> Finding {
+    let finding = |state: State, detail: String| Finding {
+        name: "notifications",
+        state,
+        detail,
+    };
+    if !plugin_toasts {
+        return finding(
+            State::NotUsed,
+            "[ui] toasts = false in the plugin's configuration: the plugin raises no \
+             toasts, so herdr's delivery setting does not matter"
+                .to_string(),
+        );
+    }
+    let advice = NOTIFICATIONS_ADVICE;
+    let Location::Path(path) = location else {
+        return finding(
+            State::Missing,
+            format!(
+                "cannot tell where herdr's configuration is: none of HERDR_CONFIG_PATH, \
+                 XDG_CONFIG_HOME, HOME (APPDATA on Windows) is set, so it is not known \
+                 where notifications go; set HERDR_CONFIG_PATH to the file; {advice}"
+            ),
+        );
+    };
+    let path = path.display();
+    let nowhere = "this plugin's failure messages will not appear anywhere in herdr";
+    let text = match file {
+        Ok(text) => text,
+        Err(ReadFailure::Absent) => {
+            return finding(
+                State::Missing,
+                format!(
+                    "no file at {path} (herdr's default delivery is \"off\"): {nowhere}; {advice}"
+                ),
+            );
+        }
+        Err(ReadFailure::Other(reason)) => {
+            return finding(
+                State::Missing,
+                format!(
+                    "cannot read {path} ({}), so it is not known where notifications go; \
+                     once it can be read, {advice}",
+                    one_line(&reason)
+                ),
+            );
+        }
+    };
+    match read_delivery(&text) {
+        Configured::Unparsable(reason) => finding(
+            State::Missing,
+            format!(
+                "{path} is not valid TOML ({}), so it is not known where notifications go; \
+                 once it parses, {advice}",
+                one_line(&reason)
+            ),
+        ),
+        Configured::Value(Delivery::Herdr) => finding(
+            State::Ok,
+            format!("set to \"herdr\" in {path}: herdr draws the toast itself"),
+        ),
+        Configured::Value(Delivery::Terminal) => warning(&finding, "terminal", &path, advice),
+        Configured::Value(Delivery::System) => warning(&finding, "system", &path, advice),
+        Configured::Value(Delivery::Off) => finding(
+            State::Missing,
+            format!("set to \"off\" in {path}: {nowhere}; {advice}"),
+        ),
+        Configured::Absent => finding(
+            State::Missing,
+            format!(
+                "no [ui.toast] delivery in {path} (herdr's default is \"off\"): {nowhere}; {advice}"
+            ),
+        ),
+        Configured::Other(value) => finding(
+            State::Missing,
+            format!(
+                "set to {value} in {path}, which herdr does not list (off, herdr, terminal, \
+                 system): this plugin's failure messages may not appear; {advice}"
+            ),
+        ),
+    }
+}
+
+fn warning(
+    finding: &impl Fn(State, String) -> Finding,
+    value: &str,
+    path: &std::path::Display<'_>,
+    advice: &str,
+) -> Finding {
+    finding(
+        State::Warning,
+        format!(
+            "set to \"{value}\" in {path}: herdr hands the message on and cannot tell whether \
+             it appeared, so this plugin's failure messages may not reach you; {advice}"
+        ),
+    )
+}
+
+fn herdr_config_location() -> Location {
+    herdr_config_path_from(
+        std::env::var("HERDR_CONFIG_PATH").ok(),
+        std::env::var("XDG_CONFIG_HOME").ok(),
+        std::env::var("HOME").ok(),
+        std::env::var("APPDATA").ok(),
+        cfg!(windows),
+    )
+}
+
+fn read_herdr_config(location: &Location) -> Result<String, ReadFailure> {
+    let Location::Path(path) = location else {
+        // `notifications_finding` ignores the file when the location is unknown.
+        return Err(ReadFailure::Absent);
+    };
+    std::fs::read_to_string(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ReadFailure::Absent,
+        _ => ReadFailure::Other(e.to_string()),
+    })
+}
+
 pub fn run() -> u8 {
     let loaded = config::load(config::directory(&config::Vars::from_env()).as_deref());
-    let mut findings = vec![herdr_finding(), daemon_finding(), config_finding(&loaded)];
+    let location = herdr_config_location();
+    let mut findings = vec![
+        herdr_finding(),
+        daemon_finding(),
+        notifications_finding(
+            loaded.config.ui.toasts,
+            &location,
+            read_herdr_config(&location),
+        ),
+        config_finding(&loaded),
+    ];
     match models_directory() {
         Some(models) => {
             let (engine, model) = engine_and_model_findings(&loaded.config.stt, &models);
@@ -935,5 +1178,406 @@ mod tests {
         // PATH, the take path treats "agent" as unavailable, so doctor must
         // report the same thing regardless.
         assert_eq!(rewrite_finding(&rewrite).state, State::Missing);
+    }
+
+    #[test]
+    fn a_warning_renders_as_the_word_warning() {
+        let text = render(&[Finding {
+            name: "notifications",
+            state: State::Warning,
+            detail: "x".into(),
+        }]);
+        assert_eq!(text, "notifications warning  x\n");
+    }
+
+    #[test]
+    fn the_name_column_is_wide_enough_for_notifications() {
+        let text = render(&[Finding {
+            name: "notifications",
+            state: State::Ok,
+            detail: "x".into(),
+        }]);
+        assert_eq!(text, "notifications ok       x\n");
+    }
+
+    #[test]
+    fn a_warning_does_not_fail_the_exit_code() {
+        let findings = vec![
+            Finding {
+                name: "herdr",
+                state: State::Ok,
+                detail: String::new(),
+            },
+            Finding {
+                name: "notifications",
+                state: State::Warning,
+                detail: String::new(),
+            },
+        ];
+        assert_eq!(exit_code(&findings), 0);
+    }
+
+    fn some(text: &str) -> Option<String> {
+        Some(text.to_string())
+    }
+
+    #[test]
+    fn an_explicit_herdr_config_path_beats_everything_on_every_platform() {
+        for windows in [false, true] {
+            assert_eq!(
+                herdr_config_path_from(
+                    some("/a/config.toml"),
+                    some("/xdg"),
+                    some("/home"),
+                    some("/appdata"),
+                    windows
+                ),
+                Location::Path(PathBuf::from("/a/config.toml"))
+            );
+        }
+    }
+
+    #[test]
+    fn xdg_beats_home_outside_windows() {
+        assert_eq!(
+            herdr_config_path_from(None, some("/xdg"), some("/home"), None, false),
+            Location::Path(PathBuf::from("/xdg").join("herdr").join("config.toml"))
+        );
+    }
+
+    #[test]
+    fn home_alone_gives_dot_config_herdr() {
+        assert_eq!(
+            herdr_config_path_from(None, None, some("/home"), None, false),
+            Location::Path(
+                PathBuf::from("/home")
+                    .join(".config")
+                    .join("herdr")
+                    .join("config.toml")
+            )
+        );
+    }
+
+    #[test]
+    fn with_nothing_set_the_location_is_unknown() {
+        assert_eq!(
+            herdr_config_path_from(None, None, None, None, false),
+            Location::Unknown
+        );
+        assert_eq!(
+            herdr_config_path_from(None, None, None, None, true),
+            Location::Unknown
+        );
+    }
+
+    #[test]
+    fn empty_strings_count_as_unset() {
+        assert_eq!(
+            herdr_config_path_from(some(""), some(""), some(""), some(""), false),
+            Location::Unknown
+        );
+        assert_eq!(
+            herdr_config_path_from(some(""), some(""), some(""), some(""), true),
+            Location::Unknown
+        );
+    }
+
+    #[test]
+    fn windows_uses_appdata_and_ignores_xdg_and_home() {
+        assert_eq!(
+            herdr_config_path_from(None, some("/xdg"), some("/home"), some("/appdata"), true),
+            Location::Path(PathBuf::from("/appdata").join("herdr").join("config.toml"))
+        );
+    }
+
+    #[test]
+    fn windows_without_appdata_is_unknown_even_with_home_set() {
+        assert_eq!(
+            herdr_config_path_from(None, some("/xdg"), some("/home"), None, true),
+            Location::Unknown
+        );
+    }
+
+    fn under_toast(line: &str) -> String {
+        format!("[ui.toast]\n{line}\n")
+    }
+
+    #[test]
+    fn each_listed_delivery_is_read() {
+        for (word, expected) in [
+            ("off", Delivery::Off),
+            ("herdr", Delivery::Herdr),
+            ("terminal", Delivery::Terminal),
+            ("system", Delivery::System),
+        ] {
+            assert_eq!(
+                read_delivery(&under_toast(&format!("delivery = \"{word}\""))),
+                Configured::Value(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_key_or_table_is_absent() {
+        assert_eq!(read_delivery(""), Configured::Absent);
+        assert_eq!(read_delivery("[ui]\ntoasts = false\n"), Configured::Absent);
+        assert_eq!(read_delivery("[ui]\ntoast = \"x\"\n"), Configured::Absent);
+        assert_eq!(read_delivery(&under_toast("other = 1")), Configured::Absent);
+    }
+
+    #[test]
+    fn a_top_level_delivery_key_is_not_the_setting() {
+        assert_eq!(read_delivery("delivery = \"off\"\n"), Configured::Absent);
+    }
+
+    #[test]
+    fn a_value_herdr_does_not_list_is_quoted_back() {
+        assert_eq!(
+            read_delivery(&under_toast("delivery = \"Herdr\"")),
+            Configured::Other("\"Herdr\"".to_string())
+        );
+        assert_eq!(
+            read_delivery(&under_toast("delivery = 3")),
+            Configured::Other("3".to_string())
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_toml_is_unparsable() {
+        assert!(matches!(
+            read_delivery("[ui.toast]\ndelivery = \n"),
+            Configured::Unparsable(_)
+        ));
+    }
+
+    const REQUIRED: [&str; 4] = [
+        "[ui.toast]",
+        "delivery = \"herdr\"",
+        "herdr server reload-config",
+        "herdr plugin log list --plugin herdr-voice",
+    ];
+
+    fn file_at() -> Location {
+        Location::Path(PathBuf::from("/x/herdr/config.toml"))
+    }
+
+    fn with_file(text: &str) -> Finding {
+        notifications_finding(true, &file_at(), Ok(text.to_string()))
+    }
+
+    fn assert_full_advice(finding: &Finding) {
+        for needle in REQUIRED {
+            assert!(
+                finding.detail.contains(needle),
+                "missing {needle:?} in {}",
+                finding.detail
+            );
+        }
+    }
+
+    #[test]
+    fn the_finding_is_named_notifications() {
+        assert_eq!(with_file("").name, "notifications");
+    }
+
+    #[test]
+    fn herdr_delivery_is_ok_and_names_value_and_file() {
+        let f = with_file(&under_toast("delivery = \"herdr\""));
+        assert_eq!(f.state, State::Ok);
+        assert!(f.detail.contains("set to \"herdr\""), "{}", f.detail);
+        assert!(f.detail.contains("/x/herdr/config.toml"), "{}", f.detail);
+        assert!(!f.detail.contains("reload-config"), "{}", f.detail);
+    }
+
+    #[test]
+    fn terminal_and_system_are_warnings_with_the_full_advice() {
+        for word in ["terminal", "system"] {
+            let f = with_file(&under_toast(&format!("delivery = \"{word}\"")));
+            assert_eq!(f.state, State::Warning);
+            assert!(
+                f.detail.contains(&format!("set to \"{word}\"")),
+                "{}",
+                f.detail
+            );
+            assert!(f.detail.contains("/x/herdr/config.toml"), "{}", f.detail);
+            assert!(
+                f.detail.contains("cannot tell whether it appeared"),
+                "{}",
+                f.detail
+            );
+            assert_full_advice(&f);
+        }
+    }
+
+    #[test]
+    fn off_is_missing_with_the_full_advice() {
+        let f = with_file(&under_toast("delivery = \"off\""));
+        assert_eq!(f.state, State::Missing);
+        assert!(f.detail.contains("set to \"off\""), "{}", f.detail);
+        assert!(f.detail.contains("/x/herdr/config.toml"), "{}", f.detail);
+        assert_full_advice(&f);
+    }
+
+    #[test]
+    fn an_absent_key_is_off_by_herdrs_default() {
+        let f = with_file("[ui]\ntoasts = false\n");
+        assert_eq!(f.state, State::Missing);
+        assert!(
+            f.detail.contains("no [ui.toast] delivery in"),
+            "{}",
+            f.detail
+        );
+        assert!(f.detail.contains("default is \"off\""), "{}", f.detail);
+        assert!(f.detail.contains("/x/herdr/config.toml"), "{}", f.detail);
+        assert_full_advice(&f);
+    }
+
+    #[test]
+    fn an_absent_file_is_off_by_herdrs_default() {
+        let f = notifications_finding(true, &file_at(), Err(ReadFailure::Absent));
+        assert_eq!(f.state, State::Missing);
+        assert!(f.detail.contains("no file at"), "{}", f.detail);
+        assert!(
+            f.detail.contains("default delivery is \"off\""),
+            "{}",
+            f.detail
+        );
+        assert!(f.detail.contains("/x/herdr/config.toml"), "{}", f.detail);
+        assert_full_advice(&f);
+    }
+
+    #[test]
+    fn an_unlisted_value_is_missing_and_quoted() {
+        let f = with_file(&under_toast("delivery = \"Herdr\""));
+        assert_eq!(f.state, State::Missing);
+        assert!(f.detail.contains("set to \"Herdr\""), "{}", f.detail);
+        assert!(f.detail.contains("does not list"), "{}", f.detail);
+        assert!(f.detail.contains("/x/herdr/config.toml"), "{}", f.detail);
+        assert_full_advice(&f);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_missing_with_the_reason() {
+        let f = notifications_finding(
+            true,
+            &file_at(),
+            Err(ReadFailure::Other("permission denied".into())),
+        );
+        assert_eq!(f.state, State::Missing);
+        assert!(
+            f.detail.contains("cannot read /x/herdr/config.toml"),
+            "{}",
+            f.detail
+        );
+        assert!(f.detail.contains("permission denied"), "{}", f.detail);
+        assert_full_advice(&f);
+    }
+
+    #[test]
+    fn a_file_that_is_not_toml_is_missing_with_the_first_line_of_the_reason() {
+        let text = under_toast("delivery = ");
+        let Configured::Unparsable(reason) = read_delivery(&text) else {
+            panic!("the fixture must not parse");
+        };
+        assert!(
+            reason.contains('\n'),
+            "the fixture must give a multi-line reason"
+        );
+        let f = with_file(&text);
+        assert_eq!(f.state, State::Missing);
+        assert!(f.detail.contains("is not valid TOML"), "{}", f.detail);
+        assert!(f.detail.contains("/x/herdr/config.toml"), "{}", f.detail);
+        assert!(f.detail.contains(&one_line(&reason)), "{}", f.detail);
+        assert_full_advice(&f);
+    }
+
+    #[test]
+    fn an_unknown_location_is_missing_and_says_how_to_fix_it() {
+        let f = notifications_finding(true, &Location::Unknown, Ok(String::new()));
+        assert_eq!(f.state, State::Missing);
+        assert!(f.detail.contains("HERDR_CONFIG_PATH"), "{}", f.detail);
+        assert_full_advice(&f);
+    }
+
+    #[test]
+    fn plugin_toasts_off_is_unused_and_wins_over_everything_else() {
+        let cases = [
+            notifications_finding(false, &Location::Unknown, Ok(String::new())),
+            notifications_finding(false, &file_at(), Err(ReadFailure::Other("x".into()))),
+            notifications_finding(false, &file_at(), Err(ReadFailure::Absent)),
+            notifications_finding(
+                false,
+                &file_at(),
+                Ok(under_toast("delivery = \"terminal\"")),
+            ),
+        ];
+        for f in cases {
+            assert_eq!(f.state, State::NotUsed);
+            assert!(f.detail.contains("[ui] toasts = false"), "{}", f.detail);
+            assert!(!f.detail.contains("reload-config"), "{}", f.detail);
+            assert!(!f.detail.contains("delivery = \"herdr\""), "{}", f.detail);
+        }
+    }
+
+    #[test]
+    fn no_detail_spans_lines_or_claims_to_be_in_effect() {
+        let broken = under_toast("delivery = ");
+        let cases = [
+            with_file(&broken),
+            with_file(""),
+            with_file(&under_toast("delivery = \"terminal\"")),
+            with_file(&under_toast("delivery = \"herdr\"")),
+            notifications_finding(true, &Location::Unknown, Ok(String::new())),
+            notifications_finding(false, &file_at(), Ok(String::new())),
+        ];
+        for f in cases {
+            assert!(!f.detail.contains('\n'), "{:?}", f.detail);
+            assert!(!f.detail.contains("in effect"), "{}", f.detail);
+        }
+    }
+
+    #[test]
+    fn one_line_keeps_the_first_line_trimmed() {
+        assert_eq!(one_line("first\nsecond"), "first");
+        assert_eq!(one_line("   padded  \nsecond"), "padded");
+        assert_eq!(one_line(""), "");
+    }
+
+    /// A directory of the test's own: named by test and process, because the
+    /// tests run in parallel and one that removes a shared directory deletes
+    /// another's fixture.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-voice-doctor-notifications-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_file_is_read_as_text() {
+        let dir = scratch_dir("read");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[ui.toast]\ndelivery = \"herdr\"\n").unwrap();
+        match read_herdr_config(&Location::Path(path)) {
+            Ok(text) => assert_eq!(text, "[ui.toast]\ndelivery = \"herdr\"\n"),
+            Err(_) => panic!("the file exists and is readable"),
+        }
+    }
+
+    #[test]
+    fn a_missing_file_is_absent() {
+        let dir = scratch_dir("missing");
+        let result = read_herdr_config(&Location::Path(dir.join("nothing.toml")));
+        assert!(matches!(result, Err(ReadFailure::Absent)));
+    }
+
+    #[test]
+    fn a_directory_in_place_of_the_file_is_another_failure() {
+        let dir = scratch_dir("directory");
+        let result = read_herdr_config(&Location::Path(dir));
+        assert!(matches!(result, Err(ReadFailure::Other(_))));
     }
 }
