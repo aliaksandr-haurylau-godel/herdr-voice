@@ -178,8 +178,9 @@ All tests run without a live endpoint or a live herdr.
 ## What this does not cover
 
 The 30-second bound, the flaky test behind #78, and the same defect in
-`src/stt/command.rs`, `src/rewrite/command.rs`, `src/doctor.rs`,
-`src/indicator.rs` and `src/setup.rs`. The pull request names them as remaining.
+`src/doctor.rs`, `src/indicator.rs` and `src/setup.rs`, tracked in #101. The pull
+request names them as remaining. `src/stt/command.rs` and `src/rewrite/command.rs`,
+which #78 also lists, already tell `ErrorKind::NotFound` apart from other errors.
 
 ## Risks
 

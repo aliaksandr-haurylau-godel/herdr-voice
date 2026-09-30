@@ -93,10 +93,11 @@ fails first.
 ## Notes
 
 - Scope: `src/rewrite/http.rs` (#52), `src/delivery.rs` (#78) and `src/stt/http.rs`,
-  which carries the same message as #52 and is named by no issue. The remaining
-  places #78 lists — `src/stt/command.rs`, `src/rewrite/command.rs`,
-  `src/doctor.rs` — stay out of scope and are named in the pull request as
-  remaining.
+  which carries the same message as #52 and is named by no issue. `src/doctor.rs`,
+  which #78 lists, stays out of scope and is named in the pull request as
+  remaining, tracked in #101. `src/stt/command.rs` and `src/rewrite/command.rs`,
+  which #78 also lists, already tell `ErrorKind::NotFound` apart from other
+  errors.
 - #66 (an indicator test that fails intermittently on Linux) is not part of this
   run. If the change makes that failure readable, this file says so at S5.
 - `.claude/agents/` holds the planner and implementer reviewers but no file for
@@ -231,7 +232,7 @@ Each of these killing tests was checked by applying the mutation again after the
 - what it did not show, written in the section: a 4xx from the owner's LM Studio (it answered a wrong model name with 200 and a wrong path with 200, so a local server stood in for the 400); a timeout while reading a 2xx body; `ETXTBSY`; the transcriber against a live endpoint; Windows and Linux.
 
 ## Remaining, named in the pull request
-- `src/stt/command.rs`, `src/rewrite/command.rs`, `src/doctor.rs` (#78 lists these), and `src/indicator.rs` and `src/setup.rs` (the same blanket mapping to `NotFound`, found by the S1 reviewer).
+- `src/setup.rs`, `src/indicator.rs` and `src/doctor.rs`: the same blanket mapping to `NotFound`; tracked in #101. `src/stt/command.rs` and `src/rewrite/command.rs`, which #78 also lists, already tell `ErrorKind::NotFound` apart from other errors.
 - A program named by an absolute path that does not exist, or whose interpreter is missing, still prints the `PATH` sentence.
 - A timeout while the body of a 2xx response is being read is still reported as an unreadable answer.
 - `wav_path` in the transcriber's tests leaves files in the temporary directory (older pattern); the transport's own text in `Cause::Other` repeats the URL (from `ureq`).

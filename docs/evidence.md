@@ -1537,7 +1537,8 @@ operating system as a permission error, so both take the second message.
   `start_failure` the error, not by starting a program.
 - #66, an indicator test that fails intermittently on Linux. It was not run here, so
   this run cannot say whether the change makes that failure readable; `src/indicator.rs`
-  has the same defect as `src/delivery.rs` and is not part of this change.
+  has the same defect as `src/delivery.rs` (tracked in #101) and is not part of this
+  change.
 - The transcriber's messages against a live speech endpoint: they were produced in tests
   against a local test double only. The rewrite engine is the one run against a live server.
 - Windows and Linux: the new messages were not produced on either.
