@@ -78,6 +78,8 @@ jobs:
         run: sh scripts/test-release-notes.sh
       - name: the install script's decisions
         run: sh scripts/test-install.sh
+      - name: the pre-commit hook, with and without .leakwords
+        run: sh scripts/test-pre-commit.sh
 
   scripts-windows:
     name: the Windows install script
