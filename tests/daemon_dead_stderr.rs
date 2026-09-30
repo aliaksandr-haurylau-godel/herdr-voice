@@ -43,25 +43,37 @@ impl Daemon {
     }
 }
 
-/// Starts the daemon with standard error on a pipe and closes the read end at
-/// once, then waits until it accepts a connection.
-fn daemon_with_dead_stderr(tag: &str) -> Daemon {
+/// Where the daemon's standard error goes.
+enum Stderr {
+    /// A pipe whose read end is closed at once: what a herdr restart leaves.
+    Dead,
+    /// A file the test reads afterwards.
+    File(&'static str),
+}
+
+/// Starts the daemon and waits until it accepts a connection. `config` is the
+/// content of `config.toml`, when the test needs one.
+fn start(tag: &str, stderr: Stderr, config: Option<&str>) -> Daemon {
     // Short on purpose: a socket path is limited to about a hundred bytes.
     let dir = std::env::temp_dir().join(format!("hv-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
+    if let Some(text) = config {
+        std::fs::write(dir.join("config.toml"), text).expect("config");
+    }
     let mut daemon = Daemon {
         child: Command::new("true").spawn().expect("a placeholder child"),
         dir,
     };
     let _ = daemon.child.wait();
-    let mut child = daemon
-        .command(&["daemon"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start the daemon");
+    let mut command = daemon.command(&["daemon"]);
+    command.stdin(Stdio::null()).stdout(Stdio::null());
+    match &stderr {
+        Stderr::Dead => command.stderr(Stdio::piped()),
+        Stderr::File(name) => command
+            .stderr(std::fs::File::create(daemon.dir.join(name)).expect("the standard error file")),
+    };
+    let mut child = command.spawn().expect("start the daemon");
     drop(child.stderr.take());
     daemon.child = child;
     let socket = daemon.dir.join("voice.sock");
@@ -74,6 +86,15 @@ fn daemon_with_dead_stderr(tag: &str) -> Daemon {
         std::thread::sleep(Duration::from_millis(50));
     }
     daemon
+}
+
+fn daemon_with_dead_stderr(tag: &str) -> Daemon {
+    start(tag, Stderr::Dead, None)
+}
+
+/// What the daemon has written to its standard error file so far.
+fn written(daemon: &Daemon, name: &str) -> String {
+    std::fs::read_to_string(daemon.dir.join(name)).unwrap_or_default()
 }
 
 #[test]
@@ -102,4 +123,38 @@ fn doctor_finds_that_daemon_healthy_only_because_it_answers() {
         .find(|line| line.starts_with("daemon"))
         .unwrap_or_else(|| panic!("no daemon line in {report:?}"));
     assert!(line.contains(" ok "), "got {line:?}");
+}
+
+/// The journal is what `herdr plugin log list` shows, so what the process really
+/// writes to standard error is a contract. A unit test substitutes the journal
+/// and cannot see it.
+#[test]
+fn the_start_up_and_request_lines_reach_standard_error() {
+    let daemon = start("lines", Stderr::File("err.log"), None);
+    let output = daemon
+        .command(&["cancel"])
+        .output()
+        .expect("run the client");
+    assert!(output.status.success(), "{:?}", output.status);
+    let log = written(&daemon, "err.log");
+    assert!(log.contains("listening at "), "got {log:?}");
+    assert!(
+        log.contains("request command=cancel"),
+        "the request line is missing from {log:?}"
+    );
+    assert!(
+        log.contains("recognition unavailable"),
+        "a missing model must be named at start, got {log:?}"
+    );
+}
+
+#[test]
+fn a_refused_context_source_is_named_on_standard_error() {
+    let daemon = start(
+        "source",
+        Stderr::File("err.log"),
+        Some("[context]\nsource = \"bogus\"\n"),
+    );
+    let log = written(&daemon, "err.log");
+    assert!(log.contains("bogus"), "got {log:?}");
 }

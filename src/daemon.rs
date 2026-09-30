@@ -3358,6 +3358,69 @@ mod tests {
         assert_eq!(lines, vec![request_line(&sent)], "got {lines:?}");
     }
 
+    /// The note about a missing context is written for a request that needed one.
+    #[test]
+    fn a_request_that_needs_a_context_and_has_none_journals_the_note() {
+        let (sent, _reply, lines) = serve_once_journalled("journalled-note", "ptt");
+        let note = context_note(&sent).expect("a ptt with no context has a note");
+        assert_eq!(lines, vec![request_line(&sent), note], "got {lines:?}");
+    }
+
+    /// A frame the daemon cannot read is a failed connection and says so, and the
+    /// daemon goes on serving.
+    #[test]
+    fn a_frame_that_cannot_be_read_is_journalled_as_a_failed_connection() {
+        use std::io::Write;
+        let address = crate::transport::tests_support::probe_address("bad-frame");
+        let listener = crate::transport::listen(&address).expect("listen");
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = fake_runtime("x");
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let served = {
+            let address = address.clone();
+            std::thread::spawn(move || {
+                super::serve(
+                    listener,
+                    address,
+                    Arc::new(silent_recorder()),
+                    Arc::new(runtime),
+                )
+            })
+        };
+        let mut garbage = crate::transport::connect(&address).expect("connect");
+        garbage.write_all(b"not a frame\n").expect("write");
+        drop(garbage);
+        let deadline = std::time::Instant::now() + WITHIN;
+        while !journal
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("connection failed"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no connection failure was journalled, got {:?}",
+                journal.0.lock().unwrap()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut client =
+            std::io::BufReader::new(crate::transport::connect(&address).expect("connect"));
+        Request {
+            command: "stop".into(),
+            entrypoint: None,
+            context: vec![],
+        }
+        .write_to(client.get_mut())
+        .expect("write");
+        assert!(matches!(
+            Reply::read_from(&mut client).expect("reply"),
+            Reply::Ok(_)
+        ));
+        served.join().expect("the loop must end");
+    }
+
     /// The last thing that goes wrong in a dead pipe is the next `eprintln!`
     /// somebody adds. The production half of each file, up to its first
     /// `#[cfg(test)]`, must not contain one.

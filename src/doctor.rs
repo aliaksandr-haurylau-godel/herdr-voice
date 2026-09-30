@@ -511,7 +511,37 @@ mod tests {
         assert_eq!(finding.state, State::Missing, "got {finding:?}");
         assert!(finding.detail.contains(address.display()));
         assert!(
-            finding.detail.contains("herdr-voice daemon"),
+            finding.detail.contains("pkill -f 'herdr-voice daemon'"),
+            "the recovery must be named: {}",
+            finding.detail
+        );
+        assert!(
+            finding.detail.contains("restart herdr"),
+            "{}",
+            finding.detail
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_that_answers_something_else_is_missing() {
+        let address = listener_answering(
+            "doctor-other",
+            Some(crate::proto::Reply::Ok("something else".to_string())),
+        );
+        let finding = daemon_finding_at(&address);
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_that_answers_with_nothing_is_missing_and_says_what_it_wanted() {
+        let address =
+            listener_answering("doctor-empty", Some(crate::proto::Reply::Ok(String::new())));
+        let finding = daemon_finding_at(&address);
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(
+            finding.detail.contains("the reply was not `pong`"),
             "{}",
             finding.detail
         );
