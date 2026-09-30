@@ -170,3 +170,15 @@ Gates run fresh before the commit: `cargo test` (571 + 2 passed), `cargo clippy
 scripts/check_manifest.py`, `sh scripts/test-pre-commit.sh` — all green.
 
 ### S5 Verify
+Run in a scratch clone of the branch with real `git commit` and real gitleaks,
+in four states: no file, an unchanged copy of the example, an entry that matches,
+and a new worktree. The result is the section "The leak gate refuses to run
+without `.leakwords`, for issue #64" in `docs/evidence.md`. Verdict: the criteria
+AC-1 to AC-5 and AC-7 are met by the recorded runs; AC-6 is met by the diff and is
+observed only when CI runs.
+
+Follow-up, not done here and not part of this issue: the last line of a
+`.leakwords` with no trailing newline is skipped by the hook's `read` loop. The
+orchestrator confirmed that the owner's file ends in a newline, so nothing is being
+skipped today, and will file the issue after the pull request is open. The pull
+request names it.

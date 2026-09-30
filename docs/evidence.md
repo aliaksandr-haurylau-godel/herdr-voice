@@ -1469,3 +1469,58 @@ or `true`; that configuration was not run on the branch.
   being refused. Whether they were a consequence of the refusal is not established;
   a take on the fixed build is the place to look.
 - The Windows CI job. It compiles this change only when the pull request runs it.
+
+## The leak gate refuses to run without `.leakwords`, for issue #64
+
+Verified on macOS (Darwin 25.6.0, arm64), with gitleaks installed, in a scratch
+clone of branch `fix/64-leak-gate-silence` at `1e0a37a` in a temporary directory,
+using real `git commit` with `core.hooksPath` set to `.githooks`. The clone had no
+`.leakwords`, as any fresh clone does.
+
+**Before the change** (`13733c5`, from the unit test run against the unchanged
+hook, `sh scripts/test-pre-commit.sh`): in a checkout without `.leakwords` the
+hook exited 0 and printed nothing, so the "absent" group reported
+`FAIL absent: exit 0, expected 1` and two `FAIL … stderr lacks …` lines, while the
+three groups for a present file passed.
+
+**After the change**, four real commits:
+
+| Case | Command | Result |
+|---|---|---|
+| A. fresh clone, no `.leakwords` | `git commit -m "scratch A"` with `README.md` staged | exit 1, no commit created |
+| B. after `cp .leakwords.example .leakwords` | `git commit -q -m "scratch B"` | exit 0, commit `77bdb47` created |
+| C. `.leakwords` holds `zebra-marker`, staged diff contains it | `git commit -m "scratch C"` | exit 1, no commit created |
+| D. `git worktree add ../wt-new -b scratch-d` from that clone, then a commit | `git commit -m "scratch D"` | exit 1, no commit created |
+
+Standard error in case A and case D, identical:
+
+```
+leak gate: .leakwords is missing, so the private word list was not checked
+create it with: cp .leakwords.example .leakwords
+then list the names that must never be committed; an empty list is allowed
+```
+
+Standard error in case C, the messages the hook printed before the change:
+
+```
+leak gate: staged changes match a private word-list entry
+the matching pattern is in .leakwords; nothing is printed here on purpose
+```
+
+Case B printed nothing beyond gitleaks' own three lines (`no leaks found`). Case D
+shows the situation the issue was filed for: a new worktree starts without the file,
+and the first commit there now stops instead of passing.
+
+`sh scripts/test-pre-commit.sh` on the branch: 23 checks, all `ok`, exit 0; the
+worktree's own `.leakwords` has the same `shasum` before and after.
+
+**What this does not establish.**
+
+- The Ubuntu and macOS runners of the `scripts` job. The step is added to
+  `.github/workflows/check.yml`, and it runs there only when the pull request does.
+  The test does not depend on gitleaks being installed: it puts a stub first on
+  `PATH`.
+- A `.leakwords` whose last line has no trailing newline. The hook's `read` loop
+  skips that line without a word (found by the code review of this change). It is on
+  the present-file path, which this change leaves as it was, and is not covered here.
+- `git commit --no-verify`, which skips the whole hook, as before.
