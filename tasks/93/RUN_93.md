@@ -214,3 +214,23 @@ Windows dead-code check on a scratch copy is clean. No test in `src/stt/fetch.rs
 failed.
 
 S4 is closed. Next is S5 Verify.
+
+### S5 Verify
+- artifact: section "A daemon whose herdr has gone, for issue #93" in `docs/evidence.md`
+- produced: 2026-09-30
+- method: the second one the orchestrator allowed — the built daemon started by hand with
+  standard error on a pipe whose reader was closed. An isolated herdr could not be
+  arranged: the plugin registry that `herdr plugin link` writes to is shared with the
+  person's own herdr and no documented setting moves it, and the brief forbids `link`.
+- result: on `main` the run reproduces the issue's own line and `doctor` says `ok`; on the
+  fixed build the request is answered; the fixed `doctor` against a daemon from `main`
+  says `missing` and names the recovery. Negative results and what the run does not show
+  are in the evidence section.
+
+```yaml
+verdict:
+  stage: S5
+  artifact: docs/evidence.md
+  verdict: recorded
+  date: 2026-09-30
+```
