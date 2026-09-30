@@ -250,3 +250,15 @@ run ended; `git worktree list` no longer shows it and its build directory is gon
   server's own setting (`doctor` reads the file).
 - the isolated server was stopped with `kill` on its own process; the owner's
   server (started earlier, other socket) was checked afterwards and was running.
+
+### CI after the pull request was opened
+- run `36707438104` (push): job `ubuntu-latest` failed with
+  `delivery::tests::insert_runs_pane_send_text_not_agent_prompt` panicking at
+  `src/delivery.rs:483` with `NotFound` for `record.sh`, a freshly written fixture
+  script reported as not found (615 passed, 1 failed). This diff does not touch
+  `src/delivery.rs`; it is the known intermittent failure of issue #78.
+- The status first reported for the pull request as green was wrong: only the tail
+  of `gh pr checks` had been read, and the failing line was above it.
+- rerun once with `gh run rerun 36707438104 --failed`; the job then passed and the
+  run's conclusion is `success`. The run for the pull_request event
+  (`36707464227`) passed on its first attempt.
