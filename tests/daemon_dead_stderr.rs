@@ -92,9 +92,18 @@ fn daemon_with_dead_stderr(tag: &str) -> Daemon {
     start(tag, Stderr::Dead, None)
 }
 
-/// What the daemon has written to its standard error file so far.
-fn written(daemon: &Daemon, name: &str) -> String {
-    std::fs::read_to_string(daemon.dir.join(name)).unwrap_or_default()
+/// What the daemon has written to its standard error file, once `needle` is in
+/// it. The socket accepts as soon as it is bound, and `start` writes some of its
+/// lines after that, so a read taken at once can be a read too early.
+fn written_with(daemon: &Daemon, name: &str, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(daemon.dir.join(name)).unwrap_or_default();
+        if text.contains(needle) || Instant::now() >= deadline {
+            return text;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]
@@ -136,7 +145,7 @@ fn the_start_up_and_request_lines_reach_standard_error() {
         .output()
         .expect("run the client");
     assert!(output.status.success(), "{:?}", output.status);
-    let log = written(&daemon, "err.log");
+    let log = written_with(&daemon, "err.log", "recognition unavailable");
     assert!(log.contains("listening at "), "got {log:?}");
     assert!(
         log.contains("request command=cancel"),
@@ -155,6 +164,6 @@ fn a_refused_context_source_is_named_on_standard_error() {
         Stderr::File("err.log"),
         Some("[context]\nsource = \"bogus\"\n"),
     );
-    let log = written(&daemon, "err.log");
+    let log = written_with(&daemon, "err.log", "bogus");
     assert!(log.contains("bogus"), "got {log:?}");
 }

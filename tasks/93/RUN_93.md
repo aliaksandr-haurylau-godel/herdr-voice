@@ -234,3 +234,11 @@ verdict:
   verdict: recorded
   date: 2026-09-30
 ```
+
+### After the pull request opened
+- CI on the first push: one macOS job failed in `a_refused_context_source_is_named_on_standard_error`
+  (`tests/daemon_dead_stderr.rs`), `got "listening at …\n"`; the same test passed on the other
+  macOS job, on Linux and on Windows. Cause: the test read the standard error file as soon as the
+  socket accepted, and `start` writes the refused-source line after the socket is bound. It is a
+  race in this branch's own test, not issue #62 or #66. Fixed by waiting for the expected text
+  (ten seconds at most) before reading; five consecutive local runs of the file passed.
