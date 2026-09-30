@@ -465,6 +465,7 @@ mod tests {
             b"ok+3 tail\nabc",
             b"error+ 3\nabc",
             b"okay+3\nabc",
+            b"ok++3\nabc",
         ] {
             let error = Reply::read_from(&mut BufReader::new(input)).expect_err("must refuse");
             assert!(
@@ -473,6 +474,27 @@ mod tests {
                 String::from_utf8_lossy(input)
             );
         }
+    }
+
+    #[test]
+    fn a_header_line_that_ends_in_carriage_return_and_newline_is_still_read() {
+        assert_eq!(
+            Reply::read_from(&mut BufReader::new(&b"ok hello\r\n"[..])).expect("read"),
+            Reply::Ok("hello".into())
+        );
+        assert_eq!(
+            Reply::read_from(&mut BufReader::new(&b"error+3\r\na\nb"[..])).expect("read"),
+            Reply::Error("a\nb".into())
+        );
+    }
+
+    #[test]
+    fn the_refusal_of_a_body_that_is_not_text_says_so() {
+        assert!(
+            ProtoError::NotText.to_string().contains("not valid UTF-8"),
+            "got {:?}",
+            ProtoError::NotText.to_string()
+        );
     }
 
     #[test]
