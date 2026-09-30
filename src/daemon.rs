@@ -3346,6 +3346,9 @@ mod tests {
             lines.contains(&request_line(&sent)),
             "the request line must reach the journal, got {lines:?}"
         );
+        // Only a `ping` is exempt from the note about a missing context.
+        let note = context_note(&sent).expect("a cancel with no context has a note");
+        assert!(lines.contains(&note), "the note is missing from {lines:?}");
     }
 
     /// `doctor` sends a `ping` with no context every time it runs. The note about

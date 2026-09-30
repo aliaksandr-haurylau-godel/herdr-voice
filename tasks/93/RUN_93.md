@@ -139,3 +139,78 @@ Reviewer note: the reviewer ran no command, so the Windows dead-code sequence in
 Task 2 Step 5 is unexecuted until S4 runs it.
 
 S3 is closed. Next is S4 Implement.
+
+### S4 Implement
+- code: `src/stderr.rs` (new), `src/daemon.rs`, `src/doctor.rs`, `src/capture/cpal_source.rs`,
+  `tests/daemon_dead_stderr.rs` (new), `docs/design.md`, `docs/decisions.md`.
+- Rulings on the plan: the Windows dead-code sequence in Task 2 Step 5 ends in
+  `git checkout -- src`, which discards uncommitted work; it was run once with
+  uncommitted edits, `src` was restored and the edits re-applied from the same
+  script, and later runs were made on a clean tree and then on a scratch copy of the
+  repository outside the worktree. Result each time: clippy with `-D warnings`, no
+  warning.
+
+Review of the whole diff (fresh subagent, read only), findings and what was done:
+
+- Important: `docs/evidence.md` had no entry (AC requirement 5). That is S5, below.
+- Important: no test ran the real writer against a dead standard error. Fixed:
+  `tests/daemon_dead_stderr.rs` starts the built binary with standard error on a
+  pipe whose reader is closed, sends `cancel` through the built client and runs
+  `doctor`. With `write_line` changed to `unwrap()` both tests fail; with it as
+  written they pass.
+- Minor, fixed: every `doctor` ping journalled "context unreadable". The daemon no
+  longer writes the note for `ping`; `a_ping_journals_its_request_and_no_note_about_a_missing_context`
+  failed first and passes.
+- Minor, deferred: a silent daemon (accepts, never replies) is not tested in
+  `doctor`; the two-second bound is `send_to`'s and is tested in `src/client.rs`.
+- Minor, deferred: the no-print scan covers `src/daemon.rs` and
+  `src/capture/cpal_source.rs` only. The reviewer found no other production print or
+  inherited-stdio child process.
+- Minor, deferred: `src/main.rs` still uses `eprintln!` for the `daemon` command's own
+  start-up failures, before the socket is bound; out of the AC's scope.
+- Minor, deferred: a journal write blocks, without panicking, if herdr is alive and stops
+  draining the pipe; outside the AC (a dead reader gives a broken pipe, which is handled).
+- Ruling: the bare `connect` before the `ping` stays. On Windows a named pipe may be
+  busy between the two connects and `doctor` could then say "nothing is listening" for
+  a healthy daemon; not reproduced, not testable on this machine, recorded as
+  unverified in `docs/evidence.md`. Windows as a whole is `docs/design.md`, section 9,
+  question 3.
+- Ruling: `docs/design.md`'s Problem paragraph states what failed. The rule against
+  describing removed material applies to material the decision removes; the failure is
+  the problem the decision answers.
+
+Mutation testing (fresh subagent, 44 mutations of the added lines, one at a time,
+full suite each): 25 killed, 19 survived. Handled:
+
+- Killed by new tests, and re-run by hand after the tests were added (each turned the
+  suite red): dropping the missing-context note (`a_request_that_needs_a_context_and_has_none_journals_the_note`),
+  dropping the "connection failed" line (`a_frame_that_cannot_be_read_is_journalled_as_a_failed_connection`),
+  `line()` writing nothing, and `StderrJournal::write` emptied, the "listening at" line, the
+  "recognition unavailable" line and the refused-source line (all through
+  `the_start_up_and_request_lines_reach_standard_error` and
+  `a_refused_context_source_is_named_on_standard_error`), the `pkill` text and the
+  "restart herdr" text (`a_daemon_that_closes_without_answering_is_missing`), dropping
+  the `pong` comparison (`a_daemon_that_answers_something_else_is_missing`,
+  `a_daemon_that_answers_with_nothing_is_missing_and_says_what_it_wanted`), and
+  widening the ping exemption to `cancel` (the note assertion added to
+  `a_served_request_is_journalled_and_answered`).
+- `line()` writing to standard output instead of standard error: not killed by name;
+  `the_start_up_and_request_lines_reach_standard_error` sends standard output to the null
+  device and reads the file, so the mutation fails it.
+- Not killed, explained: replacing `continue` by `break` on a failed accept, and dropping
+  the "accept failed" line, need a listener whose accept fails once, which
+  `transport::Listener` does not allow to be substituted; the reply write's `?` replaced by
+  `let _ =` changes only the text journalled for a client that hung up; dropping
+  `outcome.code == 0` from the doctor condition is equivalent, because a non-zero code
+  never carries `pong`; `&address.clone()` is equivalent; the three mutations of the
+  duplicate-device notice in `src/capture/cpal_source.rs` need a sound card and are
+  verified by hand or not at all, as `CLAUDE.md` says of capture.
+
+Gates on the last commit of S4, run fresh: `cargo test` 587 passed, 4 passed and
+2 passed (unit, `daemon_dead_stderr`, `setup_process`), 1 ignored; `cargo clippy
+--all-targets -- -D warnings` clean; `cargo fmt --check` clean; `python3
+scripts/check_manifest.py` prints `manifest: 12 entries, all commands known`; the
+Windows dead-code check on a scratch copy is clean. No test in `src/stt/fetch.rs`
+failed.
+
+S4 is closed. Next is S5 Verify.
