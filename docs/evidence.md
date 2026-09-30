@@ -1609,3 +1609,49 @@ worktree's own `.leakwords` has the same `shasum` before and after.
   skips that line without a word (found by the code review of this change). It is on
   the present-file path, which this change leaves as it was, and is not covered here.
 - `git commit --no-verify`, which skips the whole hook, as before.
+
+## The README's install instructions, checked against the published release, for issue #67
+
+Verified on macOS (Darwin 25.6.0, arm64) on 2026-09-30, against the published release
+`v0.1.0-beta.4`. This covers part of the README's Install section. It does not cover
+`herdr plugin install` itself, and the next paragraph says why.
+
+**What was not run.** `herdr plugin install aliaksandr-haurylau-godel/herdr-voice --ref
+v0.1.0-beta.4` was not run. This machine has no container runtime (`docker`, `podman`,
+`colima` and `orb` are not installed), and the herdr on this machine is in daily use, so
+installing into it was not done. The step that remains is the one
+`scripts/install-check.sh` was written for, in a glibc container with no Rust
+toolchain.
+
+**What was run.** A shallow clone of the tag, as herdr makes one, then the manifest's own
+build entry for macOS with no Rust toolchain on `PATH`:
+
+| Command | Result |
+|---|---|
+| `git clone --depth 1 --branch v0.1.0-beta.4 https://github.com/aliaksandr-haurylau-godel/herdr-voice.git checkout` | a shallow clone, as herdr makes one |
+| `git describe --tags` | `v0.1.0-beta.4` |
+| `sed -n 's/^version = "\([^"]*\)".*/\1/p' herdr-plugin.toml \| head -1` | `0.1.0-beta.4` |
+| `env PATH=/usr/bin:/bin sh -c 'command -v cargo rustc rustup'` | prints nothing; no toolchain is found on that `PATH` |
+| `env PATH=/usr/bin:/bin sh scripts/install.sh` | exit 0; prints `herdr-voice: installed target/release/herdr-voice from v0.1.0-beta.4, verified against its published digest` |
+| `cat target/release/.herdr-voice-install` | `fetched herdr-voice-v0.1.0-beta.4-aarch64-apple-darwin.tar.gz from v0.1.0-beta.4, verified sha256 1b4331c433b6d55af44aefc7b3e18323dfc78266b9460215bc4b415b23f19b0b` |
+| `ls -l target/release/` and `file target/release/herdr-voice` | `herdr-voice`, 8 016 800 bytes, mode `-rwxr-xr-x`; `Mach-O 64-bit executable arm64` |
+| `./target/release/herdr-voice --help` | exit 0; lists `daemon`, `doctor`, `cancel`, `dictate`, `ptt` |
+| `gh release view v0.1.0-beta.4 --json body -q .body \| grep -n "herdr plugin install"` and `grep -n "herdr plugin install" README.md` | the same line, `herdr plugin install aliaksandr-haurylau-godel/herdr-voice --ref v0.1.0-beta.4`, in both |
+| `curl -s -o /dev/null -w "%{http_code}" https://github.com/aliaksandr-haurylau-godel/herdr-voice/releases` | `200` |
+
+The `PATH` given to the install kept `/usr/bin` and `/bin`, so this shows that no
+toolchain was found there, not that the machine was a clean one; that a binary was
+fetched rather than built rests on the marker file in the table.
+
+So on macOS arm64 the fetch, the digest check and the unpack work against the real
+release, and the install line in the README is the one in that release's notes.
+
+**What this does not establish.**
+
+- `herdr plugin install` end to end: that herdr runs the build entry, registers the
+  plugin and enables it, from a machine that has never had it.
+- An install without `--ref`.
+- Linux, Windows and macOS on x86_64. Their archives exist in the release; none was
+  fetched here.
+- The window in which GitHub answers 404 after a release is published, and so whether
+  five attempts three seconds apart is enough. Nothing was published in this run.
