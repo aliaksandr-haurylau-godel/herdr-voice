@@ -29,6 +29,7 @@ mod ptt;
 mod record;
 mod rewrite;
 mod setup;
+mod stderr;
 mod stt;
 mod transport;
 

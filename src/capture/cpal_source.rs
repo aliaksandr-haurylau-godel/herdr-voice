@@ -41,7 +41,9 @@ impl Source for CpalSource {
                 .ok_or_else(|| "this machine has no default input device".to_string())?,
             Choice::Named { name, ambiguous } => {
                 if ambiguous {
-                    eprintln!("more than one input is called {name:?}; taking the first");
+                    crate::stderr::line(&format!(
+                        "more than one input is called {name:?}; taking the first"
+                    ));
                 }
                 devices
                     .into_iter()
