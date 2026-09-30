@@ -4702,4 +4702,32 @@ mod tests {
         assert!(std::path::Path::new(path).exists(), "kept at {path:?}");
         std::fs::remove_file(path).ok();
     }
+
+    /// The same failure as above through the real command engine and a real
+    /// process, so the standard error is read, trimmed and cut the way a
+    /// transcriber's would be.
+    #[cfg(unix)]
+    #[test]
+    fn ac4_a_real_transcriber_that_writes_two_lines_to_standard_error_shows_both() {
+        let mut runtime = fake_runtime("unused");
+        runtime.recognition = Ok(Box::new(crate::stt::command::CommandEngine::new(
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "printf 'model not found\\nrun whisper-cli --help\\n' >&2; exit 1".into(),
+            ],
+            None,
+            "en".into(),
+        )));
+        let (_, second) = two_presses_over_a_socket("multiline-ac4-real", runtime);
+        assert_eq!(second.code, 1, "{second:?}");
+        let message = second.message.expect("a failure says why");
+        assert!(
+            message.contains("model not found\nrun whisper-cli --help"),
+            "got {message:?}"
+        );
+        let path = kept_path(&message);
+        assert!(std::path::Path::new(path).exists(), "kept at {path:?}");
+        std::fs::remove_file(path).ok();
+    }
 }

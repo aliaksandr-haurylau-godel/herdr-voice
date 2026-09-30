@@ -85,7 +85,11 @@ pub fn outcome(result: Result<Reply, ClientError>) -> Outcome {
         },
         Err(ClientError::Protocol(why)) => Outcome {
             code: 1,
-            message: Some(format!("the daemon spoke something unexpected: {why}")),
+            message: Some(format!(
+                "the daemon spoke something unexpected: {why}; \
+                 check `herdr plugin log list --plugin herdr-voice`, and restart the daemon \
+                 if the log shows it stopped"
+            )),
         },
     }
 }
@@ -162,6 +166,23 @@ mod tests {
         let outcome = outcome(Ok(Reply::Error("no pane".into())));
         assert_eq!(outcome.code, 1);
         assert_eq!(outcome.message.as_deref(), Some("no pane"));
+    }
+
+    #[test]
+    fn a_reply_the_client_cannot_read_says_where_to_look() {
+        let outcome = outcome(Err(ClientError::Protocol(
+            "body of 5 bytes, header promised 10".into(),
+        )));
+        assert_eq!(outcome.code, 1);
+        let message = outcome.message.expect("a message");
+        assert!(
+            message.contains("header promised 10"),
+            "keeps the cause: {message:?}"
+        );
+        assert!(
+            message.contains("herdr plugin log list --plugin herdr-voice"),
+            "names where to look: {message:?}"
+        );
     }
 
     #[test]
