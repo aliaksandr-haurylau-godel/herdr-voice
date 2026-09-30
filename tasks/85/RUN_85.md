@@ -184,3 +184,69 @@ gate:
 
 ### S4 Implement
 - started: 2026-09-30
+
+Baseline on `main` at `13733c5`: `cargo test` 571 passed, 0 failed, 1 ignored.
+After the change: 616 unit tests and 4 + 2 integration tests passed, 0 failed;
+`cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` and
+`python3 scripts/check_manifest.py` clean; the Windows dead-code check, run on a
+scratch copy of the tree, clean. No intermittent test (#62, #66) failed in any run.
+
+Code was written in the plan's task order with the tests first and watched to
+fail. Tasks 2 and 3 were written as one red step, tasks 4 and 5 each on their own.
+
+### S4 review of the diff (fresh subagent, did not write the code)
+
+Reported, and what was done:
+
+1. An unlisted value spanning lines (`delivery = """a<newline>b"""`, an array
+   or a table) produced a detail spanning lines. Reproduced by a test that failed;
+   fixed: a string is shown escaped, any other value cut to its first line.
+2. Wording: the `off` and absent-key lines stated an outcome ("will not appear")
+   that the probes contradict (with a focused client herdr answers `shown` for
+   `off`); now "are not expected to appear". The `ok` line now says "is configured
+   to draw". The unknown-value row says "may not appear" (kept, more careful than
+   the design table) and the absent-file row says "no file at" (as in the plan).
+3. A malformed parent key (`ui = 3`, `toast = "x"`) reads as an absent key. Kept:
+   the plan specifies it and a test pins it.
+4. The path resolver repeats `src/setup.rs::config_path_from` for non-Windows. Kept,
+   as the design decides, because `setup` has no Windows branch.
+5. `scratch_dir` leaves its directory in the temporary directory. Kept, the same
+   pattern as the tests in `src/setup.rs`.
+
+### S4 mutation test (fresh subagent, own worktree of `b41e5f9`)
+
+113 mutations ran: 83 killed, 30 survived. The survivors were: a column width
+(1); strings of `notifications_finding` and `warning` that no test asserted
+(about 15); `herdr_config_location`, which no test called (6); two branches of
+`read_herdr_config` (2); the wiring in `run()`, which no test covered (6); one
+equivalent mutation (a no-op line); and `cfg!(windows)` replaced by `false`.
+
+Killed by new tests: `herdr_config_location` was split into
+`herdr_config_location_from(lookup, windows)` and tested with a lookup;
+`tests/doctor_process.rs` runs the built binary and asserts the order of the eight
+lines, the state for each herdr value, and `[ui] toasts = false` from the plugin's
+configuration; and unit tests assert each sentence the survivors changed. Seven of
+the survivors were re-applied one by one to the final code (`!toasts`, the order,
+the file read replaced, the `nowhere` sentence, `one_line` dropped from a read
+failure, an environment name, the column width) and each was killed.
+
+Not killed, and why: the equivalent mutation changes no behaviour; `cfg!(windows)`
+replaced by `false` cannot be told apart from the original on macOS, where it is
+already false, and needs a Windows run.
+
+The mutation worktree registered in the shared repository (`git worktree add`, at a
+scratch path outside this checkout) was removed by `git worktree remove` when the
+run ended; `git worktree list` no longer shows it and its build directory is gone.
+
+### S5 Verify
+- artifact: section "Where herdr sends notifications, and what `doctor` says about
+  it, for issue #85" in `docs/evidence.md`
+- verdict: recorded. `doctor` ran on this machine (macOS, herdr 0.9.1) against the
+  owner's configuration read only (`delivery = "herdr"`, line `ok`, exit 0) and
+  against scratch files holding `terminal`, `system`, `off`, `herdr`, an empty file
+  and no file. The probes behind the design were re-run cleanly on an isolated
+  server: five results, in the same section.
+- not verified: a toast actually appearing under any value; Windows; the running
+  server's own setting (`doctor` reads the file).
+- the isolated server was stopped with `kill` on its own process; the owner's
+  server (started earlier, other socket) was checked afterwards and was running.

@@ -492,7 +492,12 @@ fn read_delivery(text: &str) -> Configured {
         Some("herdr") => Configured::Value(Delivery::Herdr),
         Some("terminal") => Configured::Value(Delivery::Terminal),
         Some("system") => Configured::Value(Delivery::System),
-        _ => Configured::Other(value.to_string()),
+        // A string is shown escaped, so a multi-line one stays on one line; any
+        // other TOML value is cut to its first line.
+        _ => Configured::Other(match value.as_str() {
+            Some(text) => format!("{text:?}"),
+            None => one_line(&value.to_string()),
+        }),
     }
 }
 
@@ -551,7 +556,7 @@ fn notifications_finding(
         );
     };
     let path = path.display();
-    let nowhere = "this plugin's failure messages will not appear anywhere in herdr";
+    let nowhere = "this plugin's failure messages are not expected to appear anywhere in herdr";
     let text = match file {
         Ok(text) => text,
         Err(ReadFailure::Absent) => {
@@ -584,7 +589,7 @@ fn notifications_finding(
         ),
         Configured::Value(Delivery::Herdr) => finding(
             State::Ok,
-            format!("set to \"herdr\" in {path}: herdr draws the toast itself"),
+            format!("set to \"herdr\" in {path}: herdr is configured to draw the toast itself"),
         ),
         Configured::Value(Delivery::Terminal) => warning(&finding, "terminal", &path, advice),
         Configured::Value(Delivery::System) => warning(&finding, "system", &path, advice),
@@ -624,12 +629,18 @@ fn warning(
 }
 
 fn herdr_config_location() -> Location {
+    herdr_config_location_from(|key| std::env::var(key).ok(), cfg!(windows))
+}
+
+/// Takes the lookup rather than reading the environment, so the tests do not
+/// mutate an environment the parallel suite shares.
+fn herdr_config_location_from(get: impl Fn(&str) -> Option<String>, windows: bool) -> Location {
     herdr_config_path_from(
-        std::env::var("HERDR_CONFIG_PATH").ok(),
-        std::env::var("XDG_CONFIG_HOME").ok(),
-        std::env::var("HOME").ok(),
-        std::env::var("APPDATA").ok(),
-        cfg!(windows),
+        get("HERDR_CONFIG_PATH"),
+        get("XDG_CONFIG_HOME"),
+        get("HOME"),
+        get("APPDATA"),
+        windows,
     )
 }
 
@@ -1579,5 +1590,191 @@ mod tests {
         let dir = scratch_dir("directory");
         let result = read_herdr_config(&Location::Path(dir));
         assert!(matches!(result, Err(ReadFailure::Other(_))));
+    }
+
+    #[test]
+    fn an_unlisted_value_that_spans_lines_still_gives_a_one_line_detail() {
+        for line in [
+            "delivery = \"\"\"a\nb\"\"\"",
+            "delivery = [1,\n 2]",
+            "delivery = { a = 1 }",
+        ] {
+            let f = with_file(&under_toast(line));
+            assert_eq!(f.state, State::Missing, "{line}");
+            assert!(f.detail.contains("does not list"), "{}", f.detail);
+            assert!(!f.detail.contains('\n'), "{:?}", f.detail);
+        }
+    }
+
+    fn map(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn the_location_is_read_from_the_variables_herdr_documents() {
+        assert_eq!(
+            herdr_config_location_from(map(&[("HERDR_CONFIG_PATH", "/a")]), false),
+            Location::Path(PathBuf::from("/a"))
+        );
+        assert_eq!(
+            herdr_config_location_from(map(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")]), false),
+            Location::Path(PathBuf::from("/x/herdr/config.toml"))
+        );
+        assert_eq!(
+            herdr_config_location_from(map(&[("HOME", "/h")]), false),
+            Location::Path(PathBuf::from("/h/.config/herdr/config.toml"))
+        );
+        assert_eq!(
+            herdr_config_location_from(map(&[("APPDATA", "/ap"), ("HOME", "/h")]), true),
+            Location::Path(PathBuf::from("/ap/herdr/config.toml"))
+        );
+        assert_eq!(
+            herdr_config_location_from(
+                map(&[("LOCALAPPDATA", "/ap"), ("USERPROFILE", "/h")]),
+                true
+            ),
+            Location::Unknown
+        );
+    }
+
+    #[test]
+    fn a_short_name_is_padded_to_the_same_column() {
+        let text = render(&[Finding {
+            name: "herdr",
+            state: State::Ok,
+            detail: "x".into(),
+        }]);
+        assert_eq!(text, "herdr         ok       x\n");
+    }
+
+    #[test]
+    fn every_advice_names_the_plugin_log_in_a_sentence() {
+        let f = with_file(&under_toast("delivery = \"off\""));
+        assert!(
+            f.detail
+                .contains("they are also written to the plugin log: `herdr plugin log list"),
+            "{}",
+            f.detail
+        );
+    }
+
+    #[test]
+    fn the_unused_line_says_why_herdr_s_setting_does_not_matter() {
+        let f = notifications_finding(false, &file_at(), Ok(String::new()));
+        assert!(f.detail.contains("does not matter"), "{}", f.detail);
+    }
+
+    #[test]
+    fn an_unknown_location_names_the_variable_to_set_and_where_it_looked() {
+        let f = notifications_finding(true, &Location::Unknown, Ok(String::new()));
+        for needle in [
+            "cannot tell where herdr's configuration is",
+            "APPDATA on Windows",
+            "set HERDR_CONFIG_PATH to the file",
+        ] {
+            assert!(f.detail.contains(needle), "{needle:?} in {}", f.detail);
+        }
+    }
+
+    #[test]
+    fn a_line_that_says_nothing_will_appear_says_it_is_only_expected() {
+        let cases = [
+            with_file(&under_toast("delivery = \"off\"")),
+            with_file(""),
+            notifications_finding(true, &file_at(), Err(ReadFailure::Absent)),
+        ];
+        for f in cases {
+            assert!(
+                f.detail
+                    .contains("failure messages are not expected to appear anywhere in herdr"),
+                "{}",
+                f.detail
+            );
+        }
+    }
+
+    #[test]
+    fn the_lines_that_cannot_tell_say_what_would_make_them_tell() {
+        let unreadable =
+            notifications_finding(true, &file_at(), Err(ReadFailure::Other("denied".into())));
+        assert!(
+            unreadable.detail.contains("once it can be read"),
+            "{}",
+            unreadable.detail
+        );
+        assert!(
+            unreadable
+                .detail
+                .contains("so it is not known where notifications go"),
+            "{}",
+            unreadable.detail
+        );
+        let broken = with_file(&under_toast("delivery = "));
+        assert!(
+            broken.detail.contains("once it parses"),
+            "{}",
+            broken.detail
+        );
+    }
+
+    #[test]
+    fn the_ok_line_says_what_herdr_is_configured_to_do() {
+        let f = with_file(&under_toast("delivery = \"herdr\""));
+        assert!(
+            f.detail
+                .contains("herdr is configured to draw the toast itself"),
+            "{}",
+            f.detail
+        );
+    }
+
+    #[test]
+    fn an_unlisted_value_lists_the_four_and_says_messages_may_not_appear() {
+        let f = with_file(&under_toast("delivery = \"Herdr\""));
+        assert!(
+            f.detail.contains("(off, herdr, terminal, system)"),
+            "{}",
+            f.detail
+        );
+        assert!(f.detail.contains("may not appear"), "{}", f.detail);
+    }
+
+    #[test]
+    fn a_warning_says_the_messages_may_not_reach_the_person() {
+        let f = with_file(&under_toast("delivery = \"terminal\""));
+        assert!(f.detail.contains("may not reach you"), "{}", f.detail);
+    }
+
+    #[test]
+    fn a_multi_line_read_failure_reason_stays_on_one_line() {
+        let f = notifications_finding(
+            true,
+            &file_at(),
+            Err(ReadFailure::Other("first\nsecond".into())),
+        );
+        assert!(f.detail.contains("first"), "{}", f.detail);
+        assert!(!f.detail.contains("second"), "{}", f.detail);
+        assert!(!f.detail.contains('\n'), "{:?}", f.detail);
+    }
+
+    #[test]
+    fn an_unknown_location_reads_as_an_absent_file() {
+        assert!(matches!(
+            read_herdr_config(&Location::Unknown),
+            Err(ReadFailure::Absent)
+        ));
+    }
+
+    #[test]
+    fn a_directory_in_place_of_the_file_carries_the_reason() {
+        let dir = scratch_dir("directory-reason");
+        match read_herdr_config(&Location::Path(dir)) {
+            Err(ReadFailure::Other(reason)) => assert!(!reason.is_empty()),
+            _ => panic!("reading a directory must fail with a reason"),
+        }
     }
 }
