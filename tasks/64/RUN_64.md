@@ -188,3 +188,9 @@ Follow-up, not done here and not part of this issue: the last line of a
 orchestrator confirmed that the owner's file ends in a newline, so nothing is being
 skipped today, and will file the issue after the pull request is open. The pull
 request names it.
+
+CI on pull request #95: the first run of `ubuntu-latest` failed in
+`indicator::tests::the_real_painter_sweeps_the_rest_of_the_list_around_a_label_that_is_not_a_string`,
+the Linux indicator test tracked as issue #66 and unrelated to this diff. The failed
+job was rerun once and passed; every other job passed on the first run, including
+both `shell scripts` jobs that run `scripts/test-pre-commit.sh` on Ubuntu and macOS.
