@@ -165,6 +165,10 @@ pub fn bias_settings(
 
 pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Reply, Control) {
     match request.command.as_str() {
+        // Answers without reading a context or touching a take. `doctor` sends it
+        // to learn that a request is served, and a probe must be safe to send
+        // while somebody is speaking.
+        "ping" => (Reply::Ok("pong".to_string()), Control::Continue),
         "stop" => (Reply::Ok("stopping".to_string()), Control::Stop),
         "cancel" => (
             Reply::Ok("nothing to cancel".to_string()),
@@ -1094,7 +1098,7 @@ pub trait Journal: Send + Sync {
 pub struct StderrJournal;
 impl Journal for StderrJournal {
     fn write(&self, line: &str) {
-        eprintln!("{line}");
+        crate::stderr::line(line);
     }
 }
 
@@ -1293,7 +1297,7 @@ pub fn start() -> Result<Outcome, TransportError> {
     }
 
     let listener = transport::listen(&address)?;
-    eprintln!("listening at {}", address.display());
+    crate::stderr::line(&format!("listening at {}", address.display()));
 
     // The configuration is read once, here, and handed to the recorder's thread:
     // re-reading it per take would put file system access on the path that runs
@@ -1313,15 +1317,15 @@ pub fn start() -> Result<Outcome, TransportError> {
     // out of `resolve_with`, which the daemon and `doctor` share.
     let state = stt::locate_configured_model(&loaded.config.stt, &models);
     if let Ok(stt::Ready::Candle { device, .. }) = stt::check_with(&loaded.config.stt, &state) {
-        eprintln!(
+        crate::stderr::line(&format!(
             "recognition: the built-in engine, {}",
             crate::stt::candle::device::describe(&device)
-        );
+        ));
     }
     // Not fatal: the daemon still answers `cancel`, and `doctor` reports the same
     // thing this does. The reason is kept and given to whoever finishes a take.
     let recognition: Recognition = stt::resolve_with(&loaded.config.stt, state).map_err(|e| {
-        eprintln!("recognition unavailable: {e}");
+        crate::stderr::line(&format!("recognition unavailable: {e}"));
         e.to_string()
     });
 
@@ -1336,7 +1340,7 @@ pub fn start() -> Result<Outcome, TransportError> {
     // refusal's effect on the take").
     let (bias_source, transcript_root) = bias_settings(&loaded.config.context, &vars);
     if let Err(why) = &bias_source {
-        eprintln!("{why}");
+        crate::stderr::line(why);
     }
 
     let rewrite = crate::rewrite::resolve(&loaded.config.rewrite);
@@ -1427,7 +1431,7 @@ fn serve(
         let connection = match listener.accept() {
             Ok(connection) => connection,
             Err(e) => {
-                eprintln!("accept failed: {e}");
+                runtime.journal.write(&format!("accept failed: {e}"));
                 continue;
             }
         };
@@ -1440,7 +1444,7 @@ fn serve(
         let runtime = Arc::clone(&runtime);
         thread::spawn(move || {
             if let Err(e) = serve_one(connection, &stop, &address, &recorder, &runtime) {
-                eprintln!("connection failed: {e}");
+                runtime.journal.write(&format!("connection failed: {e}"));
             }
         });
     }
@@ -1449,14 +1453,18 @@ fn serve(
     // be woken before it can see the stop flag and end.
     runtime.clock.wake();
     if let Err(e) = watcher.join() {
-        eprintln!("the watcher thread ended badly: {e:?}");
+        runtime
+            .journal
+            .write(&format!("the watcher thread ended badly: {e:?}"));
     }
     // Woken and joined for the same reason, and after the watcher: a thread
     // that could still draw once the daemon had decided to stop would leave a
     // decoration behind it.
     drawing_clock.wake();
     if let Err(e) = drawer.join() {
-        eprintln!("the drawing thread ended badly: {e:?}");
+        runtime
+            .journal
+            .write(&format!("the drawing thread ended badly: {e:?}"));
     }
 }
 
@@ -1475,9 +1483,13 @@ fn serve_one(
         Err(crate::proto::ProtoError::Empty) => return Ok(()),
         other => other?,
     };
-    eprintln!("{}", request_line(&request));
-    if let Some(note) = context_note(&request) {
-        eprintln!("{note}");
+    runtime.journal.write(&request_line(&request));
+    // A `ping` carries no context by design, so the note would read as a fault
+    // on every run of `doctor`.
+    if request.command != "ping" {
+        if let Some(note) = context_note(&request) {
+            runtime.journal.write(&note);
+        }
     }
     let (reply, control) = answer(&request, recorder, runtime);
     reply.write_to(reader.get_mut())?;
@@ -3085,6 +3097,31 @@ mod tests {
     }
 
     #[test]
+    fn ping_answers_pong_and_changes_nothing() {
+        let runtime = fake_runtime("x");
+        let (reply, control) = answer(&request("ping", b""), &silent_recorder(), &runtime);
+        assert_eq!(reply, Reply::Ok("pong".to_string()));
+        assert!(matches!(control, Control::Continue));
+        assert!(matches!(&*hold_of(&runtime), crate::ptt::HoldState::Idle));
+        assert!(!needs_target_pane("ping"));
+    }
+
+    #[test]
+    fn ping_is_answered_while_a_hold_is_open_and_leaves_it_alone() {
+        let (runtime, _clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("ping-hold");
+        let (started, _) = answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert_eq!(started, Reply::Ok("holding for w1:p1".to_string()));
+        let (reply, control) = answer(&request("ping", b""), &recorder, &runtime);
+        assert_eq!(reply, Reply::Ok("pong".to_string()));
+        assert!(matches!(control, Control::Continue));
+        let held = runtime.hold.lock().unwrap();
+        let hold = held.hold().expect("the hold must still be open");
+        assert_eq!(hold.target, "w1:p1");
+        assert_eq!(hold.pokes, 1, "a ping is not a repeat");
+    }
+
+    #[test]
     fn cancel_works_with_no_context_at_all() {
         let (reply, control) = answer(
             &request("cancel", b""),
@@ -3264,6 +3301,149 @@ mod tests {
             Ok(()),
             "a probe must not be an error"
         );
+    }
+
+    /// Serves one `command` request on a real socket with a recording journal,
+    /// and returns the reply and every line the request path journalled.
+    fn serve_once_journalled(tag: &str, command: &str) -> (Request, Reply, Vec<String>) {
+        let address = crate::transport::tests_support::probe_address(tag);
+        let listener = crate::transport::listen(&address).expect("listen");
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let served = {
+            let address = address.clone();
+            let journal = std::sync::Arc::clone(&journal);
+            std::thread::spawn(move || {
+                let connection = listener.accept().expect("accept");
+                let stop = AtomicBool::new(false);
+                let mut runtime = fake_runtime("x");
+                runtime.journal = Box::new(TestJournal(journal));
+                super::serve_one(connection, &stop, &address, &silent_recorder(), &runtime)
+                    .map_err(|e| e.to_string())
+            })
+        };
+        let mut client =
+            std::io::BufReader::new(crate::transport::connect(&address).expect("connect"));
+        let sent = Request {
+            command: command.into(),
+            entrypoint: Some(command.into()),
+            context: vec![],
+        };
+        sent.write_to(client.get_mut()).expect("write");
+        let reply = Reply::read_from(&mut client).expect("reply");
+        assert_eq!(served.join().expect("the handler must finish"), Ok(()));
+        let lines = journal.0.lock().unwrap().clone();
+        (sent, reply, lines)
+    }
+
+    /// Every line the request path writes goes to the runtime's journal, so a
+    /// dead standard error cannot reach the reply (issue #93). Before the change
+    /// the request line went to the process's standard error and this is empty.
+    #[test]
+    fn a_served_request_is_journalled_and_answered() {
+        let (sent, reply, lines) = serve_once_journalled("journalled", "cancel");
+        assert_eq!(reply, Reply::Ok("nothing to cancel".to_string()));
+        assert!(
+            lines.contains(&request_line(&sent)),
+            "the request line must reach the journal, got {lines:?}"
+        );
+        // Only a `ping` is exempt from the note about a missing context.
+        let note = context_note(&sent).expect("a cancel with no context has a note");
+        assert!(lines.contains(&note), "the note is missing from {lines:?}");
+    }
+
+    /// `doctor` sends a `ping` with no context every time it runs. The note about
+    /// a missing context is for a request that needed one, and a probe must not
+    /// fill the log with lines that read as a fault.
+    #[test]
+    fn a_ping_journals_its_request_and_no_note_about_a_missing_context() {
+        let (sent, reply, lines) = serve_once_journalled("journalled-ping", "ping");
+        assert_eq!(reply, Reply::Ok("pong".to_string()));
+        assert_eq!(lines, vec![request_line(&sent)], "got {lines:?}");
+    }
+
+    /// The note about a missing context is written for a request that needed one.
+    #[test]
+    fn a_request_that_needs_a_context_and_has_none_journals_the_note() {
+        let (sent, _reply, lines) = serve_once_journalled("journalled-note", "ptt");
+        let note = context_note(&sent).expect("a ptt with no context has a note");
+        assert_eq!(lines, vec![request_line(&sent), note], "got {lines:?}");
+    }
+
+    /// A frame the daemon cannot read is a failed connection and says so, and the
+    /// daemon goes on serving.
+    #[test]
+    fn a_frame_that_cannot_be_read_is_journalled_as_a_failed_connection() {
+        use std::io::Write;
+        let address = crate::transport::tests_support::probe_address("bad-frame");
+        let listener = crate::transport::listen(&address).expect("listen");
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        let mut runtime = fake_runtime("x");
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let served = {
+            let address = address.clone();
+            std::thread::spawn(move || {
+                super::serve(
+                    listener,
+                    address,
+                    Arc::new(silent_recorder()),
+                    Arc::new(runtime),
+                )
+            })
+        };
+        let mut garbage = crate::transport::connect(&address).expect("connect");
+        garbage.write_all(b"not a frame\n").expect("write");
+        drop(garbage);
+        let deadline = std::time::Instant::now() + WITHIN;
+        while !journal
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("connection failed"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no connection failure was journalled, got {:?}",
+                journal.0.lock().unwrap()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut client =
+            std::io::BufReader::new(crate::transport::connect(&address).expect("connect"));
+        Request {
+            command: "stop".into(),
+            entrypoint: None,
+            context: vec![],
+        }
+        .write_to(client.get_mut())
+        .expect("write");
+        assert!(matches!(
+            Reply::read_from(&mut client).expect("reply"),
+            Reply::Ok(_)
+        ));
+        served.join().expect("the loop must end");
+    }
+
+    /// The last thing that goes wrong in a dead pipe is the next `eprintln!`
+    /// somebody adds. The production half of each file, up to its first
+    /// `#[cfg(test)]`, must not contain one.
+    #[test]
+    fn no_print_macro_remains_on_a_serving_path() {
+        for (name, source) in [
+            ("src/daemon.rs", include_str!("daemon.rs")),
+            (
+                "src/capture/cpal_source.rs",
+                include_str!("capture/cpal_source.rs"),
+            ),
+        ] {
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            for mark in ["eprintln!", "println!", "eprint!", "print!("] {
+                assert!(
+                    !production.contains(mark),
+                    "{name} writes with {mark} outside its tests; use crate::stderr::line"
+                );
+            }
+        }
     }
 
     #[test]
