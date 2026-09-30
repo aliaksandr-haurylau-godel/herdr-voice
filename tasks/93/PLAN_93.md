@@ -16,7 +16,7 @@
 - No `eprintln!` or `println!` on a path reached from the moment the socket is bound (`AC_93.md`, requirement 2).
 - `src/doctor.rs`: change `daemon_finding` and its tests only; issue #85 edits the same file.
 - `ping` is not added to `herdr-plugin.toml`.
-- Before each commit: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `python3 scripts/check_manifest.py`; grep every written file for `<new_string>`, `</new_string>`, `<old_string>`, `</old_string>` and line-start conflict markers.
+- Before each commit: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `python3 scripts/check_manifest.py`; grep every written file for stray edit-tool tags (the four `new_string` / `old_string` opening and closing tags) and line-start conflict markers.
 - Commit messages end with `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 
 ## Review Focus
