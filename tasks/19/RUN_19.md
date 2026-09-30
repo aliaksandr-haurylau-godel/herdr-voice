@@ -177,6 +177,35 @@ target in `src/client.rs` of the diff at `e7554f5`; the message added afterwards
 `c12339a` is covered by `a_reply_the_client_cannot_read_says_where_to_look` and was
 not mutated by a fresh tester.
 
+### S5 Verify
+- artifact: a section in `docs/evidence.md`, "A reply with a newline in it, by hand on macOS, for issue #19"
+- produced: 2026-09-30
+
+Run on macOS with a daemon started from this worktree's build, with its own
+configuration, state directory and socket, and a stand-in for `herdr`; the daemon that
+was already running on the machine was not touched. The two replies that carry a newline
+were run against a build of `main` and against the branch: on `main` the client printed
+the first line only and exited 1 (the example, the second line of standard error and the
+path of the kept recording were lost); on the branch the whole text arrived. A take with a
+multi-line transcript delivered its eight lines to the stand-in and left the target and
+the level in the client's output.
+
+Negative results recorded there, not hidden: the first build of `main` was not `main`
+(found by searching both binaries for strings that exist only in the new code, and
+discarded); with the documented command `whisper-cli ... -np -nt` the output of a
+38.7 second clip is one line, so the trigger the issue names was not reproduced with that
+command; the success reply never carried the transcript, so AC-2 is a guard and not a
+proof; herdr's own display of a multi-line message and Windows were not run.
+
+```yaml
+verdict:
+  stage: S5
+  artifact: docs/evidence.md
+  verdict: READY
+  date: 2026-09-30
+  limits: the trigger named in the issue does not occur with the documented whisper-cli command; herdr's display and Windows were not run
+```
+
 ## Notes
 
 <!-- Anything a later stage needs and the artifacts do not carry. -->

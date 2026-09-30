@@ -1469,3 +1469,107 @@ or `true`; that configuration was not run on the branch.
   being refused. Whether they were a consequence of the refusal is not established;
   a take on the fixed build is the place to look.
 - The Windows CI job. It compiles this change only when the pull request runs it.
+
+## A reply with a newline in it, by hand on macOS, for issue #19
+
+Run on 2026-09-30 on macOS 26.6.2 (Darwin 25.6.0, arm64), on `fix/19-multiline-reply`
+at `e0526cc`, with a debug build of that tree. The comparison binary is a debug
+build of `main` at `13733c5`, made from `git archive` into a scratch directory. The
+microphone is the machine's default input, and speech was played through the loudspeakers
+with `say`. `whisper-cli` is the Homebrew one (ggml 0.24.0) with the `ggml-base.bin`
+model.
+
+**How it was run.** Each take had a daemon of its own, started from the binary under
+test with its own configuration directory and its own state directory, so its socket was
+its own. The state directory was a short path because the socket path of a Unix socket
+is limited to 104 bytes and a scratch directory under the temporary folder exceeds it.
+`HERDR_BIN_PATH` named a stand-in script that answers `--version` with `herdr 0.8.0`,
+appends every other call to a file and exits 0, so no herdr was contacted. A take is two
+runs of `herdr-voice dictate` with `HERDR_PLUGIN_CONTEXT_JSON` naming the pane `w1:p2`:
+the first starts it, the second ends it and is the one whose output is read. The daemon
+that was already running on this machine, owned by somebody else, was not touched and was
+still running at the end.
+
+**The instrument, before the finding.** The first build of `main` was not `main`: a copy
+of the `target` directory made `cargo` judge the package up to date, and the binary
+contained the text of the new code. It was found by searching both binaries for two
+strings that exist only after this change (`the reply text is not valid UTF-8` and `if the
+log shows it stopped`): present in both. After deleting the package's artifacts from the
+copy and building again, the `main` binary has neither string. Every result below for
+`main` is from the rebuilt binary; the results from the first one are discarded.
+
+**What `whisper-cli` hands over.** On a 38.7 second clip of two long sentences, with the
+flags the documentation gives (`-np -nt`), the output is a leading empty line followed by
+one line holding the whole text. Without `-nt` the same clip is five segments, each on its
+own line with a timestamp. So with the documented command, on this version, whisper does not
+hand the plugin several lines, and the trigger this issue names ("whisper segments its
+output on longer takes") was not reproduced. A transcriber that does write several lines
+is needed to reach the case; the take below uses `whisper-cli` without `-nt` and `sed`
+to drop the timestamps, which is a transcriber of exactly that kind.
+
+**A take whose transcript has several lines (branch).** Configuration: `[stt] engine =
+"command"` with `command = ["sh", "-c", "whisper-cli -m <model> -f \"$1\" -l auto -np
+2>/dev/null | sed 's/^\\[[^]]*\\] *//'", "sh", "{audio}"]`. About 39 seconds of speech.
+
+```
+recording for w1:p2            (first press, exit 0)
+delivered to w1:p2 [-34.1 dB]  (second press, exit 0)
+```
+
+The stand-in received `pane send-text w1:p2` followed by the transcript on **eight
+lines**, with its newlines. The microphone also picked up speech in the room, so some of
+those lines are not the spoken text; they are not reproduced here. This take shows that
+the target and the level reach the client when the transcript has several lines. It cannot
+show a truncation: the success reply is `delivered to {target} [{level} dB]` and does not
+carry the transcript, so it never could lose part of it.
+
+**The two replies that do carry a newline: `main` against the branch.** Both use a take of
+one spoken sentence.
+
+*`[stt] command = []`* — the message of `EngineError::NotConfigured`, which has a newline
+before its example.
+
+| | client standard error | exit |
+|---|---|---|
+| `main` | `[stt] engine is "command" but [stt] command is empty, so there is nothing to run. For example:` | 1 |
+| branch | the same line, then `  command = ["whisper-cli", "-m", "{model}", "-f", "{audio}", "-l", "{language}", "-np", "-nt"] — the take is kept at <state>/takes/<take>.wav` | 1 |
+
+*A transcriber that fails with two lines on standard error* —
+`command = ["sh", "-c", "printf 'model not found\\nrun whisper-cli --help\\n' >&2; exit 1"]`.
+
+| | client standard error | exit |
+|---|---|---|
+| `main` | `"sh" failed (exit 1): model not found` | 1 |
+| branch | `"sh" failed (exit 1): model not found` and, on the next line, `run whisper-cli --help — the take is kept at <state>/takes/<take>.wav` | 1 |
+
+On `main` the second line, the example and the path of the kept recording are lost, and the
+exit code is 1 so the loss looks like a complete message. On the branch the whole text
+arrives. For the transcriber that fails, the recording named in the branch's reply was present in
+the takes directory afterwards.
+
+**Silent takes, and what they were.** Two takes of the failing-transcriber scenario were
+discarded by the daemon as below the −60.0 dB floor, with its own message naming the floor
+and asking whether the microphone is the right one, muted or denied: one at −65.8 dB, made
+with the mistaken first build of `main`, and one at −73.3 dB with the rebuilt one. The next
+attempt measured high enough and is the one in the table. Why the two were quiet was not
+established; the loudspeaker output or the microphone changed between runs. They say nothing
+about the change.
+
+**Gates**, run fresh after the last commit of code: `cargo test` 588 passed, 0 failed,
+1 ignored (plus 2 in the integration binary); `cargo clippy --all-targets -- -D warnings`
+no warning; `cargo fmt --check` exit 0; `python3 scripts/check_manifest.py`: `manifest: 12
+entries, all commands known`; the Windows dead-code check (the `cfg` rewrite of `src/`
+followed by the same clippy) no warning, with `src/` restored afterwards.
+
+**What this does not establish.**
+
+- How herdr shows a multi-line standard output or standard error of a plugin command. No
+  herdr was used. The client prints the message with `println!` or `eprintln!`, whole.
+- Anything on Windows. The pipe transport was not run; the new tests use the same
+  transport helpers the existing ones do, and the dead-code check above compiles the
+  Windows shape on macOS only as far as it can.
+- A client built before this change reading a reply from a daemon built after it. It
+  cannot be made to work; it prints `malformed header: "ok+57"` and exits 1, as the design
+  states. It was not run.
+- That the trigger named in the issue occurs with the documented `whisper-cli` command: it
+  did not here (see above).
