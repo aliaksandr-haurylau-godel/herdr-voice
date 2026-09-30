@@ -1484,8 +1484,12 @@ fn serve_one(
         other => other?,
     };
     runtime.journal.write(&request_line(&request));
-    if let Some(note) = context_note(&request) {
-        runtime.journal.write(&note);
+    // A `ping` carries no context by design, so the note would read as a fault
+    // on every run of `doctor`.
+    if request.command != "ping" {
+        if let Some(note) = context_note(&request) {
+            runtime.journal.write(&note);
+        }
     }
     let (reply, control) = answer(&request, recorder, runtime);
     reply.write_to(reader.get_mut())?;
@@ -3299,12 +3303,10 @@ mod tests {
         );
     }
 
-    /// Every line the request path writes goes to the runtime's journal, so a
-    /// dead standard error cannot reach the reply (issue #93). Before the change
-    /// the request line went to the process's standard error and this is empty.
-    #[test]
-    fn a_served_request_is_journalled_and_answered() {
-        let address = crate::transport::tests_support::probe_address("journalled");
+    /// Serves one `command` request on a real socket with a recording journal,
+    /// and returns the reply and every line the request path journalled.
+    fn serve_once_journalled(tag: &str, command: &str) -> (Request, Reply, Vec<String>) {
+        let address = crate::transport::tests_support::probe_address(tag);
         let listener = crate::transport::listen(&address).expect("listen");
         let journal = std::sync::Arc::new(RecordingJournal::default());
         let served = {
@@ -3322,19 +3324,38 @@ mod tests {
         let mut client =
             std::io::BufReader::new(crate::transport::connect(&address).expect("connect"));
         let sent = Request {
-            command: "cancel".into(),
-            entrypoint: Some("cancel".into()),
+            command: command.into(),
+            entrypoint: Some(command.into()),
             context: vec![],
         };
         sent.write_to(client.get_mut()).expect("write");
         let reply = Reply::read_from(&mut client).expect("reply");
-        assert_eq!(reply, Reply::Ok("nothing to cancel".to_string()));
         assert_eq!(served.join().expect("the handler must finish"), Ok(()));
         let lines = journal.0.lock().unwrap().clone();
+        (sent, reply, lines)
+    }
+
+    /// Every line the request path writes goes to the runtime's journal, so a
+    /// dead standard error cannot reach the reply (issue #93). Before the change
+    /// the request line went to the process's standard error and this is empty.
+    #[test]
+    fn a_served_request_is_journalled_and_answered() {
+        let (sent, reply, lines) = serve_once_journalled("journalled", "cancel");
+        assert_eq!(reply, Reply::Ok("nothing to cancel".to_string()));
         assert!(
             lines.contains(&request_line(&sent)),
             "the request line must reach the journal, got {lines:?}"
         );
+    }
+
+    /// `doctor` sends a `ping` with no context every time it runs. The note about
+    /// a missing context is for a request that needed one, and a probe must not
+    /// fill the log with lines that read as a fault.
+    #[test]
+    fn a_ping_journals_its_request_and_no_note_about_a_missing_context() {
+        let (sent, reply, lines) = serve_once_journalled("journalled-ping", "ping");
+        assert_eq!(reply, Reply::Ok("pong".to_string()));
+        assert_eq!(lines, vec![request_line(&sent)], "got {lines:?}");
     }
 
     /// The last thing that goes wrong in a dead pipe is the next `eprintln!`
