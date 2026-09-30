@@ -94,3 +94,12 @@ Gates run fresh in this worktree before the commit: `cargo test` (571 passed, 0
 failed, 1 ignored, plus the integration test), `cargo clippy --all-targets -- -D
 warnings`, `cargo fmt --check` and `python3 scripts/check_manifest.py`, all green. The
 Windows dead-code check was not run: the diff changes no Rust file.
+
+CI on pull request #98: the first run of `ubuntu-latest` failed in
+`setup::tests::herdr_cli::check_config_points_herdr_at_the_file_it_is_judging`
+(`src/setup.rs:2210`: `the recorder always runs: NotFound { binary:
+"/tmp/herdr-voice-setup-recorder-check-ok-6695/record.sh", … }`). That test is not one
+of the two known intermittent failures (#62 and #66) and no issue names it; it failed
+on a script the test had written itself, in a diff that changes no Rust. The failed job
+was rerun once and passed, and every other job passed on the first run. Reported to the
+orchestrator as a candidate for an issue of its own.
