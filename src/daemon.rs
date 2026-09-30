@@ -4595,4 +4595,115 @@ mod tests {
             "a take that failed is still a take that ended: {activity:?}"
         );
     }
+
+    /// Two `dictate` presses through a real listener and the real client: the
+    /// first begins a take, the second ends it and is answered with what the
+    /// pipeline produced. The daemon side is `serve_one`, the function the
+    /// daemon's accept loop calls for every connection.
+    fn two_presses_over_a_socket(
+        tag: &str,
+        runtime: Runtime,
+    ) -> (crate::client::Outcome, crate::client::Outcome) {
+        let address = crate::transport::tests_support::probe_address(tag);
+        let listener = crate::transport::listen(&address).expect("listen");
+        let recorder = std::sync::Arc::new(tone_recorder(tag));
+        let runtime = std::sync::Arc::new(runtime);
+        let server = {
+            let address = address.clone();
+            std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let connection = listener.accept().expect("accept");
+                    let stop = AtomicBool::new(false);
+                    super::serve_one(connection, &stop, &address, &recorder, &runtime)
+                        .expect("serve one connection");
+                }
+            })
+        };
+        let context = br#"{"focused_pane_id":"w1:p2","focused_pane_agent":"claude"}"#.to_vec();
+        let first = crate::client::send_to(
+            &address,
+            "dictate",
+            Some("dictate".into()),
+            context.clone(),
+        );
+        let second = crate::client::send_to(&address, "dictate", Some("dictate".into()), context);
+        server.join().expect("the server thread");
+        (first, second)
+    }
+
+    /// The path a failure reply ends with: "... the take is kept at <path>".
+    fn kept_path(message: &str) -> &str {
+        message
+            .rsplit("the take is kept at ")
+            .next()
+            .expect("the reply names the kept take")
+    }
+
+    #[test]
+    fn ac2_a_two_line_transcript_leaves_the_target_and_the_level_in_the_client_output() {
+        let runtime = fake_runtime("First sentence of the take.\nSecond sentence of the take.");
+        let (first, second) = two_presses_over_a_socket("multiline-ac2", runtime);
+        assert_eq!(first.code, 0, "{first:?}");
+        assert_eq!(second.code, 0, "{second:?}");
+        let message = second.message.expect("a success names where the take went");
+        assert!(message.contains("delivered to w1:p2"), "got {message:?}");
+        assert!(message.contains(" dB]"), "got {message:?}");
+    }
+
+    #[test]
+    fn ac3_a_refusal_that_carries_an_example_delivers_the_example_and_the_kept_path() {
+        let mut runtime = fake_runtime("unused");
+        runtime.recognition = Err(crate::stt::EngineError::NotConfigured {
+            engine: "command",
+            key: "command",
+            example: "command = [\"whisper-cli\", \"-f\", \"{audio}\"]",
+        }
+        .to_string());
+        let (_, second) = two_presses_over_a_socket("multiline-ac3", runtime);
+        assert_eq!(second.code, 1, "{second:?}");
+        let message = second.message.expect("a failure says why");
+        assert!(
+            message.contains("For example:\n  command = [\"whisper-cli\""),
+            "got {message:?}"
+        );
+        let path = kept_path(&message);
+        assert!(std::path::Path::new(path).exists(), "kept at {path:?}");
+        std::fs::remove_file(path).ok();
+    }
+
+    /// An engine whose failure carries the transcriber's standard error, which
+    /// has two lines.
+    struct TwoLineFailure;
+
+    impl crate::stt::Engine for TwoLineFailure {
+        fn transcribe(
+            &self,
+            _audio: &std::path::Path,
+            _bias: &str,
+        ) -> Result<String, crate::stt::EngineError> {
+            Err(crate::stt::EngineError::Command(
+                crate::stt::command::CommandError::Failed {
+                    program: "whisper-cli".into(),
+                    code: "exit status: 1".into(),
+                    stderr: "model not found\nrun `whisper-cli --help`".into(),
+                },
+            ))
+        }
+    }
+
+    #[test]
+    fn ac4_a_transcriber_that_fails_on_two_lines_shows_both_and_the_kept_path() {
+        let mut runtime = fake_runtime("unused");
+        runtime.recognition = Ok(Box::new(TwoLineFailure));
+        let (_, second) = two_presses_over_a_socket("multiline-ac4", runtime);
+        assert_eq!(second.code, 1, "{second:?}");
+        let message = second.message.expect("a failure says why");
+        assert!(
+            message.contains("model not found\nrun `whisper-cli --help`"),
+            "got {message:?}"
+        );
+        let path = kept_path(&message);
+        assert!(std::path::Path::new(path).exists(), "kept at {path:?}");
+        std::fs::remove_file(path).ok();
+    }
 }
