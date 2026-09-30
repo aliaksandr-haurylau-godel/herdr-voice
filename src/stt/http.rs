@@ -6,11 +6,12 @@
 //! and the error says which of four causes failed (`src/http_failure.rs`;
 //! `tasks/16/DESIGN_16.md`, section 1).
 
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
 use super::{Engine, EngineError};
-use crate::http_failure::Cause;
+use crate::http_failure::{body_note, Cause};
 
 /// A bound turns a hang into a message rather than a leaked thread — the same
 /// reason `src/rewrite/http.rs`'s own `TIMEOUT` exists.
@@ -154,18 +155,29 @@ impl Engine for HttpEngine {
             })
         })?;
 
-        let parsed: serde_json::Value = response.into_json().map_err(|e| {
+        // Unbounded, as `into_json` was: `into_string` would stop at 10 MB.
+        let mut text = String::new();
+        response
+            .into_reader()
+            .read_to_string(&mut text)
+            .map_err(|e| {
+                EngineError::Http(HttpError::Unreadable {
+                    url: self.url.clone(),
+                    detail: e.to_string(),
+                })
+            })?;
+        let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
             EngineError::Http(HttpError::Unreadable {
                 url: self.url.clone(),
-                detail: e.to_string(),
+                detail: format!("{e}; {}", body_note(&text)),
             })
         })?;
 
         match parsed.get("text").and_then(|t| t.as_str()) {
-            Some(text) => Ok(text.to_string()),
+            Some(transcript) => Ok(transcript.to_string()),
             None => Err(EngineError::Http(HttpError::Unreadable {
                 url: self.url.clone(),
-                detail: "no text string in the response body".to_string(),
+                detail: format!("no text string in the response body; {}", body_note(&text)),
             })),
         }
     }
@@ -739,6 +751,94 @@ mod tests {
         );
         assert!(message.contains("status 404"), "got {message}");
         assert!(message.contains(&url), "got {message}");
+        handle.join().expect("server thread");
+    }
+
+    /// The message of a 2xx response whose body the engine could not use.
+    fn unreadable_message(body: &'static str, tag: &str) -> (String, String) {
+        let (url, handle) = respond_once(body);
+        let engine = HttpEngine::new(
+            url.clone(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
+        let error = engine
+            .transcribe(&wav_path(tag), "")
+            .expect_err("must fail");
+        assert!(
+            matches!(&error, EngineError::Http(HttpError::Unreadable { .. })),
+            "got {error:?}"
+        );
+        handle.join().expect("server thread");
+        (url, error.to_string())
+    }
+
+    #[test]
+    fn a_2xx_error_object_reaches_the_message() {
+        let (url, message) = unreadable_message(
+            r#"{"error":"Unexpected endpoint or method. (POST /v1/audio/transcriptionz)"}"#,
+            "a_2xx_error_object",
+        );
+        assert!(message.contains(&url), "got {message}");
+        assert!(
+            message.contains("answered with something this could not read"),
+            "got {message}"
+        );
+        assert!(
+            message.contains("no text string in the response body"),
+            "got {message}"
+        );
+        assert!(message.contains("the server said:"), "got {message}");
+        assert!(
+            message.contains("Unexpected endpoint or method."),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn a_2xx_body_that_is_not_json_is_quoted() {
+        let (_, message) = unreadable_message("not json at all", "a_2xx_not_json");
+        assert!(
+            message.contains("the server said: not json at all"),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn a_2xx_body_that_is_empty_is_noted_as_empty() {
+        let (_, message) = unreadable_message("", "a_2xx_empty");
+        assert!(message.contains("the body was empty"), "got {message}");
+        assert!(!message.contains("the server said"), "got {message}");
+    }
+
+    #[test]
+    fn a_long_2xx_body_is_cut_to_its_bound() {
+        // Leaked so the test double, which takes a `'static` body, can serve it.
+        let body: &'static str = Box::leak("x".repeat(5000).into_boxed_str());
+        let (_, message) = unreadable_message(body, "a_2xx_long");
+        assert!(
+            message.contains(&format!("{}...", "x".repeat(300))),
+            "got {message}"
+        );
+        assert_eq!(
+            message.matches(&"x".repeat(300)).count(),
+            1,
+            "got {message}"
+        );
+        assert!(!message.contains(&"x".repeat(301)), "got {message}");
+    }
+
+    #[test]
+    fn a_successful_transcript_longer_than_the_excerpt_is_read_whole() {
+        let answer = "y".repeat(5000);
+        let body: &'static str = Box::leak(format!(r#"{{"text":"{answer}"}}"#).into_boxed_str());
+        let (url, handle) = respond_once(body);
+        let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
+        let text = engine
+            .transcribe(&wav_path("a_successful_transcript_longer"), "")
+            .expect("text");
+        assert_eq!(text, answer);
         handle.join().expect("server thread");
     }
 }

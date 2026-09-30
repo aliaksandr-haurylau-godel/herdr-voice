@@ -133,6 +133,18 @@ fn excerpt(text: &str) -> String {
     format!("{}...", kept.trim_end())
 }
 
+/// What the server said in a response that had no readable text, for the detail
+/// of an unreadable-answer message: the excerpt of the body, or a statement that
+/// it was empty. The same excerpt and bound as a refusal's explanation.
+pub fn body_note(text: &str) -> String {
+    let said = excerpt(text);
+    if said.is_empty() {
+        "the body was empty".to_string()
+    } else {
+        format!("the server said: {said}")
+    }
+}
+
 fn bound_text(bound: Duration) -> String {
     if bound.subsec_nanos() == 0 {
         match bound.as_secs() {
@@ -369,6 +381,30 @@ mod tests {
         assert!(
             message.contains("check the server is running and the address is correct"),
             "got {message}"
+        );
+    }
+
+    #[test]
+    fn a_body_note_carries_the_excerpt() {
+        assert_eq!(
+            body_note("{\n  \"error\": \"no route\"\n}"),
+            "the server said: { \"error\": \"no route\" }"
+        );
+    }
+
+    #[test]
+    fn an_empty_or_blank_body_is_noted_as_empty() {
+        for text in ["", " \n\t "] {
+            assert_eq!(body_note(text), "the body was empty", "for {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_body_note_is_cut_like_any_excerpt() {
+        let note = body_note(&"a".repeat(EXPLANATION_CHARS + 1));
+        assert_eq!(
+            note,
+            format!("the server said: {}...", "a".repeat(EXPLANATION_CHARS))
         );
     }
 }

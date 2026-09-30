@@ -4,9 +4,10 @@
 //! 2026-09-04, #36). See `tasks/36/DESIGN_36.md`, section 6.
 
 use std::fmt;
+use std::io::Read;
 use std::time::Duration;
 
-use crate::http_failure::Cause;
+use crate::http_failure::{body_note, Cause};
 
 /// The markers that fence the transcript inside the `user` message. Named
 /// constants, not literals spelled out four times, so the prompt, the wrapper,
@@ -183,10 +184,19 @@ impl HttpEngine {
             cause: Cause::from_ureq(e, self.timeout),
         })?;
 
-        let parsed: serde_json::Value =
-            response.into_json().map_err(|e| HttpError::Unreadable {
+        // Unbounded, as `into_json` was: `into_string` would stop at 10 MB.
+        let mut text = String::new();
+        response
+            .into_reader()
+            .read_to_string(&mut text)
+            .map_err(|e| HttpError::Unreadable {
                 url: self.url.clone(),
                 detail: e.to_string(),
+            })?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| HttpError::Unreadable {
+                url: self.url.clone(),
+                detail: format!("{e}; {}", body_note(&text)),
             })?;
 
         let content = parsed
@@ -200,7 +210,10 @@ impl HttpEngine {
             Some(text) => Ok(text.trim().to_string()),
             None => Err(HttpError::Unreadable {
                 url: self.url.clone(),
-                detail: "no choices[0].message.content string in the response body".to_string(),
+                detail: format!(
+                    "no choices[0].message.content string in the response body; {}",
+                    body_note(&text)
+                ),
             }),
         }
     }
@@ -832,6 +845,94 @@ mod tests {
             ),
             "got {error:?}"
         );
+        handle.join().expect("server thread");
+    }
+
+    /// The message of a 2xx response whose body the engine could not use.
+    fn unreadable_message(body: &'static str) -> (String, String) {
+        let (url, handle) = respond_once(body);
+        let engine = HttpEngine::new(url.clone(), String::new(), String::new());
+        let error = engine.rewrite("x", "").expect_err("must fail");
+        assert!(
+            matches!(&error, HttpError::Unreadable { .. }),
+            "got {error:?}"
+        );
+        handle.join().expect("server thread");
+        (url, error.to_string())
+    }
+
+    #[test]
+    fn a_2xx_error_object_reaches_the_message() {
+        let (url, message) = unreadable_message(
+            r#"{"error":"Unexpected endpoint or method. (POST /v1/chat/completionz)"}"#,
+        );
+        assert!(message.contains(&url), "got {message}");
+        assert!(
+            message.contains("answered with something this could not read"),
+            "got {message}"
+        );
+        assert!(
+            message.contains("no choices[0].message.content string in the response body"),
+            "got {message}"
+        );
+        assert!(message.contains("the server said:"), "got {message}");
+        assert!(
+            message.contains("Unexpected endpoint or method."),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn a_2xx_body_without_choices_is_quoted() {
+        let (_, message) = unreadable_message(r#"{"choices":[]}"#);
+        assert!(
+            message.contains(r#"the server said: {"choices":[]}"#),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn a_2xx_body_that_is_not_json_is_quoted() {
+        let (_, message) = unreadable_message("not json at all");
+        assert!(
+            message.contains("the server said: not json at all"),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn a_2xx_body_that_is_empty_is_noted_as_empty() {
+        let (_, message) = unreadable_message("");
+        assert!(message.contains("the body was empty"), "got {message}");
+        assert!(!message.contains("the server said"), "got {message}");
+    }
+
+    #[test]
+    fn a_long_2xx_body_is_cut_to_its_bound() {
+        // Leaked so the test double, which takes a `'static` body, can serve it.
+        let body: &'static str = Box::leak("x".repeat(5000).into_boxed_str());
+        let (_, message) = unreadable_message(body);
+        assert!(
+            message.contains(&format!("{}...", "x".repeat(300))),
+            "got {message}"
+        );
+        assert_eq!(
+            message.matches(&"x".repeat(300)).count(),
+            1,
+            "got {message}"
+        );
+        assert!(!message.contains(&"x".repeat(301)), "got {message}");
+    }
+
+    #[test]
+    fn a_successful_answer_longer_than_the_excerpt_is_read_whole() {
+        let answer = "y".repeat(5000);
+        let body: &'static str = Box::leak(
+            format!(r#"{{"choices":[{{"message":{{"content":"{answer}"}}}}]}}"#).into_boxed_str(),
+        );
+        let (url, handle) = respond_once(body);
+        let engine = HttpEngine::new(url, String::new(), String::new());
+        assert_eq!(engine.rewrite("x", "").expect("text"), answer);
         handle.join().expect("server thread");
     }
 }
