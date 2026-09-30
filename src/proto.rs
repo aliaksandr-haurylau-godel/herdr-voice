@@ -413,8 +413,8 @@ mod tests {
 
     #[test]
     fn a_body_shorter_than_announced_is_refused_with_both_numbers() {
-        let error = Reply::read_from(&mut BufReader::new(&b"ok+10\nshort"[..]))
-            .expect_err("must refuse");
+        let error =
+            Reply::read_from(&mut BufReader::new(&b"ok+10\nshort"[..])).expect_err("must refuse");
         assert!(
             matches!(
                 error,
@@ -477,8 +477,8 @@ mod tests {
 
     #[test]
     fn a_body_that_is_not_text_is_refused_by_name() {
-        let error = Reply::read_from(&mut BufReader::new(&b"ok+2\n\xff\xfe"[..]))
-            .expect_err("must refuse");
+        let error =
+            Reply::read_from(&mut BufReader::new(&b"ok+2\n\xff\xfe"[..])).expect_err("must refuse");
         assert!(matches!(error, ProtoError::NotText), "got {error:?}");
     }
 

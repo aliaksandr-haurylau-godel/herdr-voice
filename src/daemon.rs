@@ -4620,12 +4620,8 @@ mod tests {
             })
         };
         let context = br#"{"focused_pane_id":"w1:p2","focused_pane_agent":"claude"}"#.to_vec();
-        let first = crate::client::send_to(
-            &address,
-            "dictate",
-            Some("dictate".into()),
-            context.clone(),
-        );
+        let first =
+            crate::client::send_to(&address, "dictate", Some("dictate".into()), context.clone());
         let second = crate::client::send_to(&address, "dictate", Some("dictate".into()), context);
         server.join().expect("the server thread");
         (first, second)
