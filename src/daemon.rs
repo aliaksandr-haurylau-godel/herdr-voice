@@ -165,6 +165,10 @@ pub fn bias_settings(
 
 pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Reply, Control) {
     match request.command.as_str() {
+        // Answers without reading a context or touching a take. `doctor` sends it
+        // to learn that a request is served, and a probe must be safe to send
+        // while somebody is speaking.
+        "ping" => (Reply::Ok("pong".to_string()), Control::Continue),
         "stop" => (Reply::Ok("stopping".to_string()), Control::Stop),
         "cancel" => (
             Reply::Ok("nothing to cancel".to_string()),
@@ -3086,6 +3090,31 @@ mod tests {
         assert!(!needs_target_pane("cancel"));
         assert!(needs_target_pane("dictate"));
         assert!(needs_target_pane("ptt"));
+    }
+
+    #[test]
+    fn ping_answers_pong_and_changes_nothing() {
+        let runtime = fake_runtime("x");
+        let (reply, control) = answer(&request("ping", b""), &silent_recorder(), &runtime);
+        assert_eq!(reply, Reply::Ok("pong".to_string()));
+        assert!(matches!(control, Control::Continue));
+        assert!(matches!(&*hold_of(&runtime), crate::ptt::HoldState::Idle));
+        assert!(!needs_target_pane("ping"));
+    }
+
+    #[test]
+    fn ping_is_answered_while_a_hold_is_open_and_leaves_it_alone() {
+        let (runtime, _clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("ping-hold");
+        let (started, _) = answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert_eq!(started, Reply::Ok("holding for w1:p1".to_string()));
+        let (reply, control) = answer(&request("ping", b""), &recorder, &runtime);
+        assert_eq!(reply, Reply::Ok("pong".to_string()));
+        assert!(matches!(control, Control::Continue));
+        let held = runtime.hold.lock().unwrap();
+        let hold = held.hold().expect("the hold must still be open");
+        assert_eq!(hold.target, "w1:p1");
+        assert_eq!(hold.pokes, 1, "a ping is not a repeat");
     }
 
     #[test]
