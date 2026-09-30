@@ -1655,3 +1655,76 @@ release, and the install line in the README is the one in that release's notes.
   fetched here.
 - The window in which GitHub answers 404 after a release is published, and so whether
   five attempts three seconds apart is enough. Nothing was published in this run.
+
+## Failure causes named by the HTTP engines and by the start of herdr, for issues #52 and #78
+
+Run on 2026-09-30 on macOS 26.6.2 (Darwin 25.6.0, arm64), Rust 1.98.1, `ureq` 2.12.1,
+on `fix/52-78-failure-causes`, at `a5fb539` for every case except the last rewrite-engine
+row of the LM Studio table, which was run at `3686e4e`. Nothing in this section was run on
+Windows or Linux.
+
+**Method.** The real `HttpEngine::rewrite` and the real `HerdrDeliverer::insert` were
+called from a temporary `#[ignore]` test that prints the error each returns. The test
+was not kept. The same test was run on `main` at `13733c5`, unpacked with `git archive`
+into a scratch directory with its own build directory, so both columns below are real
+output of the two builds. The home directory in the `PATH` the program printed is
+abbreviated to `<PATH>`, and a temporary directory to `<tmp>`; nothing else is edited.
+
+### The rewrite engine
+
+| Case | Before (`13733c5`) | After |
+|---|---|---|
+| A port nothing listens on (`127.0.0.1:4999`) | `cannot reach "http://127.0.0.1:4999/v1/chat/completions": …: Connection Failed: Connect error: Connection refused (os error 61); check the server is running and the address is correct` | `"http://127.0.0.1:4999/v1/chat/completions" refused the connection: nothing is listening at that address and port. Start the server, or correct the address in the configuration` |
+| A local server answering 400 with a JSON body | `cannot reach "http://127.0.0.1:4998/v1/chat/completions": server answered with status 400; check the server is running and the address is correct` | `"http://127.0.0.1:4998/v1/chat/completions" answered with status 400 and refused the request: {"error":{"message":"model 'probe-model' not found","type":"invalid_request_error"}}. Correct the address, model or token in the configuration.` |
+| A local server that accepts and never answers, with the shipped 30-second bound | `cannot reach "http://127.0.0.1:4997/v1/chat/completions": …: Network Error: Error encountered in the status line: timed out reading response; check the server is running and the address is correct` | `"http://127.0.0.1:4997/v1/chat/completions" did not reply within 30 seconds. If the server is still loading a model, wait and try again` |
+
+The 400 and the timeout came from a small local Python server on the ports named, because
+the owner's LM Studio on `127.0.0.1:4000` gave no 4xx to a request the engine can build
+(next subsection). The refused port is a port on this machine that `curl` could not
+connect to (exit 7) and on which `lsof` showed no listener.
+
+### The owner's LM Studio on `127.0.0.1:4000`, read only
+
+- A request naming a model the server does not have (`no-such-model-…`) was answered
+  with status 200 and text by the model already loaded. No load or unload request was
+  made. This is not a refusal, so it is no evidence for this change.
+- A POST to a path the server does not serve, `/v1/chat/completionz`:
+  `curl` showed `HTTP 200` and the body `{"error":"Unexpected endpoint or method.
+  (POST /v1/chat/completionz)"}`. **The server reports this refusal as a 200.**
+
+  | | Message |
+  |---|---|
+  | Before (`13733c5`) | `"http://127.0.0.1:4000/v1/chat/completionz" answered with something this could not read: no choices[0].message.content string in the response body` |
+  | After the first three commits (`a5fb539`) | the same: the acceptance criteria then covered non-2xx statuses only |
+  | After the amendment (`3686e4e`) | `"http://127.0.0.1:4000/v1/chat/completionz" answered with something this could not read: no choices[0].message.content string in the response body; the server said: {"error":"Unexpected endpoint or method. (POST /v1/chat/completionz)"}` |
+
+  The gap was found by this run, reported to the orchestrator, and closed in the same
+  pull request (`AC_52.md`, Amendment 2026-09-30).
+
+### Starting herdr
+
+`HERDR_BIN_PATH` pointed at three things, through `HerdrDeliverer::insert`:
+
+| Case | Before (`13733c5`) | After |
+|---|---|---|
+| A program that does not exist | `cannot run "herdr-voice-no-such-program": it is not on the PATH this process has, which is "<PATH>". Set HERDR_BIN_PATH to herdr's location, or start herdr from a shell where it is on the PATH` | unchanged |
+| A file without the execute bit | the same sentence, naming `<tmp>/herdr-without-x-bit` | `cannot run "<tmp>/herdr-without-x-bit": the file was found but this process is not allowed to run it. Make it executable (on Unix, chmod +x), or point HERDR_BIN_PATH at the herdr program itself` |
+| A directory | the same sentence, naming `<tmp>` | the same not-executable sentence, naming `<tmp>` |
+
+On this platform a directory and a file without the execute bit both come back from the
+operating system as a permission error, so both take the second message.
+
+### What was not verified
+
+- A timeout while the body of a 2xx response is being read. It would still print the
+  unreadable-answer sentence; it was read in the code, not reproduced.
+- The messages for `ETXTBSY` and resource exhaustion against a real program: a file
+  still open for writing cannot be produced on demand. They are tested by giving
+  `start_failure` the error, not by starting a program.
+- #66, an indicator test that fails intermittently on Linux. It was not run here, so
+  this run cannot say whether the change makes that failure readable; `src/indicator.rs`
+  has the same defect as `src/delivery.rs` (tracked in #101) and is not part of this
+  change.
+- The transcriber's messages against a live speech endpoint: they were produced in tests
+  against a local test double only. The rewrite engine is the one run against a live server.
+- Windows and Linux: the new messages were not produced on either.

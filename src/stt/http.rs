@@ -3,14 +3,15 @@
 //! Mirrors `src/rewrite/http.rs`'s shape: a dedicated `ureq::Agent` per engine
 //! instance, pooling disabled, a fixed timeout. Two differences the wire
 //! contract requires: the request body is `multipart/form-data`, not JSON,
-//! and the error enum has three variants, not two, so a connection failure
-//! and a non-2xx response are told apart by message (`tasks/16/DESIGN_16.md`,
-//! section 1).
+//! and the error says which of four causes failed (`src/http_failure.rs`;
+//! `tasks/16/DESIGN_16.md`, section 1).
 
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
 use super::{Engine, EngineError};
+use crate::http_failure::{body_note, Cause};
 
 /// A bound turns a hang into a message rather than a leaked thread — the same
 /// reason `src/rewrite/http.rs`'s own `TIMEOUT` exists.
@@ -24,17 +25,30 @@ pub struct HttpEngine {
     token: String,
     model: String,
     language: String,
+    /// The bound the agent below was built with, kept so a timeout's message can
+    /// name it. `new` passes `TIMEOUT`; a test passes a shorter one.
+    timeout: Duration,
     agent: ureq::Agent,
 }
 
 impl HttpEngine {
     pub fn new(url: String, token: String, model: String, language: String) -> HttpEngine {
+        HttpEngine::with_timeout(url, token, model, language, TIMEOUT)
+    }
+
+    pub fn with_timeout(
+        url: String,
+        token: String,
+        model: String,
+        language: String,
+        timeout: Duration,
+    ) -> HttpEngine {
         // A dedicated agent, not the crate's shared default one: with pooling
         // disabled, this take's connection is never reused and never confused
         // with a later one, the same reason `rewrite::http::HttpEngine` does
         // this.
         let agent = ureq::AgentBuilder::new()
-            .timeout(TIMEOUT)
+            .timeout(timeout)
             .max_idle_connections_per_host(0)
             .build();
         HttpEngine {
@@ -42,6 +56,7 @@ impl HttpEngine {
             token,
             model,
             language,
+            timeout,
             agent,
         }
     }
@@ -49,38 +64,25 @@ impl HttpEngine {
 
 #[derive(Debug)]
 pub enum HttpError {
-    /// A transport-level failure: the connection was refused, timed out, or
-    /// is otherwise unreachable.
-    Refused { url: String, detail: String },
-    /// The server answered, but with a non-2xx status.
-    Failed {
-        url: String,
-        status: u16,
-        detail: String,
-    },
+    /// The request failed; `cause` says how (`src/http_failure.rs`).
+    Failed { url: String, cause: Cause },
     /// A 2xx response whose body does not parse as the expected JSON shape.
     Unreadable { url: String, detail: String },
+    /// The take's own audio file could not be read, so no request was made.
+    AudioUnreadable { path: String, detail: String },
 }
 
 impl std::fmt::Display for HttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HttpError::Refused { url, detail } => write!(
-                f,
-                "cannot reach {url:?}: {detail}; check the server is running and the address is \
-                 correct"
-            ),
-            HttpError::Failed {
-                url,
-                status,
-                detail,
-            } => {
-                write!(f, "{url:?} answered with status {status}: {detail}")
-            }
+            HttpError::Failed { url, cause } => write!(f, "{}", cause.describe(url)),
             HttpError::Unreadable { url, detail } => write!(
                 f,
                 "{url:?} answered with something this could not read: {detail}"
             ),
+            HttpError::AudioUnreadable { path, detail } => {
+                write!(f, "cannot read the recording {path:?}: {detail}")
+            }
         }
     }
 }
@@ -130,9 +132,9 @@ fn build_body(audio_bytes: &[u8], model: &str, language: &str, bias: &str) -> Ve
 impl Engine for HttpEngine {
     fn transcribe(&self, audio: &Path, bias: &str) -> Result<String, EngineError> {
         let audio_bytes = std::fs::read(audio).map_err(|e| {
-            EngineError::Http(HttpError::Refused {
-                url: self.url.clone(),
-                detail: format!("could not read {}: {e}", audio.display()),
+            EngineError::Http(HttpError::AudioUnreadable {
+                path: audio.display().to_string(),
+                detail: e.to_string(),
             })
         })?;
 
@@ -146,30 +148,36 @@ impl Engine for HttpEngine {
             request = request.set("Authorization", &format!("Bearer {}", self.token));
         }
 
-        let response = request.send_bytes(&body).map_err(|e| match e {
-            ureq::Error::Status(code, _) => EngineError::Http(HttpError::Failed {
+        let response = request.send_bytes(&body).map_err(|e| {
+            EngineError::Http(HttpError::Failed {
                 url: self.url.clone(),
-                status: code,
-                detail: format!("server answered with status {code}"),
-            }),
-            ureq::Error::Transport(t) => EngineError::Http(HttpError::Refused {
-                url: self.url.clone(),
-                detail: t.to_string(),
-            }),
+                cause: Cause::from_ureq(e, self.timeout),
+            })
         })?;
 
-        let parsed: serde_json::Value = response.into_json().map_err(|e| {
+        // Unbounded, as `into_json` was: `into_string` would stop at 10 MB.
+        let mut text = String::new();
+        response
+            .into_reader()
+            .read_to_string(&mut text)
+            .map_err(|e| {
+                EngineError::Http(HttpError::Unreadable {
+                    url: self.url.clone(),
+                    detail: e.to_string(),
+                })
+            })?;
+        let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
             EngineError::Http(HttpError::Unreadable {
                 url: self.url.clone(),
-                detail: e.to_string(),
+                detail: format!("{e}; {}", body_note(&text)),
             })
         })?;
 
         match parsed.get("text").and_then(|t| t.as_str()) {
-            Some(text) => Ok(text.to_string()),
+            Some(transcript) => Ok(transcript.to_string()),
             None => Err(EngineError::Http(HttpError::Unreadable {
                 url: self.url.clone(),
-                detail: "no text string in the response body".to_string(),
+                detail: format!("no text string in the response body; {}", body_note(&text)),
             })),
         }
     }
@@ -203,6 +211,15 @@ mod tests {
         status_line: &'static str,
         response_body: &'static str,
     ) -> (String, std::thread::JoinHandle<String>) {
+        serve_once(format!(
+            "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        ))
+    }
+
+    /// Serves one fixed, complete HTTP response text to one connection.
+    fn serve_once(response: String) -> (String, std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let url = format!("http://{addr}/v1/audio/transcriptions");
@@ -238,11 +255,6 @@ mod tests {
                 buf.extend_from_slice(&chunk[..n]);
             }
             let request = String::from_utf8_lossy(&buf).to_string();
-            let response = format!(
-                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
             request
@@ -252,6 +264,41 @@ mod tests {
 
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Accepts one connection and reads it until the client gives up and
+    /// closes: the server that never answers.
+    fn never_answers() -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let url = format!("http://{addr}/v1/audio/transcriptions");
+        let handle = std::thread::spawn(move || {
+            // Polled with a deadline: a timeout that fires before the client
+            // connects must end this thread, not hang the suite at `join`.
+            listener.set_nonblocking(true).expect("nonblocking");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => return,
+                }
+            };
+            stream.set_nonblocking(false).expect("blocking stream");
+            let mut chunk = [0u8; 4096];
+            while matches!(stream.read(&mut chunk), Ok(n) if n > 0) {}
+        });
+        (url, handle)
+    }
+
+    /// The message of the failure a transcription produced.
+    fn failure_of(engine: &HttpEngine, tag: &str) -> String {
+        engine
+            .transcribe(&wav_path(tag), "")
+            .expect_err("must fail")
+            .to_string()
     }
 
     fn wav_path(tag: &str) -> std::path::PathBuf {
@@ -463,11 +510,17 @@ mod tests {
             .expect_err("must fail");
         assert!(
             matches!(
-                error,
-                EngineError::Http(HttpError::Failed { status: 500, .. })
+                &error,
+                EngineError::Http(HttpError::Failed {
+                    cause: Cause::Answered { status: 500, .. },
+                    ..
+                })
             ),
             "got {error:?}"
         );
+        let message = error.to_string();
+        assert!(message.contains("model not loaded"), "got {message}");
+        assert!(message.contains(&url), "got {message}");
         handle.join().expect("server thread");
     }
 
@@ -494,11 +547,18 @@ mod tests {
             .expect_err("must fail");
         assert!(
             matches!(
-                error,
-                EngineError::Http(HttpError::Failed { status: 503, .. })
+                &error,
+                EngineError::Http(HttpError::Failed {
+                    cause: Cause::Answered { status: 503, .. },
+                    ..
+                })
             ),
             "got {error:?}"
         );
+        let message = error.to_string();
+        assert!(message.contains("status 503"), "got {message}");
+        assert!(message.contains("overloaded"), "got {message}");
+        assert!(message.contains(&url), "got {message}");
         handle.join().expect("server thread");
     }
 
@@ -533,17 +593,27 @@ mod tests {
                 "",
             )
             .expect_err("must fail");
+        let message = error.to_string();
         assert!(
-            matches!(error, EngineError::Http(HttpError::Refused { .. })),
+            matches!(
+                &error,
+                EngineError::Http(HttpError::Failed {
+                    cause: Cause::ConnectionRefused,
+                    ..
+                })
+            ),
             "got {error:?}"
         );
+        assert!(message.contains("127.0.0.1:1"), "got {message}");
+        assert!(message.contains("refused the connection"), "got {message}");
+        assert!(!message.contains("answered with status"), "got {message}");
     }
 
     /// `std::fs::read` failing (a missing path) must be reported through
-    /// `HttpError::Refused`, not a panic. No listener is started: the read
+    /// `HttpError::AudioUnreadable`, not a panic. No listener is started: the read
     /// fails before any connection would be attempted.
     #[test]
-    fn a_missing_wav_file_is_refused_not_a_panic() {
+    fn a_missing_wav_file_is_named_as_the_file_not_as_the_server() {
         let mut missing = std::env::temp_dir();
         missing.push(format!("stt-http-test-missing-{}.wav", std::process::id()));
         let _ = std::fs::remove_file(&missing);
@@ -555,9 +625,272 @@ mod tests {
             "auto".to_string(),
         );
         let error = engine.transcribe(&missing, "").expect_err("must fail");
+        let message = error.to_string();
         assert!(
-            matches!(error, EngineError::Http(HttpError::Refused { .. })),
+            matches!(&error, EngineError::Http(HttpError::AudioUnreadable { .. })),
             "got {error:?}"
         );
+        assert!(message.contains("stt-http-test-missing-"), "got {message}");
+        // The file first, then the operating system's reason, in that order.
+        assert!(
+            message.starts_with(&format!(
+                "cannot read the recording {:?}: ",
+                missing.display().to_string()
+            )),
+            "got {message}"
+        );
+        assert!(message.contains("os error 2"), "got {message}");
+        assert!(
+            message.contains("cannot read the recording"),
+            "got {message}"
+        );
+        assert!(!message.contains("cannot reach"), "got {message}");
+        assert!(
+            !message.contains("check the server is running"),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn a_reply_that_never_comes_is_a_timeout_naming_the_bound() {
+        let (url, handle) = never_answers();
+        let engine = HttpEngine::with_timeout(
+            url.clone(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+            Duration::from_millis(200),
+        );
+        let started = std::time::Instant::now();
+        let message = failure_of(&engine, "a_reply_that_never_comes");
+        // The bound reaches the socket, not only the message.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(message.contains(&url), "got {message}");
+        assert!(
+            message.contains("did not reply within 200 milliseconds"),
+            "got {message}"
+        );
+        assert!(message.contains("wait and try again"), "got {message}");
+        assert!(
+            !message.contains("check the server is running"),
+            "got {message}"
+        );
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn the_shipped_engine_holds_the_thirty_second_bound() {
+        let engine = HttpEngine::new(
+            "http://h/v1".to_string(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
+        assert_eq!(engine.timeout, TIMEOUT);
+        let message = Cause::TimedOut {
+            bound: engine.timeout,
+        }
+        .describe("http://h/v1");
+        assert!(message.contains("within 30 seconds"), "got {message}");
+    }
+
+    #[test]
+    fn a_400_with_a_body_keeps_the_servers_explanation() {
+        let (url, handle) = respond_once_with_status(
+            "400 Bad Request",
+            r#"{"error":"unknown model: no-such-model"}"#,
+        );
+        let engine = HttpEngine::new(
+            url.clone(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
+        let message = failure_of(&engine, "a_400_with_a_body");
+        assert!(message.contains(&url), "got {message}");
+        assert!(
+            message.contains("answered with status 400"),
+            "got {message}"
+        );
+        assert!(
+            message.contains("unknown model: no-such-model"),
+            "got {message}"
+        );
+        assert!(!message.contains("cannot reach"), "got {message}");
+        assert!(
+            !message.contains("check the server is running"),
+            "got {message}"
+        );
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_refusal_with_no_body_says_the_server_gave_no_explanation() {
+        let (url, handle) = respond_once_with_status("400 Bad Request", "");
+        let engine = HttpEngine::new(
+            url.clone(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
+        let message = failure_of(&engine, "a_refusal_with_no_body");
+        assert!(message.contains("status 400"), "got {message}");
+        assert!(
+            message.contains("the server gave no explanation"),
+            "got {message}"
+        );
+        assert!(message.contains(&url), "got {message}");
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_long_body_reaches_the_message_cut_to_its_bound() {
+        // Leaked so the test double, which takes a `'static` body, can serve it.
+        let body: &'static str = Box::leak("x".repeat(5000).into_boxed_str());
+        let (url, handle) = respond_once_with_status("404 Not Found", body);
+        let engine = HttpEngine::new(
+            url.clone(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
+        let message = failure_of(&engine, "a_long_body");
+        assert!(
+            message.contains(&format!("{}...", "x".repeat(300))),
+            "got {message}"
+        );
+        assert!(!message.contains(&"x".repeat(301)), "got {message}");
+        assert_eq!(
+            message.matches(&"x".repeat(300)).count(),
+            1,
+            "got {message}"
+        );
+        assert!(message.contains("status 404"), "got {message}");
+        assert!(message.contains(&url), "got {message}");
+        handle.join().expect("server thread");
+    }
+
+    /// The message of a 2xx response whose body the engine could not use.
+    fn unreadable_message(body: &'static str, tag: &str) -> (String, String) {
+        let (url, handle) = respond_once(body);
+        let engine = HttpEngine::new(
+            url.clone(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
+        let error = engine
+            .transcribe(&wav_path(tag), "")
+            .expect_err("must fail");
+        assert!(
+            matches!(&error, EngineError::Http(HttpError::Unreadable { .. })),
+            "got {error:?}"
+        );
+        handle.join().expect("server thread");
+        (url, error.to_string())
+    }
+
+    #[test]
+    fn a_2xx_error_object_reaches_the_message() {
+        let (url, message) = unreadable_message(
+            r#"{"error":"Unexpected endpoint or method. (POST /v1/audio/transcriptionz)"}"#,
+            "a_2xx_error_object",
+        );
+        assert!(message.contains(&url), "got {message}");
+        assert!(
+            message.contains("answered with something this could not read"),
+            "got {message}"
+        );
+        assert!(
+            message.contains("no text string in the response body"),
+            "got {message}"
+        );
+        assert!(message.contains("the server said:"), "got {message}");
+        assert!(
+            message.contains("Unexpected endpoint or method."),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn a_2xx_body_that_is_not_json_is_quoted() {
+        let (_, message) = unreadable_message("not json at all", "a_2xx_not_json");
+        assert!(message.contains("line 1 column"), "got {message}");
+        assert!(
+            message.contains("the server said: not json at all"),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn a_2xx_body_that_is_empty_is_noted_as_empty() {
+        let (_, message) = unreadable_message("", "a_2xx_empty");
+        assert!(message.contains("the body was empty"), "got {message}");
+        assert!(!message.contains("the server said"), "got {message}");
+    }
+
+    #[test]
+    fn a_long_2xx_body_is_cut_to_its_bound() {
+        // Leaked so the test double, which takes a `'static` body, can serve it.
+        let body: &'static str = Box::leak("x".repeat(5000).into_boxed_str());
+        let (_, message) = unreadable_message(body, "a_2xx_long");
+        assert!(
+            message.contains(&format!("{}...", "x".repeat(300))),
+            "got {message}"
+        );
+        assert_eq!(
+            message.matches(&"x".repeat(300)).count(),
+            1,
+            "got {message}"
+        );
+        assert!(!message.contains(&"x".repeat(301)), "got {message}");
+    }
+
+    #[test]
+    fn a_successful_transcript_longer_than_the_excerpt_is_read_whole() {
+        let answer = "y".repeat(5000);
+        let body: &'static str = Box::leak(format!(r#"{{"text":"{answer}"}}"#).into_boxed_str());
+        let (url, handle) = respond_once(body);
+        let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
+        let text = engine
+            .transcribe(&wav_path("a_successful_transcript_longer"), "")
+            .expect("text");
+        assert_eq!(text, answer);
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_refusal_body_is_read_only_up_to_its_byte_bound() {
+        // 2040 blanks, then ten letters: a read of 2048 bytes reaches the first
+        // eight and no more. Leaked so the test double can serve it.
+        let body: &'static str =
+            Box::leak(format!("{}abcdefghij", " ".repeat(2040)).into_boxed_str());
+        let (url, handle) = respond_once_with_status("400 Bad Request", body);
+        let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
+        let message = failure_of(&engine, "a_refusal_body_is_read_only_up_to");
+        assert!(message.contains("abcdefgh"), "got {message}");
+        assert!(!message.contains("abcdefghi"), "got {message}");
+        handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_body_cut_off_mid_read_names_the_read_failure() {
+        let (url, handle) =
+            serve_once("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789".to_string());
+        let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
+        let error = engine
+            .transcribe(&wav_path("a_body_cut_off_mid_read"), "")
+            .expect_err("must fail");
+        assert!(
+            matches!(&error, EngineError::Http(HttpError::Unreadable { .. })),
+            "got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(!message.ends_with("could not read: "), "got {message}");
+        handle.join().expect("server thread");
     }
 }
