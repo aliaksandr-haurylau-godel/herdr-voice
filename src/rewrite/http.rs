@@ -292,7 +292,20 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         let url = format!("http://{addr}/v1/chat/completions");
         let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
+            // Polled with a deadline: a timeout that fires before the client
+            // connects must end this thread, not hang the suite at `join`.
+            listener.set_nonblocking(true).expect("nonblocking");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => return,
+                }
+            };
+            stream.set_nonblocking(false).expect("blocking stream");
             let mut chunk = [0u8; 4096];
             while matches!(stream.read(&mut chunk), Ok(n) if n > 0) {}
         });
@@ -697,6 +710,7 @@ mod tests {
         assert!(message.contains("refused the connection"), "got {message}");
         assert!(message.contains("Start the server"), "got {message}");
         assert!(!message.contains("did not reply"), "got {message}");
+        assert!(!message.contains("answered with status"), "got {message}");
     }
 
     #[test]
@@ -783,6 +797,12 @@ mod tests {
             "got {message}"
         );
         assert!(!message.contains(&"x".repeat(301)), "got {message}");
+        // Once: a message that repeated the excerpt would still pass the two above.
+        assert_eq!(
+            message.matches(&"x".repeat(300)).count(),
+            1,
+            "got {message}"
+        );
         handle.join().expect("server thread");
     }
 

@@ -59,10 +59,11 @@ impl Cause {
                 } else {
                     explanation.as_str()
                 };
-                let advice = if *status >= 500 {
-                    "The server failed on its side; its own log says why."
-                } else {
-                    "Correct the address, model or token in the configuration."
+                let advice = match *status {
+                    // The request was fine and the moment was not.
+                    408 | 429 => "The server asked to be tried again later; wait and try again.",
+                    500.. => "The server failed on its side; its own log says why.",
+                    _ => "Correct the address, model or token in the configuration.",
                 };
                 format!(
                     "{url:?} answered with status {status} and refused the request: {said}. \
@@ -324,6 +325,22 @@ mod tests {
             "got {}",
             describe(500)
         );
+    }
+
+    #[test]
+    fn a_request_to_try_again_later_is_told_to_wait_not_to_edit_the_configuration() {
+        // 408 and 429 say the configuration is fine and the moment is wrong.
+        for status in [408, 429] {
+            let message = Cause::Answered {
+                status,
+                explanation: "slow down".to_string(),
+            }
+            .describe("u");
+            assert!(message.contains("wait and try again"), "got {message}");
+            assert!(message.contains("slow down"), "got {message}");
+            assert!(!message.contains("Correct the address"), "got {message}");
+            assert!(!message.contains("its own log says why"), "got {message}");
+        }
     }
 
     #[test]

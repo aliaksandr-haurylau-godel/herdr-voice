@@ -257,7 +257,20 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         let url = format!("http://{addr}/v1/audio/transcriptions");
         let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
+            // Polled with a deadline: a timeout that fires before the client
+            // connects must end this thread, not hang the suite at `join`.
+            listener.set_nonblocking(true).expect("nonblocking");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => return,
+                }
+            };
+            stream.set_nonblocking(false).expect("blocking stream");
             let mut chunk = [0u8; 4096];
             while matches!(stream.read(&mut chunk), Ok(n) if n > 0) {}
         });
@@ -489,6 +502,9 @@ mod tests {
             ),
             "got {error:?}"
         );
+        let message = error.to_string();
+        assert!(message.contains("model not loaded"), "got {message}");
+        assert!(message.contains(&url), "got {message}");
         handle.join().expect("server thread");
     }
 
@@ -523,6 +539,10 @@ mod tests {
             ),
             "got {error:?}"
         );
+        let message = error.to_string();
+        assert!(message.contains("status 503"), "got {message}");
+        assert!(message.contains("overloaded"), "got {message}");
+        assert!(message.contains(&url), "got {message}");
         handle.join().expect("server thread");
     }
 
@@ -570,6 +590,7 @@ mod tests {
         );
         assert!(message.contains("127.0.0.1:1"), "got {message}");
         assert!(message.contains("refused the connection"), "got {message}");
+        assert!(!message.contains("answered with status"), "got {message}");
     }
 
     /// `std::fs::read` failing (a missing path) must be reported through
@@ -678,13 +699,19 @@ mod tests {
     #[test]
     fn a_refusal_with_no_body_says_the_server_gave_no_explanation() {
         let (url, handle) = respond_once_with_status("400 Bad Request", "");
-        let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
+        let engine = HttpEngine::new(
+            url.clone(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
         let message = failure_of(&engine, "a_refusal_with_no_body");
         assert!(message.contains("status 400"), "got {message}");
         assert!(
             message.contains("the server gave no explanation"),
             "got {message}"
         );
+        assert!(message.contains(&url), "got {message}");
         handle.join().expect("server thread");
     }
 
@@ -693,13 +720,25 @@ mod tests {
         // Leaked so the test double, which takes a `'static` body, can serve it.
         let body: &'static str = Box::leak("x".repeat(5000).into_boxed_str());
         let (url, handle) = respond_once_with_status("404 Not Found", body);
-        let engine = HttpEngine::new(url, String::new(), String::new(), "auto".to_string());
+        let engine = HttpEngine::new(
+            url.clone(),
+            String::new(),
+            String::new(),
+            "auto".to_string(),
+        );
         let message = failure_of(&engine, "a_long_body");
         assert!(
             message.contains(&format!("{}...", "x".repeat(300))),
             "got {message}"
         );
         assert!(!message.contains(&"x".repeat(301)), "got {message}");
+        assert_eq!(
+            message.matches(&"x".repeat(300)).count(),
+            1,
+            "got {message}"
+        );
+        assert!(message.contains("status 404"), "got {message}");
+        assert!(message.contains(&url), "got {message}");
         handle.join().expect("server thread");
     }
 }
