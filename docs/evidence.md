@@ -1470,6 +1470,265 @@ or `true`; that configuration was not run on the branch.
   a take on the fixed build is the place to look.
 - The Windows CI job. It compiles this change only when the pull request runs it.
 
+## A daemon whose herdr has gone, for issue #93
+
+Run on 2026-09-30 on macOS (Darwin 25.6.0, arm64), debug builds of `0.1.0-beta.4`:
+the fixed one from `fix/93-daemon-stderr` at `a40fc41` (plus this entry), the other from
+`main` at `13733c5`, built from `git archive` into a scratch directory.
+
+**Method: a daemon started by hand, not a herdr restart.** An isolated herdr server
+could not be arranged safely. `herdr --session <name>` names a session, but the plugin
+registry `herdr plugin link` writes to is shared with the person's own herdr, and no
+documented setting moves it. So the condition a restart leaves was reproduced directly:
+the daemon is started with its standard error on a pipe, and the read end of that pipe
+is closed after the daemon is listening. That is the state the issue describes — a live
+daemon, its socket held, nobody reading its standard error. What this does not show is
+herdr itself starting a new daemon after a restart and that daemon finding the old one;
+that step rests on the issue's own diagnosis and on `start()` connecting before it
+listens (`docs/decisions.md`).
+
+The daemon ran with `HERDR_PLUGIN_STATE_DIR` and `HERDR_PLUGIN_CONFIG_DIR` set to a
+scratch directory, `HERDR_BIN_PATH` naming a program that does not exist, and every other
+`HERDR_*` variable removed, so nothing it did could reach a running herdr. The same
+script drove each case (a Python `subprocess` script kept outside the repository):
+start `herdr-voice daemon`, wait until it accepts, run `herdr-voice cancel`, close the
+read end of the daemon's standard error, run `herdr-voice cancel` and `herdr-voice
+doctor` again.
+
+**The instrument, checked first.** On `main` at `13733c5` the script reproduces the
+issue's own line:
+
+```
+-- before the pipe is closed
+cancel exit 0 stdout 'nothing to cancel\n' stderr ''
+-- after the read end of its standard error is closed (what a herdr restart leaves)
+cancel exit 1 stdout '' stderr 'the daemon spoke something unexpected: malformed header: ""\n'
+doctor exit 1
+doctor line: daemon   ok       listening at <scratch>/voice.sock
+daemon still running: True
+```
+
+**On the fixed build:**
+
+```
+-- before the pipe is closed
+cancel exit 0 stdout 'nothing to cancel\n' stderr ''
+-- after the read end of its standard error is closed (what a herdr restart leaves)
+cancel exit 0 stdout 'nothing to cancel\n' stderr ''
+doctor exit 1
+doctor line: daemon   ok       listening at <scratch>/voice.sock
+daemon still running: True
+```
+
+`doctor` exits 1 in both runs because other lines are `missing` on the scratch
+environment (herdr, engine); the line that matters is the `daemon` one.
+
+**The upgrade case: the daemon from `main`, the client and `doctor` from the fixed
+build.** This is a machine that upgrades the plugin while the old daemon is still
+running with a dead standard error:
+
+```
+cancel exit 1 stdout '' stderr 'the daemon spoke something unexpected: malformed header: ""\n'
+doctor exit 1
+doctor line: daemon   missing  did not answer a request at <scratch>/voice.sock: the daemon spoke something unexpected: malformed header: ""; end it with `pkill -f 'herdr-voice daemon'`, then restart herdr or run `herdr-voice daemon`
+```
+
+Before this change the same daemon read `ok`. `doctor` now fails on it and names what to
+do.
+
+**Also run, and not the same as the above.** `tests/daemon_dead_stderr.rs` starts the
+built binary the same way and asserts on the reply, on `doctor`, and on the lines the
+daemon really writes to a file. With the writer changed to panic on a failed write, both
+of its dead-pipe tests fail; with `line()` writing nothing or writing to standard output,
+the tests that read the file fail.
+
+**What this does not establish.**
+
+- A real herdr restart. The step where herdr starts a second daemon that finds the first
+  is not exercised (see the method above).
+- Whether the environment an old daemon was started with (`HERDR_*`) still reaches the
+  herdr that replaced the one that started it. `docs/design.md` section 9, question 6,
+  stays open: this run gave the daemon no herdr at all.
+- Windows. The doctor tests that need a listener are Unix only. On a Windows named pipe
+  the bare connect that precedes the `ping` may find the pipe busy and `doctor` may
+  report "nothing is listening" for a healthy daemon; not reproduced.
+- The duplicate-device notice in `src/capture/cpal_source.rs` now goes through the
+  writer; it needs two inputs with one name and was not run.
+
+## The leak gate refuses to run without `.leakwords`, for issue #64
+
+Verified on macOS (Darwin 25.6.0, arm64), with gitleaks installed, in a scratch
+clone of branch `fix/64-leak-gate-silence` at `1e0a37a` in a temporary directory,
+using real `git commit` with `core.hooksPath` set to `.githooks`. The clone had no
+`.leakwords`, as any fresh clone does.
+
+**Before the change** (`13733c5`, from the unit test run against the unchanged
+hook, `sh scripts/test-pre-commit.sh`): in a checkout without `.leakwords` the
+hook exited 0 and printed nothing, so the "absent" group reported
+`FAIL absent: exit 0, expected 1` and two `FAIL … stderr lacks …` lines, while the
+three groups for a present file passed.
+
+**After the change**, four real commits:
+
+| Case | Command | Result |
+|---|---|---|
+| A. fresh clone, no `.leakwords` | `git commit -m "scratch A"` with `README.md` staged | exit 1, no commit created |
+| B. after `cp .leakwords.example .leakwords` | `git commit -q -m "scratch B"` | exit 0, commit `77bdb47` created |
+| C. `.leakwords` holds `zebra-marker`, staged diff contains it | `git commit -m "scratch C"` | exit 1, no commit created |
+| D. `git worktree add ../wt-new -b scratch-d` from that clone, then a commit | `git commit -m "scratch D"` | exit 1, no commit created |
+
+Standard error in case A and case D, identical:
+
+```
+leak gate: .leakwords is missing, so the private word list was not checked
+create it with: cp .leakwords.example .leakwords
+then list the names that must never be committed; an empty list is allowed
+```
+
+Standard error in case C, the messages the hook printed before the change:
+
+```
+leak gate: staged changes match a private word-list entry
+the matching pattern is in .leakwords; nothing is printed here on purpose
+```
+
+Case B printed nothing beyond gitleaks' own three lines (`no leaks found`). Case D
+shows the situation the issue was filed for: a new worktree starts without the file,
+and the first commit there now stops instead of passing.
+
+`sh scripts/test-pre-commit.sh` on the branch: 23 checks, all `ok`, exit 0; the
+worktree's own `.leakwords` has the same `shasum` before and after.
+
+**What this does not establish.**
+
+- The Ubuntu and macOS runners of the `scripts` job. The step is added to
+  `.github/workflows/check.yml`, and it runs there only when the pull request does.
+  The test does not depend on gitleaks being installed: it puts a stub first on
+  `PATH`.
+- A `.leakwords` whose last line has no trailing newline. The hook's `read` loop
+  skips that line without a word (found by the code review of this change). It is on
+  the present-file path, which this change leaves as it was, and is not covered here.
+- `git commit --no-verify`, which skips the whole hook, as before.
+
+## The README's install instructions, checked against the published release, for issue #67
+
+Verified on macOS (Darwin 25.6.0, arm64) on 2026-09-30, against the published release
+`v0.1.0-beta.4`. This covers part of the README's Install section. It does not cover
+`herdr plugin install` itself, and the next paragraph says why.
+
+**What was not run.** `herdr plugin install aliaksandr-haurylau-godel/herdr-voice --ref
+v0.1.0-beta.4` was not run. This machine has no container runtime (`docker`, `podman`,
+`colima` and `orb` are not installed), and the herdr on this machine is in daily use, so
+installing into it was not done. The step that remains is the one
+`scripts/install-check.sh` was written for, in a glibc container with no Rust
+toolchain.
+
+**What was run.** A shallow clone of the tag, as herdr makes one, then the manifest's own
+build entry for macOS with no Rust toolchain on `PATH`:
+
+| Command | Result |
+|---|---|
+| `git clone --depth 1 --branch v0.1.0-beta.4 https://github.com/aliaksandr-haurylau-godel/herdr-voice.git checkout` | a shallow clone, as herdr makes one |
+| `git describe --tags` | `v0.1.0-beta.4` |
+| `sed -n 's/^version = "\([^"]*\)".*/\1/p' herdr-plugin.toml \| head -1` | `0.1.0-beta.4` |
+| `env PATH=/usr/bin:/bin sh -c 'command -v cargo rustc rustup'` | prints nothing; no toolchain is found on that `PATH` |
+| `env PATH=/usr/bin:/bin sh scripts/install.sh` | exit 0; prints `herdr-voice: installed target/release/herdr-voice from v0.1.0-beta.4, verified against its published digest` |
+| `cat target/release/.herdr-voice-install` | `fetched herdr-voice-v0.1.0-beta.4-aarch64-apple-darwin.tar.gz from v0.1.0-beta.4, verified sha256 1b4331c433b6d55af44aefc7b3e18323dfc78266b9460215bc4b415b23f19b0b` |
+| `ls -l target/release/` and `file target/release/herdr-voice` | `herdr-voice`, 8 016 800 bytes, mode `-rwxr-xr-x`; `Mach-O 64-bit executable arm64` |
+| `./target/release/herdr-voice --help` | exit 0; lists `daemon`, `doctor`, `cancel`, `dictate`, `ptt` |
+| `gh release view v0.1.0-beta.4 --json body -q .body \| grep -n "herdr plugin install"` and `grep -n "herdr plugin install" README.md` | the same line, `herdr plugin install aliaksandr-haurylau-godel/herdr-voice --ref v0.1.0-beta.4`, in both |
+| `curl -s -o /dev/null -w "%{http_code}" https://github.com/aliaksandr-haurylau-godel/herdr-voice/releases` | `200` |
+
+The `PATH` given to the install kept `/usr/bin` and `/bin`, so this shows that no
+toolchain was found there, not that the machine was a clean one; that a binary was
+fetched rather than built rests on the marker file in the table.
+
+So on macOS arm64 the fetch, the digest check and the unpack work against the real
+release, and the install line in the README is the one in that release's notes.
+
+**What this does not establish.**
+
+- `herdr plugin install` end to end: that herdr runs the build entry, registers the
+  plugin and enables it, from a machine that has never had it.
+- An install without `--ref`.
+- Linux, Windows and macOS on x86_64. Their archives exist in the release; none was
+  fetched here.
+- The window in which GitHub answers 404 after a release is published, and so whether
+  five attempts three seconds apart is enough. Nothing was published in this run.
+
+## Failure causes named by the HTTP engines and by the start of herdr, for issues #52 and #78
+
+Run on 2026-09-30 on macOS 26.6.2 (Darwin 25.6.0, arm64), Rust 1.98.1, `ureq` 2.12.1,
+on `fix/52-78-failure-causes`, at `a5fb539` for every case except the last rewrite-engine
+row of the LM Studio table, which was run at `3686e4e`. Nothing in this section was run on
+Windows or Linux.
+
+**Method.** The real `HttpEngine::rewrite` and the real `HerdrDeliverer::insert` were
+called from a temporary `#[ignore]` test that prints the error each returns. The test
+was not kept. The same test was run on `main` at `13733c5`, unpacked with `git archive`
+into a scratch directory with its own build directory, so both columns below are real
+output of the two builds. The home directory in the `PATH` the program printed is
+abbreviated to `<PATH>`, and a temporary directory to `<tmp>`; nothing else is edited.
+
+### The rewrite engine
+
+| Case | Before (`13733c5`) | After |
+|---|---|---|
+| A port nothing listens on (`127.0.0.1:4999`) | `cannot reach "http://127.0.0.1:4999/v1/chat/completions": …: Connection Failed: Connect error: Connection refused (os error 61); check the server is running and the address is correct` | `"http://127.0.0.1:4999/v1/chat/completions" refused the connection: nothing is listening at that address and port. Start the server, or correct the address in the configuration` |
+| A local server answering 400 with a JSON body | `cannot reach "http://127.0.0.1:4998/v1/chat/completions": server answered with status 400; check the server is running and the address is correct` | `"http://127.0.0.1:4998/v1/chat/completions" answered with status 400 and refused the request: {"error":{"message":"model 'probe-model' not found","type":"invalid_request_error"}}. Correct the address, model or token in the configuration.` |
+| A local server that accepts and never answers, with the shipped 30-second bound | `cannot reach "http://127.0.0.1:4997/v1/chat/completions": …: Network Error: Error encountered in the status line: timed out reading response; check the server is running and the address is correct` | `"http://127.0.0.1:4997/v1/chat/completions" did not reply within 30 seconds. If the server is still loading a model, wait and try again` |
+
+The 400 and the timeout came from a small local Python server on the ports named, because
+the owner's LM Studio on `127.0.0.1:4000` gave no 4xx to a request the engine can build
+(next subsection). The refused port is a port on this machine that `curl` could not
+connect to (exit 7) and on which `lsof` showed no listener.
+
+### The owner's LM Studio on `127.0.0.1:4000`, read only
+
+- A request naming a model the server does not have (`no-such-model-…`) was answered
+  with status 200 and text by the model already loaded. No load or unload request was
+  made. This is not a refusal, so it is no evidence for this change.
+- A POST to a path the server does not serve, `/v1/chat/completionz`:
+  `curl` showed `HTTP 200` and the body `{"error":"Unexpected endpoint or method.
+  (POST /v1/chat/completionz)"}`. **The server reports this refusal as a 200.**
+
+  | | Message |
+  |---|---|
+  | Before (`13733c5`) | `"http://127.0.0.1:4000/v1/chat/completionz" answered with something this could not read: no choices[0].message.content string in the response body` |
+  | After the first three commits (`a5fb539`) | the same: the acceptance criteria then covered non-2xx statuses only |
+  | After the amendment (`3686e4e`) | `"http://127.0.0.1:4000/v1/chat/completionz" answered with something this could not read: no choices[0].message.content string in the response body; the server said: {"error":"Unexpected endpoint or method. (POST /v1/chat/completionz)"}` |
+
+  The gap was found by this run, reported to the orchestrator, and closed in the same
+  pull request (`AC_52.md`, Amendment 2026-09-30).
+
+### Starting herdr
+
+`HERDR_BIN_PATH` pointed at three things, through `HerdrDeliverer::insert`:
+
+| Case | Before (`13733c5`) | After |
+|---|---|---|
+| A program that does not exist | `cannot run "herdr-voice-no-such-program": it is not on the PATH this process has, which is "<PATH>". Set HERDR_BIN_PATH to herdr's location, or start herdr from a shell where it is on the PATH` | unchanged |
+| A file without the execute bit | the same sentence, naming `<tmp>/herdr-without-x-bit` | `cannot run "<tmp>/herdr-without-x-bit": the file was found but this process is not allowed to run it. Make it executable (on Unix, chmod +x), or point HERDR_BIN_PATH at the herdr program itself` |
+| A directory | the same sentence, naming `<tmp>` | the same not-executable sentence, naming `<tmp>` |
+
+On this platform a directory and a file without the execute bit both come back from the
+operating system as a permission error, so both take the second message.
+
+### What was not verified
+
+- A timeout while the body of a 2xx response is being read. It would still print the
+  unreadable-answer sentence; it was read in the code, not reproduced.
+- The messages for `ETXTBSY` and resource exhaustion against a real program: a file
+  still open for writing cannot be produced on demand. They are tested by giving
+  `start_failure` the error, not by starting a program.
+- #66, an indicator test that fails intermittently on Linux. It was not run here, so
+  this run cannot say whether the change makes that failure readable; `src/indicator.rs`
+  has the same defect as `src/delivery.rs` (tracked in #101) and is not part of this
+  change.
+- The transcriber's messages against a live speech endpoint: they were produced in tests
+  against a local test double only. The rewrite engine is the one run against a live server.
+- Windows and Linux: the new messages were not produced on either.
+
 ## A reply with a newline in it, by hand on macOS, for issue #19
 
 Run on 2026-09-30 on macOS 26.6.2 (Darwin 25.6.0, arm64), on `fix/19-multiline-reply`

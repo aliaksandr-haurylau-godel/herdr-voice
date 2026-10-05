@@ -7,8 +7,13 @@ pub enum DeliveryError {
     /// docs/evidence.md, "Delivering into a pane that is gone" — or the raw
     /// output when it did not parse as that shape.
     Rejected(String),
-    /// `herdr` itself could not be started.
+    /// `herdr` itself was not found.
     NotFound { binary: String, path: String },
+    /// `herdr` was found and this process is not allowed to run it.
+    NotExecutable { binary: String },
+    /// Starting `herdr` failed for another reason, which is the operating
+    /// system's own text.
+    StartFailed { binary: String, reason: String },
 }
 
 impl std::fmt::Display for DeliveryError {
@@ -21,6 +26,17 @@ impl std::fmt::Display for DeliveryError {
                 "cannot run {binary:?}: it is not on the PATH this process has, which is \
                  {path:?}. Set HERDR_BIN_PATH to herdr's location, or start herdr from a shell \
                  where it is on the PATH"
+            ),
+            DeliveryError::NotExecutable { binary } => write!(
+                f,
+                "cannot run {binary:?}: the file was found but this process is not allowed to \
+                 run it. Make it executable (on Unix, chmod +x), or point HERDR_BIN_PATH at the \
+                 herdr program itself"
+            ),
+            DeliveryError::StartFailed { binary, reason } => write!(
+                f,
+                "cannot run {binary:?}: the operating system reported {reason:?}. This is often \
+                 temporary: try again, and if it keeps happening, report that text"
             ),
         }
     }
@@ -159,6 +175,27 @@ fn extract_reason(output: &[u8]) -> String {
     }
 }
 
+/// What starting the program failed with, read from the kind the operating
+/// system gave. Only `NotFound` means the program is not on the `PATH`;
+/// `PermissionDenied` means it was found and cannot be run (no execute bit, or a
+/// directory); anything else — a file still open for writing, exhausted
+/// processes — carries the system's own text.
+fn start_failure(binary: &str, error: &std::io::Error) -> DeliveryError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => DeliveryError::NotFound {
+            binary: binary.to_string(),
+            path: std::env::var("PATH").unwrap_or_default(),
+        },
+        std::io::ErrorKind::PermissionDenied => DeliveryError::NotExecutable {
+            binary: binary.to_string(),
+        },
+        _ => DeliveryError::StartFailed {
+            binary: binary.to_string(),
+            reason: error.to_string(),
+        },
+    }
+}
+
 pub struct HerdrDeliverer {
     binary: String,
 }
@@ -183,10 +220,7 @@ impl HerdrDeliverer {
         match std::process::Command::new(&self.binary).args(args).output() {
             // herdr starts plugin commands with a minimal PATH — the same
             // reasoning src/stt/command.rs:78-86 states for the transcriber.
-            Err(_) => Err(DeliveryError::NotFound {
-                binary: self.binary.clone(),
-                path: std::env::var("PATH").unwrap_or_default(),
-            }),
+            Err(error) => Err(start_failure(&self.binary, &error)),
             Ok(output) if output.status.success() => Ok(()),
             Ok(output) => {
                 let text = if !output.stdout.is_empty() {
@@ -516,6 +550,146 @@ mod tests {
                 "--body",
                 "w1:p2: the text is in the plugin log"
             ]
+        );
+    }
+
+    #[test]
+    fn a_program_that_does_not_exist_keeps_the_path_sentence() {
+        let deliverer = HerdrDeliverer::with_binary("herdr-voice-no-such-program");
+        let error = deliverer.insert("w1:p2", "hello").expect_err("must fail");
+        assert!(
+            matches!(error, DeliveryError::NotFound { .. }),
+            "got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("herdr-voice-no-such-program"),
+            "got {message}"
+        );
+        assert!(message.contains("not on the PATH"), "got {message}");
+        assert!(message.contains("HERDR_BIN_PATH"), "got {message}");
+        // The PATH that was searched is named, not an empty one.
+        assert!(
+            message.contains(&format!("{:?}", std::env::var("PATH").unwrap_or_default())),
+            "got {message}"
+        );
+    }
+
+    #[test]
+    fn start_failure_reads_the_kind_the_operating_system_gave() {
+        use std::io::{Error, ErrorKind};
+        assert!(matches!(
+            start_failure("herdr", &Error::from(ErrorKind::NotFound)),
+            DeliveryError::NotFound { .. }
+        ));
+        assert!(matches!(
+            start_failure("herdr", &Error::from(ErrorKind::PermissionDenied)),
+            DeliveryError::NotExecutable { .. }
+        ));
+        assert!(matches!(
+            start_failure("herdr", &Error::other("Text file busy")),
+            DeliveryError::StartFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn another_failure_to_start_carries_the_operating_systems_text_and_not_the_path_sentence() {
+        let error = start_failure(
+            "/opt/herdr",
+            &std::io::Error::other("Text file busy (os error 26)"),
+        );
+        assert_eq!(
+            error,
+            DeliveryError::StartFailed {
+                binary: "/opt/herdr".to_string(),
+                reason: "Text file busy (os error 26)".to_string(),
+            }
+        );
+        let message = error.to_string();
+        assert!(message.contains("/opt/herdr"), "got {message}");
+        assert!(
+            message.contains("Text file busy (os error 26)"),
+            "got {message}"
+        );
+        assert!(message.contains("try again"), "got {message}");
+        assert!(!message.contains("PATH"), "got {message}");
+    }
+
+    #[test]
+    fn a_found_program_that_cannot_be_run_says_so_and_not_the_path_sentence() {
+        let message = DeliveryError::NotExecutable {
+            binary: "/opt/herdr".to_string(),
+        }
+        .to_string();
+        assert!(message.contains("/opt/herdr"), "got {message}");
+        assert!(message.contains("was found"), "got {message}");
+        assert!(message.contains("chmod +x"), "got {message}");
+        assert!(
+            message.contains("point HERDR_BIN_PATH at the herdr program itself"),
+            "got {message}"
+        );
+        assert!(!message.contains("not on the PATH"), "got {message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_without_the_execute_bit_is_not_executable() {
+        let recorder = Recorder::new("not-executable", "herdr-without-x-bit");
+        // Written and left with the mode the umask gives it: no execute bit.
+        std::fs::write(&recorder.script, "#!/bin/sh\nexit 0\n").expect("write");
+        let binary = recorder.script.to_string_lossy().into_owned();
+        let deliverer = HerdrDeliverer::with_binary(binary.clone());
+        let error = deliverer.insert("w1:p2", "hello").expect_err("must fail");
+        assert_eq!(
+            error,
+            DeliveryError::NotExecutable { binary },
+            "got {error:?}"
+        );
+        assert!(
+            !error.to_string().contains("not on the PATH"),
+            "got {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_named_as_the_program_is_not_executable() {
+        let recorder = Recorder::new("directory", "unused");
+        let binary = recorder.dir.to_string_lossy().into_owned();
+        let deliverer = HerdrDeliverer::with_binary(binary.clone());
+        let error = deliverer.insert("w1:p2", "hello").expect_err("must fail");
+        assert_eq!(
+            error,
+            DeliveryError::NotExecutable { binary },
+            "got {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("point HERDR_BIN_PATH at the herdr program itself"),
+            "got {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_starts_and_fails_is_still_a_rejection() {
+        let recorder = Recorder::new("rejects", "herdr-rejecting");
+        std::fs::write(
+            &recorder.script,
+            "#!/bin/sh\necho '{\"error\":{\"code\":\"pane_not_found\",\"message\":\"gone\"}}'\nexit 1\n",
+        )
+        .expect("write");
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&recorder.script)
+            .expect("stat")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&recorder.script, perms).expect("chmod");
+        let deliverer = HerdrDeliverer::with_binary(recorder.script.to_string_lossy().into_owned());
+        assert_eq!(
+            deliverer.insert("w1:p2", "hello"),
+            Err(DeliveryError::Rejected("pane_not_found".to_string()))
         );
     }
 }

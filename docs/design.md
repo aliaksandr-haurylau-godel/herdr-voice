@@ -67,6 +67,45 @@ differences are declared rather than branched in code.
 The daemon keeps the speech model resident, which removes the model load from
 every dictation, and it turns each keypress into a socket write of a few bytes.
 
+### The daemon outlives its herdr
+
+#### Context
+
+herdr starts the daemon from the manifest's `startup` entry and connects its
+standard error to a pipe that herdr reads. When herdr exits it does not stop the
+daemon: the daemon is re-parented to the init process and keeps the socket, with
+nobody on the read end of that pipe. The next herdr runs `startup` again, finds the
+socket held, and its own daemon exits at once.
+
+#### Problem
+
+Every write to standard error fails once the pipe has no reader, and `eprintln!`
+panics on a failed write. The panic happened on the connection thread before the
+reply was written, so every action after a herdr restart failed with an empty reply
+while `doctor`, which only connected and closed, said the daemon was fine. Either the
+daemon has to keep answering after its herdr has gone, or it has to notice and exit
+so the next `startup` owns the socket. Noticing needs a signal that exists on every
+platform: a broken standard error is seen only when something is written, and means
+nothing where the address is a named pipe.
+
+#### Decision
+
+The daemon keeps serving. It does not look for its herdr and does not exit because
+it has gone. All standard error output goes through `src/stderr.rs`, which drops a
+failed write, and lines written while serving go through the runtime's journal, so a
+dead pipe cannot stop a reply. `doctor` sends a `ping` request, which the daemon
+answers `pong` without reading a context or touching a take, and reports the daemon
+as `ok` only when that answer arrives; otherwise it says the daemon did not answer
+and names how to end it.
+
+#### Why
+
+The daemon keeps the speech model resident, and ending it because its herdr
+restarted would throw that away and lose a take that was being recorded. With
+standard error unable to stop a reply, the daemon the new herdr finds answers. A
+`ping` reaches the same reading, writing and journal lines a keypress does, so the
+probe fails where a keypress would; a bare connect could not.
+
 ## 3. Target pane
 
 ### Context
@@ -471,3 +510,8 @@ absolute home paths that expose an account name.
 5. Recording starts with a short delay while the capture device opens, so the
    first fraction of a second of speech can be lost. A permanently open capture
    stream would remove it at the cost of holding the microphone open.
+6. Whether the environment a daemon was started with, the `HERDR_*` variables it
+   uses to reach herdr for indicators, notifications and delivery, still reaches the
+   herdr that replaced the one that started it. A daemon left behind by a restart
+   answers requests, but if those variables name something that went with the old
+   herdr, its calls to herdr fail. Not yet measured.
