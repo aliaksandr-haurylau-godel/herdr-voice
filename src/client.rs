@@ -1,4 +1,4 @@
-//! The short-lived half: one connection, one frame, one reply line, exit.
+//! The short-lived half: one connection, one frame, one reply, exit.
 //!
 //! Holding a key starts this about twelve times a second (`docs/evidence.md`), so
 //! it reads the context out of the environment and copies it without looking at
@@ -85,7 +85,11 @@ pub fn outcome(result: Result<Reply, ClientError>) -> Outcome {
         },
         Err(ClientError::Protocol(why)) => Outcome {
             code: 1,
-            message: Some(format!("the daemon spoke something unexpected: {why}")),
+            message: Some(format!(
+                "the daemon spoke something unexpected: {why}; \
+                 check `herdr plugin log list --plugin herdr-voice`, and restart the daemon \
+                 if the log shows it stopped"
+            )),
         },
     }
 }
@@ -162,6 +166,23 @@ mod tests {
         let outcome = outcome(Ok(Reply::Error("no pane".into())));
         assert_eq!(outcome.code, 1);
         assert_eq!(outcome.message.as_deref(), Some("no pane"));
+    }
+
+    #[test]
+    fn a_reply_the_client_cannot_read_says_where_to_look() {
+        let outcome = outcome(Err(ClientError::Protocol(
+            "body of 5 bytes, header promised 10".into(),
+        )));
+        assert_eq!(outcome.code, 1);
+        let message = outcome.message.expect("a message");
+        assert!(
+            message.contains("header promised 10"),
+            "keeps the cause: {message:?}"
+        );
+        assert!(
+            message.contains("herdr plugin log list --plugin herdr-voice"),
+            "names where to look: {message:?}"
+        );
     }
 
     #[test]
@@ -253,5 +274,30 @@ mod tests {
         let body = br#"{"focused_pane_id":"w1:p2","tab_label":"a \"quoted\" label"}"#.to_vec();
         send_to(&address, "cancel", None, body.clone());
         assert_eq!(server.join().unwrap().context, body);
+    }
+
+    #[test]
+    fn a_reply_with_newlines_reaches_the_caller_whole_with_the_exit_code_of_its_kind() {
+        const TEXT: &str = "the engine is not configured, for example:\n  command = [\"x\"]\n\
+                            the take is kept at /takes/1.wav";
+        let address = crate::transport::tests_support::probe_address("client-multiline");
+        let listener = crate::transport::listen(&address).expect("listen");
+        let server = std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(listener.accept().expect("accept"));
+            Request::read_from(&mut reader).expect("read");
+            Reply::Error(TEXT.into())
+                .write_to(reader.get_mut())
+                .expect("write");
+        });
+
+        let outcome = send_to(&address, "cancel", Some("cancel".into()), Vec::new());
+        server.join().expect("the server thread");
+        assert_eq!(
+            outcome,
+            Outcome {
+                code: 1,
+                message: Some(TEXT.to_string()),
+            }
+        );
     }
 }

@@ -4,9 +4,12 @@
 //! body is the bytes of `HERDR_PLUGIN_CONTEXT_JSON`, copied by the client without
 //! inspection: holding a key starts the client about twelve times a second, and it
 //! has no use for the fields. See `tasks/3/DESIGN_3.md`, section 2.
+//!
+//! The reply is one line when its text has no newline. A text with a newline is
+//! a header line, `ok+<n>` or `error+<n>`, followed by exactly `<n>` bytes.
 
 use std::fmt;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 
 /// The protocol token. A mismatch is refused by name rather than ignored.
 pub const PROTOCOL: &str = "voice/1";
@@ -43,6 +46,9 @@ pub enum ProtoError {
         expected: usize,
         got: usize,
     },
+    /// A reply body that is not valid UTF-8. The daemon only ever writes text,
+    /// so this is a peer that is not one.
+    NotText,
     Io(io::Error),
 }
 
@@ -61,6 +67,7 @@ impl fmt::Display for ProtoError {
             ProtoError::ShortBody { expected, got } => {
                 write!(f, "body of {got} bytes, header promised {expected}")
             }
+            ProtoError::NotText => write!(f, "the reply text is not valid UTF-8"),
             ProtoError::Io(e) => write!(f, "{e}"),
         }
     }
@@ -154,11 +161,34 @@ impl Request {
     }
 }
 
+/// Splits `ok+<n>` or `error+<n>` into the kind and the announced length. Anything
+/// else, including a length that is not plain digits, is `None`.
+fn announced(line: &str) -> Option<(&str, usize)> {
+    let (kind, digits) = line.split_once('+')?;
+    if kind != "ok" && kind != "error" {
+        return None;
+    }
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((kind, digits.parse().ok()?))
+}
+
 impl Reply {
+    /// A text without a newline travels as one line, as it always has. A text
+    /// with a newline travels as a header line that announces its length in
+    /// bytes, followed by exactly that many bytes, so the reader never has to
+    /// guess where the text ends.
     pub fn write_to<W: Write>(&self, w: &mut W) -> Result<(), ProtoError> {
-        match self {
-            Reply::Ok(text) => writeln!(w, "ok {text}")?,
-            Reply::Error(text) => writeln!(w, "error {text}")?,
+        let (kind, text) = match self {
+            Reply::Ok(text) => ("ok", text),
+            Reply::Error(text) => ("error", text),
+        };
+        if text.contains('\n') {
+            writeln!(w, "{kind}+{}", text.len())?;
+            w.write_all(text.as_bytes())?;
+        } else {
+            writeln!(w, "{kind} {text}")?;
         }
         w.flush()?;
         Ok(())
@@ -169,11 +199,30 @@ impl Reply {
         r.read_line(&mut line)?;
         let line = line.trim_end_matches(['\r', '\n']);
         match line.split_once(' ') {
-            Some(("ok", rest)) => Ok(Reply::Ok(rest.to_string())),
-            Some(("error", rest)) => Ok(Reply::Error(rest.to_string())),
-            _ if line == "ok" => Ok(Reply::Ok(String::new())),
-            _ => Err(ProtoError::BadHeader(line.to_string())),
+            Some(("ok", rest)) => return Ok(Reply::Ok(rest.to_string())),
+            Some(("error", rest)) => return Ok(Reply::Error(rest.to_string())),
+            _ if line == "ok" => return Ok(Reply::Ok(String::new())),
+            _ => {}
         }
+        let Some((kind, length)) = announced(line) else {
+            return Err(ProtoError::BadHeader(line.to_string()));
+        };
+        // Read what arrives, up to the announced length, rather than allocating
+        // the announced length: a wrong number cannot cost more than was sent.
+        let mut body = Vec::new();
+        Read::take(&mut *r, length as u64).read_to_end(&mut body)?;
+        if body.len() != length {
+            return Err(ProtoError::ShortBody {
+                expected: length,
+                got: body.len(),
+            });
+        }
+        let text = String::from_utf8(body).map_err(|_| ProtoError::NotText)?;
+        Ok(if kind == "ok" {
+            Reply::Ok(text)
+        } else {
+            Reply::Error(text)
+        })
     }
 }
 
@@ -295,5 +344,180 @@ mod tests {
             let read = Reply::read_from(&mut BufReader::new(&buffer[..])).expect("read");
             assert_eq!(read, reply);
         }
+    }
+
+    fn reply_bytes(reply: &Reply) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        reply.write_to(&mut buffer).expect("write");
+        buffer
+    }
+
+    fn reply_round_trip(reply: &Reply) -> Reply {
+        Reply::read_from(&mut BufReader::new(&reply_bytes(reply)[..])).expect("read")
+    }
+
+    #[test]
+    fn a_reply_without_a_newline_is_written_as_it_always_was() {
+        assert_eq!(
+            reply_bytes(&Reply::Ok("holding for w1:p1".into())),
+            b"ok holding for w1:p1\n"
+        );
+        assert_eq!(
+            reply_bytes(&Reply::Error("no pane".into())),
+            b"error no pane\n"
+        );
+        assert_eq!(reply_bytes(&Reply::Ok(String::new())), b"ok \n");
+    }
+
+    #[test]
+    fn a_reply_with_a_newline_announces_its_length_in_bytes() {
+        assert_eq!(reply_bytes(&Reply::Ok("a\nb".into())), b"ok+3\na\nb");
+        // Two bytes for the letter and one for the newline: the count is bytes.
+        assert_eq!(
+            reply_bytes(&Reply::Error("é\n".into())),
+            "error+3\né\n".as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_reply_carrying_newlines_arrives_whole() {
+        for text in [
+            "",
+            "first line\nsecond line",
+            "ends with a newline\n",
+            "\n",
+            "\n\n",
+            "a\n\nb",
+            "a\r\nb",
+            "café\nnaïve — ü",
+            "ok+3",
+            "ok+3\nmore",
+        ] {
+            for reply in [Reply::Ok(text.to_string()), Reply::Error(text.to_string())] {
+                assert_eq!(reply_round_trip(&reply), reply, "text {text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_reader_stops_where_the_announced_length_stops() {
+        let mut input = BufReader::new(&b"ok+3\na\nbXYZ"[..]);
+        assert_eq!(
+            Reply::read_from(&mut input).expect("read"),
+            Reply::Ok("a\nb".into())
+        );
+        let mut rest = String::new();
+        std::io::Read::read_to_string(&mut input, &mut rest).expect("rest");
+        assert_eq!(rest, "XYZ");
+    }
+
+    #[test]
+    fn a_body_shorter_than_announced_is_refused_with_both_numbers() {
+        let error =
+            Reply::read_from(&mut BufReader::new(&b"ok+10\nshort"[..])).expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ProtoError::ShortBody {
+                    expected: 10,
+                    got: 5
+                }
+            ),
+            "got {error:?}"
+        );
+        let error =
+            Reply::read_from(&mut BufReader::new(&b"error+4\n"[..])).expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ProtoError::ShortBody {
+                    expected: 4,
+                    got: 0
+                }
+            ),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn an_absurd_announced_length_is_an_error_not_an_allocation() {
+        let error = Reply::read_from(&mut BufReader::new(&b"ok+4000000000\nx"[..]))
+            .expect_err("must refuse");
+        assert!(
+            matches!(
+                error,
+                ProtoError::ShortBody {
+                    expected: 4_000_000_000,
+                    got: 1
+                }
+            ),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_header_whose_length_is_not_digits_is_refused_as_a_bad_header() {
+        for input in [
+            &b"ok+\nabc"[..],
+            b"ok+x\nabc",
+            b"ok+-1\nabc",
+            b"ok+1x\nabc",
+            b"ok+3 tail\nabc",
+            b"error+ 3\nabc",
+            b"okay+3\nabc",
+            b"ok++3\nabc",
+        ] {
+            let error = Reply::read_from(&mut BufReader::new(input)).expect_err("must refuse");
+            assert!(
+                matches!(error, ProtoError::BadHeader(_)),
+                "{:?} gave {error:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_line_that_ends_in_carriage_return_and_newline_is_still_read() {
+        assert_eq!(
+            Reply::read_from(&mut BufReader::new(&b"ok hello\r\n"[..])).expect("read"),
+            Reply::Ok("hello".into())
+        );
+        assert_eq!(
+            Reply::read_from(&mut BufReader::new(&b"error+3\r\na\nb"[..])).expect("read"),
+            Reply::Error("a\nb".into())
+        );
+    }
+
+    #[test]
+    fn the_refusal_of_a_body_that_is_not_text_says_so() {
+        assert!(
+            ProtoError::NotText.to_string().contains("not valid UTF-8"),
+            "got {:?}",
+            ProtoError::NotText.to_string()
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_text_is_refused_by_name() {
+        let error =
+            Reply::read_from(&mut BufReader::new(&b"ok+2\n\xff\xfe"[..])).expect_err("must refuse");
+        assert!(matches!(error, ProtoError::NotText), "got {error:?}");
+    }
+
+    #[test]
+    fn a_multi_line_reply_crosses_a_real_socket_whole() {
+        fn sent() -> Reply {
+            Reply::Ok("first line\nsecond line [-20.0 dB, w1:p2]".into())
+        }
+        let address = crate::transport::tests_support::probe_address("proto-multiline-reply");
+        let listener = crate::transport::listen(&address).expect("listen");
+        let server = std::thread::spawn(move || {
+            let mut stream = listener.accept().expect("accept");
+            sent().write_to(&mut stream).expect("write");
+        });
+        let stream = crate::transport::connect(&address).expect("connect");
+        let read = Reply::read_from(&mut BufReader::new(stream)).expect("read");
+        server.join().expect("the server thread");
+        assert_eq!(read, sent());
     }
 }
