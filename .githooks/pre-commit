@@ -23,6 +23,7 @@ fi
 
 # 2. The private word list: names this repository must never receive. The file is
 # untracked on purpose, so the list itself is not published. See .leakwords.example.
+# The hook refuses to run without it.
 if [ -f "$root/.leakwords" ]; then
   while IFS= read -r pattern; do
     case "$pattern" in ''|'#'*) continue ;; esac
@@ -32,6 +33,11 @@ if [ -f "$root/.leakwords" ]; then
       exit 1
     fi
   done < "$root/.leakwords"
+else
+  echo "leak gate: .leakwords is missing, so the private word list was not checked" >&2
+  echo "create it with: cp .leakwords.example .leakwords" >&2
+  echo "then list the names that must never be committed; an empty list is allowed" >&2
+  exit 1
 fi
 
 # 3. Editing debris: conflict markers left by a merge, and the tag pairs an

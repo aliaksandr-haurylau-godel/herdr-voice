@@ -146,25 +146,50 @@ fn daemon_finding() -> Finding {
             state: State::Missing,
             detail: e.to_string(),
         },
-        Ok(address) => {
-            if transport::connect(&address).is_ok() {
-                Finding {
-                    name: "daemon",
-                    state: State::Ok,
-                    detail: format!("listening at {}", address.display()),
-                }
-            } else {
-                Finding {
-                    name: "daemon",
-                    state: State::Missing,
-                    detail: format!(
-                        "nothing is listening at {}; start it with `herdr-voice daemon`, \
-                         or restart herdr",
-                        address.display()
-                    ),
-                }
-            }
-        }
+        Ok(address) => daemon_finding_at(&address),
+    }
+}
+
+/// `ok` only when a request comes back with a reply. A bare connect proves that a
+/// process holds the socket, not that it serves anything: the daemon a herdr
+/// restart leaves behind held the socket and answered nothing (issue #93).
+fn daemon_finding_at(address: &transport::Address) -> Finding {
+    if transport::connect(address).is_err() {
+        return Finding {
+            name: "daemon",
+            state: State::Missing,
+            detail: format!(
+                "nothing is listening at {}; start it with `herdr-voice daemon`, \
+                 or restart herdr",
+                address.display()
+            ),
+        };
+    }
+    let outcome = crate::client::send_to(address, "ping", None, Vec::new());
+    if outcome.code == 0 && outcome.message.as_deref() == Some("pong") {
+        return Finding {
+            name: "daemon",
+            state: State::Ok,
+            detail: format!("listening at {}", address.display()),
+        };
+    }
+    let recovery = if cfg!(unix) {
+        "end it with `pkill -f 'herdr-voice daemon'`"
+    } else {
+        "end the herdr-voice process that was started with `daemon`"
+    };
+    Finding {
+        name: "daemon",
+        state: State::Missing,
+        detail: format!(
+            "did not answer a request at {}: {}; {recovery}, then restart herdr or \
+             run `herdr-voice daemon`",
+            address.display(),
+            outcome
+                .message
+                .as_deref()
+                .unwrap_or("the reply was not `pong`")
+        ),
     }
 }
 
@@ -701,6 +726,110 @@ pub fn run() -> u8 {
 mod tests {
     use super::*;
     use crate::stt::model;
+
+    /// A listener written by hand. Its first connection is the bare connect
+    /// `daemon_finding_at` makes; its second carries the `ping`, which it answers
+    /// with `reply`, or by closing when `reply` is `None`.
+    #[cfg(unix)]
+    fn listener_answering(tag: &str, reply: Option<crate::proto::Reply>) -> transport::Address {
+        let address = transport::tests_support::probe_address(tag);
+        let listener = transport::listen(&address).expect("listen");
+        std::thread::spawn(move || {
+            drop(listener.accept().expect("the bare connect"));
+            let connection = listener.accept().expect("the ping");
+            let mut reader = std::io::BufReader::new(connection);
+            let _ = crate::proto::Request::read_from(&mut reader);
+            if let Some(reply) = reply {
+                let _ = reply.write_to(reader.get_mut());
+            }
+        });
+        address
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_that_answers_pong_is_ok() {
+        let address = listener_answering(
+            "doctor-pong",
+            Some(crate::proto::Reply::Ok("pong".to_string())),
+        );
+        let finding = daemon_finding_at(&address);
+        assert_eq!(finding.state, State::Ok, "got {finding:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_that_closes_without_answering_is_missing() {
+        let address = listener_answering("doctor-silent", None);
+        let finding = daemon_finding_at(&address);
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(finding.detail.contains(address.display()));
+        assert!(
+            finding.detail.contains("pkill -f 'herdr-voice daemon'"),
+            "the recovery must be named: {}",
+            finding.detail
+        );
+        assert!(
+            finding.detail.contains("restart herdr"),
+            "{}",
+            finding.detail
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_that_answers_something_else_is_missing() {
+        let address = listener_answering(
+            "doctor-other",
+            Some(crate::proto::Reply::Ok("something else".to_string())),
+        );
+        let finding = daemon_finding_at(&address);
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_that_answers_with_nothing_is_missing_and_says_what_it_wanted() {
+        let address =
+            listener_answering("doctor-empty", Some(crate::proto::Reply::Ok(String::new())));
+        let finding = daemon_finding_at(&address);
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(
+            finding.detail.contains("the reply was not `pong`"),
+            "{}",
+            finding.detail
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_that_does_not_know_ping_is_missing_and_says_so() {
+        let address = listener_answering(
+            "doctor-old",
+            Some(crate::proto::Reply::Error(
+                "unknown command: ping".to_string(),
+            )),
+        );
+        let finding = daemon_finding_at(&address);
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(
+            finding.detail.contains("unknown command: ping"),
+            "{}",
+            finding.detail
+        );
+    }
+
+    #[test]
+    fn nothing_listening_keeps_the_existing_text() {
+        let address = transport::tests_support::probe_address("doctor-nobody");
+        let finding = daemon_finding_at(&address);
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(
+            finding.detail.starts_with("nothing is listening at"),
+            "{}",
+            finding.detail
+        );
+    }
 
     #[test]
     fn recording_off_is_a_default_and_never_a_failure() {
