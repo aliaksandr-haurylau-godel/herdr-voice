@@ -1832,3 +1832,157 @@ followed by the same clippy) no warning, with `src/` restored afterwards.
   states. It was not run.
 - That the trigger named in the issue occurs with the documented `whisper-cli` command: it
   did not here (see above).
+
+## Where herdr sends notifications, and what `doctor` says about it, for issue #85
+
+Verified on macOS (Darwin 25.6.0), herdr 0.9.1, this machine, 2026-09-30. Nothing
+here was verified on Windows.
+
+**Whether herdr can be asked.** It cannot. `herdr api schema --json` lists the
+request methods; none of them reads configuration, and the only configuration method
+is `server.reload_config`. `herdr config check` prints one line, `config: ok`.
+`herdr status server` prints the version, protocol and socket. The reply of
+`herdr notification show` was probed next (below) and does not identify the setting
+once a client is attached. The configuration file's `[ui.toast] delivery` is the
+only source, so `doctor` reads it.
+
+**The probes.** Each ran against an isolated server: its own `HERDR_CONFIG_PATH`
+and `HERDR_SOCKET_PATH` in a short scratch directory (a Unix socket path is limited
+in length), and `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_TAB_ID` and
+`HERDR_WORKSPACE_ID` removed from the environment of every command. `h.sh` is the
+wrapper that sets those; the server was stopped with `kill` on the process that
+held its socket, and the owner's server, started earlier and holding another
+socket, was checked to be still running. For the focused-client runs a pseudo-terminal
+client is attached and sent the focus-in report; its text is at the end of this
+section. Output as produced:
+
+```
+$ ./h.sh --version
+herdr 0.9.1
+--- result 4: empty configuration file, no client
+$ ./h.sh notification show probe --body empty
+{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}
+--- result 5: absent configuration file, no client
+$ ./h.sh notification show probe --body absent
+{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}
+--- results 1 and 2: no client
+delivery = "off":
+{"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}
+delivery = "terminal":
+{"id":"cli:notification:show","result":{"reason":"no_foreground_client","shown":false,"type":"notification_show"}}
+delivery = "herdr":
+{"id":"cli:notification:show","result":{"reason":"no_foreground_client","shown":false,"type":"notification_show"}}
+delivery = "system":
+{"id":"cli:notification:show","result":{"reason":"no_foreground_client","shown":false,"type":"notification_show"}}
+--- result 3: focused client attached (probe.py attach)
+off | reload: "result":{"diagnostics":[],"status":"applied","type":"config_reload"}} | show: :show","result":{"reason":"shown","shown":true,"type":"notification_show"}}
+terminal | reload: "result":{"diagnostics":[],"status":"applied","type":"config_reload"}} | show: :show","result":{"reason":"shown","shown":true,"type":"notification_show"}}
+herdr | reload: "result":{"diagnostics":[],"status":"applied","type":"config_reload"}} | show: :show","result":{"reason":"shown","shown":true,"type":"notification_show"}}
+system | reload: "result":{"diagnostics":[],"status":"applied","type":"config_reload"}} | show: :show","result":{"reason":"shown","shown":true,"type":"notification_show"}}
+off | reload: "result":{"diagnostics":[],"status":"applied","type":"config_reload"}} | show: :show","result":{"reason":"shown","shown":true,"type":"notification_show"}}
+```
+
+| client attached | `delivery` | `reason` | `shown` |
+|---|---|---|---|
+| no | `off` | `disabled` | false |
+| no | `terminal`, `herdr`, `system` | `no_foreground_client` | false |
+| yes, focused | `off`, `terminal`, `herdr`, `system` | `shown` | true |
+| no | empty file, or no file | `disabled` | false |
+
+With a focused client the reply is `shown: true` for every value including `off`;
+the reply therefore cannot be used to find out where notifications go. An empty file
+and an absent file behave as `off`, herdr's documented default.
+
+**`doctor`, run as a person meets it.** The first run reads the owner's own
+configuration (`delivery = "herdr"`), read only; the others point
+`HERDR_CONFIG_PATH` at a scratch file. Home directory shown as `~`; nothing else is edited.
+
+```
+$ herdr-voice doctor        # owner configuration, read only
+herdr         ok       herdr 0.9.1, this plugin needs 0.8.0 or newer
+daemon        ok       listening at ~/.local/state/herdr/plugins/herdr-voice/voice.sock
+notifications ok       set to "herdr" in ~/.config/herdr/config.toml: herdr is configured to draw the toast itself
+config        ok       ~/.config/herdr/plugins/config/herdr-voice/config.toml
+engine        ok       "command" is ready
+model         ok       ~/.local/state/herdr/plugins/herdr-voice/models/ggml-large-v3-turbo.bin
+rewrite       ok       configured to post to "http://127.0.0.1:4000/v1/chat/completions"
+record        default  off; set [record] transcripts = true to keep each take's transcript and rewrite beside its recording
+exit=0
+$ HERDR_CONFIG_PATH=/tmp/h85d/c.toml herdr-voice doctor   # delivery = "terminal"
+notifications warning  set to "terminal" in /tmp/h85d/c.toml: herdr hands the message on and cannot tell whether it appeared, so this plugin's failure messages may not reach you; to have herdr show this plugin's messages itself, set `[ui.toast] delivery = "herdr"` in herdr's configuration and run `herdr server reload-config`; they are also written to the plugin log: `herdr plugin log list --plugin herdr-voice`
+exit=0
+$ HERDR_CONFIG_PATH=/tmp/h85d/c.toml herdr-voice doctor   # delivery = "off"
+notifications missing  set to "off" in /tmp/h85d/c.toml: this plugin's failure messages are not expected to appear anywhere in herdr; to have herdr show this plugin's messages itself, set `[ui.toast] delivery = "herdr"` in herdr's configuration and run `herdr server reload-config`; they are also written to the plugin log: `herdr plugin log list --plugin herdr-voice`
+exit=1
+$ HERDR_CONFIG_PATH=/tmp/h85d/c.toml herdr-voice doctor   # delivery = "system"
+notifications warning  set to "system" in /tmp/h85d/c.toml: herdr hands the message on and cannot tell whether it appeared, so this plugin's failure messages may not reach you; to have herdr show this plugin's messages itself, set `[ui.toast] delivery = "herdr"` in herdr's configuration and run `herdr server reload-config`; they are also written to the plugin log: `herdr plugin log list --plugin herdr-voice`
+exit=0
+$ HERDR_CONFIG_PATH=/tmp/h85d/c.toml herdr-voice doctor   # delivery = "herdr"
+notifications ok       set to "herdr" in /tmp/h85d/c.toml: herdr is configured to draw the toast itself
+exit=0
+$ HERDR_CONFIG_PATH=/tmp/h85d/c.toml herdr-voice doctor   # empty file
+notifications missing  no [ui.toast] delivery in /tmp/h85d/c.toml (herdr's default is "off"): this plugin's failure messages are not expected to appear anywhere in herdr; to have herdr show this plugin's messages itself, set `[ui.toast] delivery = "herdr"` in herdr's configuration and run `herdr server reload-config`; they are also written to the plugin log: `herdr plugin log list --plugin herdr-voice`
+$ HERDR_CONFIG_PATH=/tmp/h85d/none.toml herdr-voice doctor   # no such file
+notifications missing  no file at /tmp/h85d/none.toml (herdr's default delivery is "off"): this plugin's failure messages are not expected to appear anywhere in herdr; to have herdr show this plugin's messages itself, set `[ui.toast] delivery = "herdr"` in herdr's configuration and run `herdr server reload-config`; they are also written to the plugin log: `herdr plugin log list --plugin herdr-voice`
+```
+
+`terminal` and `system` give `warning` and exit 0; `off`, an empty file and a missing
+file give `missing` and exit 1 (the exit code was read for `off`; the empty-file and
+missing-file runs were not checked for it).
+
+**Gates.** See the run record `tasks/85/RUN_85.md` for the numbers of the last
+run of `cargo test`, `cargo clippy`, `cargo fmt --check`, `python3
+scripts/check_manifest.py` and the Windows dead-code check.
+
+**What this does not establish.**
+
+- That a person sees a toast under any of the four values. No terminal on this
+  machine was watched for a desktop notification.
+- The Windows path, `%APPDATA%\herdr\config.toml`. It is taken from herdr's
+  documentation of the configuration file and was not run on Windows.
+- The running server's setting. `doctor` reads the file; a server that has not
+  reloaded can differ from it, and the wording says "set to", not "in effect".
+- `cfg!(windows)` in `herdr_config_location`: a mutation that changes it survives on
+  macOS, where it is always false.
+
+`h.sh`:
+
+```sh
+#!/bin/sh
+exec env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \\
+  HERDR_CONFIG_PATH=/tmp/h85/config.toml HERDR_SOCKET_PATH=/tmp/h85/h.sock herdr "$@"
+```
+
+The client program used for the focused-client runs (`probe.py`, invoked as
+`python3 probe.py attach off terminal herdr system off`, with `h.sh` beside it):
+
+```python
+import os, pty, subprocess, time, signal, select, fcntl, termios, struct, sys
+env = {k:v for k,v in os.environ.items() if k not in ("HERDR_ENV","HERDR_PANE_ID","HERDR_TAB_ID","HERDR_WORKSPACE_ID")}
+env["HERDR_CONFIG_PATH"]="/tmp/h85/config.toml"; env["HERDR_SOCKET_PATH"]="/tmp/h85/h.sock"; env["TERM"]="xterm-256color"
+attach = sys.argv[1]=="attach"
+pid=fd=None
+if attach:
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe("herdr", ["herdr"], env)
+    fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack("HHHH",40,120,0,0))
+def drain(t):
+    end=time.time()+t
+    while time.time()<end:
+        if fd is None: time.sleep(0.2); continue
+        r,_,_=select.select([fd],[],[],0.2)
+        if r:
+            try: os.read(fd,65536)
+            except OSError: return
+drain(3)
+if attach: os.write(fd,b"\x1b[I"); drain(2)
+for v in sys.argv[2:]:
+    open("/tmp/h85/config.toml","w").write('[ui.toast]\ndelivery = "%s"\n'%v)
+    r=subprocess.run(["/tmp/h85/h.sh","server","reload-config"],capture_output=True,text=True)
+    drain(1)
+    o=subprocess.run(["/tmp/h85/h.sh","notification","show","probe","--body",v],capture_output=True,text=True)
+    print(v, "| reload:", r.stdout.strip()[-70:], "| show:", o.stdout.strip()[-75:])
+    drain(1.5)
+if attach: os.kill(pid, signal.SIGKILL)
+```

@@ -323,10 +323,17 @@ would be worse than a missing indicator: the token lives by being renewed, so a
 thread that stopped renewing would let it lapse and the sidebar would say the
 take was over while the person was still speaking.
 
-Toasts announce completion and errors.
+Toasts announce completion and errors. They go through `herdr notification show`,
+which answers that it showed the message whether or not anyone could see it, and
+which cannot be asked where notifications go: herdr's `[ui.toast] delivery`
+decides that, and the default is `off`.
 
 `doctor` reports what is missing: microphone permission, model, rewrite engine,
-herdr version.
+herdr version, and where herdr is configured to send notifications. It reads that
+setting from herdr's configuration file, since herdr offers no other way to learn
+it, and says what is configured there rather than what is in effect. `terminal`
+and `system` are reported as a warning, `off` and an unreadable file as missing
+(`docs/evidence.md`, "Where herdr sends notifications").
 
 ## 7. Configuration
 
