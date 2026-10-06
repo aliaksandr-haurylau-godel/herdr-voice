@@ -432,8 +432,10 @@ rename leaves behind, and each is answered rather than left:
 
 - **Keybindings that name an id herdr no longer knows.** `setup` reports each one,
   offers in one question to rewrite those blocks and append whatever is missing,
-  and does both in one write. The rewrite replaces the quoted value on the
-  `command` line and nothing else, so the block does not move, the key does not
+  and does both in one write. A question that nobody could answer — standard
+  input ended or could not be read — is reported as such and exits 1; a declined
+  offer exits 0. The rewrite replaces the quoted value on the `command` line and
+  nothing else, so the block does not move, the key does not
   change, and a comment above it goes on describing the binding under it. What was
   written is read back before it is written: a value spelled some other way that
   TOML allows is reported as left alone, with the line to change, and the run
