@@ -76,3 +76,9 @@ gate:
 
 S3 is closed. S4 starts when the orchestrator has answered on the wording of the two
 engine lines (criterion 6 of `AC_27.md`).
+
+### S4 Implement
+- wording approved: both engine lines are final as proposed in `DESIGN_27.md` section 1 and
+  `PLAN_27.md`, state `ok`: `[stt] command is set; its program is not looked for until a
+  take starts` and `[stt] url is set; the endpoint is not contacted until a take starts`.
+  Criterion 6 of `AC_27.md` is met.

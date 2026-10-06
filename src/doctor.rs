@@ -247,10 +247,21 @@ fn engine_finding_from(stt: &config::Stt, state: &stt::ModelState) -> Finding {
                 crate::stt::candle::device::describe(&device)
             ),
         },
-        Ok(_) => Finding {
+        // What `check_with` established is that the key is set. It does not look
+        // for the program or contact the endpoint, and must not: the first
+        // element of the list is often a shell, and running a configured program
+        // to test it can hang. The line says so instead of claiming readiness.
+        Ok(stt::Ready::Command { .. }) => Finding {
             name: "engine",
             state: State::Ok,
-            detail: format!("{:?} is ready", stt.engine),
+            detail: "[stt] command is set; its program is not looked for until a take starts"
+                .to_string(),
+        },
+        Ok(stt::Ready::Http) => Finding {
+            name: "engine",
+            state: State::Ok,
+            detail: "[stt] url is set; the endpoint is not contacted until a take starts"
+                .to_string(),
         },
         Err(e) => Finding {
             name: "engine",
@@ -1236,6 +1247,50 @@ mod tests {
         let finding = engine_and_model_findings(&unknown, &models).0;
         assert_eq!(finding.state, State::Missing);
         assert!(finding.detail.contains("vosk"), "got {finding:?}");
+    }
+
+    const COMMAND_LINE: &str =
+        "[stt] command is set; its program is not looked for until a take starts";
+    const HTTP_LINE: &str = "[stt] url is set; the endpoint is not contacted until a take starts";
+
+    #[test]
+    fn the_command_engine_line_claims_only_that_the_command_is_set() {
+        // The program is not on PATH. The line is ok all the same, because it
+        // claims nothing about the program.
+        let models = scratch_models("engine-command-text");
+        let command = command_stt(&["hv27-no-such-program", "{audio}"]);
+        let finding = engine_and_model_findings(&command, &models).0;
+        assert_eq!(finding.state, State::Ok, "got {finding:?}");
+        assert_eq!(finding.detail, COMMAND_LINE);
+    }
+
+    #[test]
+    fn the_http_engine_line_claims_only_that_the_url_is_set() {
+        let models = scratch_models("engine-http-text");
+        let http = config::Stt {
+            engine: "http".to_string(),
+            url: "http://127.0.0.1:9/transcribe".to_string(),
+            ..config::Stt::default()
+        };
+        let finding = engine_and_model_findings(&http, &models).0;
+        assert_eq!(finding.state, State::Ok, "got {finding:?}");
+        assert_eq!(finding.detail, HTTP_LINE);
+    }
+
+    #[test]
+    fn neither_external_engine_line_says_ready_or_quotes_the_engine_kind() {
+        let models = scratch_models("engine-no-ready");
+        let command = command_stt(&["prog", "{audio}"]);
+        let http = config::Stt {
+            engine: "http".to_string(),
+            url: "http://127.0.0.1:9/transcribe".to_string(),
+            ..config::Stt::default()
+        };
+        for (stt, kind) in [(command, "\"command\""), (http, "\"http\"")] {
+            let detail = engine_and_model_findings(&stt, &models).0.detail;
+            assert!(!detail.contains("is ready"), "{detail}");
+            assert!(!detail.contains(kind), "{detail}");
+        }
     }
 
     #[test]
