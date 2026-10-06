@@ -26,7 +26,6 @@ pub fn shorten(text: &str, limit: usize) -> String {
 
 /// Why a run produced no output.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum RunError {
     /// The program could not be started, or its state could not be read.
     Start(std::io::Error),
@@ -93,7 +92,6 @@ fn stop(child: &mut Child) {
 /// Standard input is closed, so a program that reads it ends rather than waiting
 /// for a person. Standard output and error are captured, as `Command::output`
 /// does; the difference is that this returns.
-#[allow(dead_code)]
 pub fn run(command: &mut Command, bound: Duration) -> Result<Output, RunError> {
     command
         .stdin(Stdio::null())
