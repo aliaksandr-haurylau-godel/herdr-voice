@@ -24,19 +24,12 @@ impl std::fmt::Display for DeliveryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DeliveryError::Rejected(why) => write!(f, "{why}"),
-            // Mirrors CommandError::NotFound (src/stt/command.rs:81-86).
-            DeliveryError::NotFound { binary, path } => write!(
-                f,
-                "cannot run {binary:?}: it is not on the PATH this process has, which is \
-                 {path:?}. Set HERDR_BIN_PATH to herdr's location, or start herdr from a shell \
-                 where it is on the PATH"
-            ),
-            DeliveryError::NotExecutable { binary } => write!(
-                f,
-                "cannot run {binary:?}: the file was found but this process is not allowed to \
-                 run it. Make it executable (on Unix, chmod +x), or point HERDR_BIN_PATH at the \
-                 herdr program itself"
-            ),
+            DeliveryError::NotFound { binary, path } => {
+                write!(f, "{}", not_found_message(binary, path))
+            }
+            DeliveryError::NotExecutable { binary } => {
+                write!(f, "{}", not_executable_message(binary))
+            }
             DeliveryError::TimedOut { binary, bound } => write!(
                 f,
                 "{binary:?} did not answer within {}, so the plugin stopped it. The text may \
@@ -44,11 +37,9 @@ impl std::fmt::Display for DeliveryError {
                  responding, restart it",
                 crate::http_failure::bound_text(*bound)
             ),
-            DeliveryError::StartFailed { binary, reason } => write!(
-                f,
-                "cannot run {binary:?}: the operating system reported {reason:?}. This is often \
-                 temporary: try again, and if it keeps happening, report that text"
-            ),
+            DeliveryError::StartFailed { binary, reason } => {
+                write!(f, "{}", start_failed_message(binary, reason))
+            }
         }
     }
 }
@@ -94,7 +85,8 @@ pub mod tests_support {
 
     /// A script that sleeps thirty seconds when its first argument is one of
     /// `subcommands` (`"*"` means any), and exits 0 otherwise. Written the way
-    /// the recorder in this file's tests is: closed before it is run.
+    /// the recorder in this file's tests is: through `script_fixture`, which returns
+    /// only once the script can be executed.
     #[cfg(unix)]
     pub fn herdr_that_hangs_on(tag: &str, subcommands: &[&str]) -> String {
         let dir =
@@ -103,14 +95,10 @@ pub mod tests_support {
         std::fs::create_dir_all(&dir).expect("create scratch");
         let script = dir.join("herdr.sh");
         let patterns = subcommands.join("|");
-        std::fs::write(
+        crate::script_fixture::write_executable(
             &script,
-            format!("#!/bin/sh\ncase \"$1\" in {patterns}) sleep 30;; esac\nexit 0\n"),
-        )
-        .expect("write script");
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod script");
+            &format!("#!/bin/sh\ncase \"$1\" in {patterns}) sleep 30;; esac\nexit 0\n"),
+        );
         script.to_string_lossy().into_owned()
     }
 
@@ -208,25 +196,70 @@ fn extract_reason(output: &[u8]) -> String {
     }
 }
 
-/// What starting the program failed with, read from the kind the operating
-/// system gave. Only `NotFound` means the program is not on the `PATH`;
-/// `PermissionDenied` means it was found and cannot be run (no execute bit, or a
-/// directory); anything else — a file still open for writing, exhausted
-/// processes — carries the system's own text.
-fn start_failure(binary: &str, error: &std::io::Error) -> DeliveryError {
+/// Why starting a program failed, read from the kind the operating system gave.
+/// Only `NotFound` means the program is not on the `PATH`; `PermissionDenied`
+/// means it was found and cannot be run (no execute bit, or a directory);
+/// anything else — a file still open for writing, exhausted processes — carries
+/// the system's own text. Every place that starts herdr classifies through
+/// `start_failure` and converts the result into its own error type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartFailure {
+    NotFound { binary: String, path: String },
+    NotExecutable { binary: String },
+    Other { binary: String, reason: String },
+}
+
+pub(crate) fn start_failure(binary: &str, error: &std::io::Error) -> StartFailure {
     match error.kind() {
-        std::io::ErrorKind::NotFound => DeliveryError::NotFound {
+        std::io::ErrorKind::NotFound => StartFailure::NotFound {
             binary: binary.to_string(),
             path: std::env::var("PATH").unwrap_or_default(),
         },
-        std::io::ErrorKind::PermissionDenied => DeliveryError::NotExecutable {
+        std::io::ErrorKind::PermissionDenied => StartFailure::NotExecutable {
             binary: binary.to_string(),
         },
-        _ => DeliveryError::StartFailed {
+        _ => StartFailure::Other {
             binary: binary.to_string(),
             reason: error.to_string(),
         },
     }
+}
+
+impl From<StartFailure> for DeliveryError {
+    fn from(failure: StartFailure) -> Self {
+        match failure {
+            StartFailure::NotFound { binary, path } => DeliveryError::NotFound { binary, path },
+            StartFailure::NotExecutable { binary } => DeliveryError::NotExecutable { binary },
+            StartFailure::Other { binary, reason } => DeliveryError::StartFailed { binary, reason },
+        }
+    }
+}
+
+/// The sentences for a failed start, written once. `DeliveryError`,
+/// `PaintError` and `HerdrError` print these for their not-found,
+/// not-executable and other-failure variants.
+pub(crate) fn not_found_message(binary: &str, path: &str) -> String {
+    // Mirrors CommandError::NotFound (src/stt/command.rs:81-86).
+    format!(
+        "cannot run {binary:?}: it is not on the PATH this process has, which is \
+         {path:?}. Set HERDR_BIN_PATH to herdr's location, or start herdr from a shell \
+         where it is on the PATH"
+    )
+}
+
+pub(crate) fn not_executable_message(binary: &str) -> String {
+    format!(
+        "cannot run {binary:?}: the file was found but this process is not allowed to \
+         run it. Make it executable (on Unix, chmod +x), or point HERDR_BIN_PATH at the \
+         herdr program itself"
+    )
+}
+
+pub(crate) fn start_failed_message(binary: &str, reason: &str) -> String {
+    format!(
+        "cannot run {binary:?}: the operating system reported {reason:?}. This is often \
+         temporary: try again, and if it keeps happening, report that text"
+    )
 }
 
 /// How long one herdr call may take. `docs/decisions.md`, the entry for
@@ -271,7 +304,9 @@ impl HerdrDeliverer {
             }),
             // herdr starts plugin commands with a minimal PATH — the same
             // reasoning src/stt/command.rs:78-86 states for the transcriber.
-            Err(crate::outward::RunError::Start(error)) => Err(start_failure(&self.binary, &error)),
+            Err(crate::outward::RunError::Start(error)) => {
+                Err(start_failure(&self.binary, &error).into())
+            }
             Ok(output) if output.status.success() => Ok(()),
             Ok(output) => {
                 let text = if !output.stdout.is_empty() {
@@ -482,17 +517,10 @@ mod tests {
     #[cfg(unix)]
     fn recorder(tag: &str) -> Recorder {
         let recorder = Recorder::new(tag, "record.sh");
-        std::fs::write(
+        crate::script_fixture::write_executable(
             &recorder.script,
-            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\n", recorder.out),
-        )
-        .expect("write recorder script");
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&recorder.script)
-            .expect("stat")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&recorder.script, perms).expect("chmod");
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\n", recorder.out),
+        );
         recorder
     }
 
@@ -631,24 +659,24 @@ mod tests {
         use std::io::{Error, ErrorKind};
         assert!(matches!(
             start_failure("herdr", &Error::from(ErrorKind::NotFound)),
-            DeliveryError::NotFound { .. }
+            StartFailure::NotFound { .. }
         ));
         assert!(matches!(
             start_failure("herdr", &Error::from(ErrorKind::PermissionDenied)),
-            DeliveryError::NotExecutable { .. }
+            StartFailure::NotExecutable { .. }
         ));
         assert!(matches!(
             start_failure("herdr", &Error::other("Text file busy")),
-            DeliveryError::StartFailed { .. }
+            StartFailure::Other { .. }
         ));
     }
 
     #[test]
     fn another_failure_to_start_carries_the_operating_systems_text_and_not_the_path_sentence() {
-        let error = start_failure(
+        let error = DeliveryError::from(start_failure(
             "/opt/herdr",
             &std::io::Error::other("Text file busy (os error 26)"),
-        );
+        ));
         assert_eq!(
             error,
             DeliveryError::StartFailed {
@@ -726,17 +754,10 @@ mod tests {
     #[test]
     fn a_program_that_starts_and_fails_is_still_a_rejection() {
         let recorder = Recorder::new("rejects", "herdr-rejecting");
-        std::fs::write(
+        crate::script_fixture::write_executable(
             &recorder.script,
             "#!/bin/sh\necho '{\"error\":{\"code\":\"pane_not_found\",\"message\":\"gone\"}}'\nexit 1\n",
-        )
-        .expect("write");
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&recorder.script)
-            .expect("stat")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&recorder.script, perms).expect("chmod");
+        );
         let deliverer = HerdrDeliverer::with_binary(recorder.script.to_string_lossy().into_owned());
         assert_eq!(
             deliverer.insert("w1:p2", "hello"),

@@ -249,44 +249,90 @@ mod tests {
     use crate::stt::catalogue::{Entry, File as CatFile};
     use std::net::TcpListener;
 
-    /// Serves each requested path from a fixed table until nothing has connected
-    /// for a short while, then returns. One thread, any number of connections.
+    /// A running download double. The listener lives in its thread and stays
+    /// bound until `finish` (or a drop, when a test panics first) sets the stop
+    /// flag, so nothing but the test itself decides when the address stops
+    /// answering.
+    struct Server {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<Vec<String>>>,
+    }
+
+    impl Server {
+        /// Stops the double and returns the path of every request it received,
+        /// in the order they arrived, the ones it answered 404 included.
+        fn finish(mut self) -> Vec<String> {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.thread
+                .take()
+                .expect("finished once")
+                .join()
+                .expect("the double must not panic")
+        }
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Serves each requested path from a fixed table, answering 404 for a path
+    /// the table does not hold, and records the path of every request. One
+    /// thread, any number of connections, until the returned `Server` is
+    /// finished.
     ///
-    /// It stops on a deadline rather than on a connection count, because the
-    /// count is not knowable from the test: `fetch_into` fetches three files but
-    /// stops at the first failure, so a double waiting for three connections
-    /// blocks forever on `join` in exactly the tests that exercise a failure.
-    /// That is not hypothetical — it hung this suite before the deadline existed.
+    /// It stops on a request from the test and not on a timer: a timer closes
+    /// the listener under a client that is late because the machine is busy, and
+    /// the client then gets "Connection refused" on its own address. It stops on
+    /// a request and not on a connection count because the count is not knowable
+    /// from the test: `fetch_into` fetches three files but stops at the first
+    /// failure, so a double waiting for three connections would block forever in
+    /// exactly the tests that exercise a failure.
     ///
     /// The request is read to the end of its headers before the response is
     /// written, for the reason `src/rewrite/http.rs` records: a stream dropped
     /// while the kernel still holds unread bytes can turn the close into a reset,
     /// which surfaces as an intermittent, unrelated-looking failure.
-    fn serve(
+    fn serve(files: Vec<(&'static str, &'static str, Vec<u8>)>) -> (String, Server) {
+        serve_with(files, std::time::Duration::from_secs(5))
+    }
+
+    /// `serve` with the time a connected client may stay silent chosen by the
+    /// caller.
+    fn serve_with(
         files: Vec<(&'static str, &'static str, Vec<u8>)>,
-    ) -> (String, std::thread::JoinHandle<()>) {
+        read_timeout: std::time::Duration,
+    ) -> (String, Server) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         listener.set_nonblocking(true).expect("nonblocking");
         let addr = listener.local_addr().expect("addr");
         let base = format!("http://{addr}");
-        let handle = std::thread::spawn(move || {
-            // Generous: it only ever elapses after the client has stopped asking.
-            let quiet_for = std::time::Duration::from_millis(750);
-            let mut last = std::time::Instant::now();
-            loop {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
                 let (mut stream, _) = match listener.accept() {
                     Ok(pair) => pair,
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        if last.elapsed() > quiet_for {
-                            return;
-                        }
                         std::thread::sleep(std::time::Duration::from_millis(5));
                         continue;
                     }
-                    Err(_) => return,
+                    // Any other accept error (a client that reset before it was
+                    // accepted, say) is not a reason to close the listener under
+                    // the tests that follow; only `finish` ends the loop.
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
                 };
-                last = std::time::Instant::now();
                 stream.set_nonblocking(false).expect("blocking stream");
+                // A client that connects and never sends must not hold the
+                // thread, and with it `finish`, forever.
+                stream
+                    .set_read_timeout(Some(read_timeout))
+                    .expect("read timeout");
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
                 loop {
@@ -300,6 +346,13 @@ mod tests {
                 }
                 let request = String::from_utf8_lossy(&buf).to_string();
                 let first = request.lines().next().unwrap_or_default().to_string();
+                paths.push(
+                    first
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_string(),
+                );
                 let matched = files.iter().find(|(suffix, _, _)| first.contains(suffix));
                 match matched {
                     Some((_, status, body)) => {
@@ -318,8 +371,15 @@ mod tests {
                 }
                 let _ = stream.flush();
             }
+            paths
         });
-        (base, handle)
+        (
+            base,
+            Server {
+                stop,
+                thread: Some(thread),
+            },
+        )
     }
 
     struct Silent;
@@ -396,7 +456,7 @@ mod tests {
         let (base, handle) = serve(all_three("200 OK"));
         let entry = entry();
         fetch_into(&base, &entry, &dir, &mut Silent).expect("must succeed");
-        handle.join().unwrap();
+        handle.finish();
 
         for name in ["model.safetensors", "config.json", "tokenizer.json"] {
             assert!(dir.join(name).exists(), "{name} is missing");
@@ -409,13 +469,31 @@ mod tests {
     }
 
     #[test]
+    fn every_file_is_requested_at_the_revision_the_entry_pins() {
+        let dir = scratch("pinned");
+        let (base, server) = serve(all_three("200 OK"));
+        let entry = entry();
+        fetch_into(&base, &entry, &dir, &mut Silent).expect("must succeed");
+
+        let mut asked = server.finish();
+        asked.sort();
+        let mut expected: Vec<String> = entry
+            .files
+            .iter()
+            .map(|file| format!("/{}/resolve/{}/{}", entry.repo, entry.revision, file.name))
+            .collect();
+        expected.sort();
+        assert_eq!(asked, expected);
+    }
+
+    #[test]
     fn a_short_transfer_names_the_size_and_leaves_nothing_behind() {
         let dir = scratch("short");
         let mut files = all_three("200 OK");
         files[0].2.truncate(8);
         let (base, handle) = serve(files);
         let error = fetch_into(&base, &entry(), &dir, &mut Silent).expect_err("must refuse");
-        handle.join().unwrap();
+        handle.finish();
 
         match &error {
             FetchError::ShortRead {
@@ -447,7 +525,7 @@ mod tests {
         files[0].2[last] ^= 0xff;
         let (base, handle) = serve(files);
         let error = fetch_into(&base, &entry(), &dir, &mut Silent).expect_err("must refuse");
-        handle.join().unwrap();
+        handle.finish();
 
         assert!(matches!(error, FetchError::Digest { .. }), "got {error:?}");
         assert!(!dir.join("model.safetensors").exists());
@@ -459,7 +537,7 @@ mod tests {
         let dir = scratch("status");
         let (base, handle) = serve(all_three("503 Service Unavailable"));
         let error = fetch_into(&base, &entry(), &dir, &mut Silent).expect_err("must refuse");
-        handle.join().unwrap();
+        handle.finish();
 
         match &error {
             FetchError::Status { code, url } => {
@@ -474,18 +552,10 @@ mod tests {
     #[test]
     fn an_unreachable_address_says_so_rather_than_hanging() {
         let dir = scratch("closed");
-        // Bound and immediately dropped: the port is not listening.
-        let port = {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-        let error = fetch_into(
-            &format!("http://127.0.0.1:{port}"),
-            &entry(),
-            &dir,
-            &mut Silent,
-        )
-        .expect_err("must refuse");
+        // Nothing can listen on port 0, so no sibling test can have been handed
+        // it, and the connection attempt fails at once.
+        let error =
+            fetch_into("http://127.0.0.1:0", &entry(), &dir, &mut Silent).expect_err("must refuse");
         assert!(matches!(error, FetchError::Http { .. }), "got {error:?}");
         assert!(
             error.to_string().contains("again"),
@@ -545,7 +615,7 @@ mod tests {
 
         let (base, handle) = serve(all_three("200 OK"));
         fetch_into(&base, &entry(), &dir, &mut Silent).expect("must repair it");
-        handle.join().unwrap();
+        handle.finish();
         assert_eq!(
             std::fs::read(dir.join("model.safetensors")).unwrap(),
             WEIGHTS,
@@ -565,7 +635,71 @@ mod tests {
             ("tokenizer.json", "200 OK", TOKENIZER.to_vec()),
         ]);
         fetch_into(&base, &entry(), &dir, &mut Silent).expect("must succeed");
-        handle.join().unwrap();
+        handle.finish();
         assert!(dir.join("tokenizer.json").exists());
+    }
+
+    #[test]
+    fn dropping_the_server_closes_the_listener() {
+        let (base, server) = serve(vec![]);
+        let addr = base.trim_start_matches("http://").to_string();
+        drop(server);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::net::TcpStream::connect(&addr).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the listener is still bound after the Server was dropped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_client_that_connects_and_never_sends_does_not_hold_finish_forever() {
+        let (base, server) = serve_with(vec![], std::time::Duration::from_millis(200));
+        let _silent =
+            std::net::TcpStream::connect(base.trim_start_matches("http://")).expect("connect");
+        // Time for the thread to accept it and start reading.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = server.finish();
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("finish must return while a silent client is still connected");
+    }
+
+    #[test]
+    fn a_client_that_sends_late_is_still_answered_and_recorded() {
+        let (base, server) = serve(vec![]);
+        let mut client =
+            std::net::TcpStream::connect(base.trim_start_matches("http://")).expect("connect");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        client
+            .write_all(b"GET /late HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        let mut answer = String::new();
+        client.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 404"), "got {answer}");
+        assert_eq!(server.finish(), vec!["/late".to_string()]);
+    }
+
+    #[test]
+    fn a_request_the_table_does_not_hold_is_answered_404_and_recorded() {
+        let dir = scratch("unheld");
+        let (base, server) = serve(vec![]);
+        let error = fetch_into(&base, &entry(), &dir, &mut Silent).expect_err("must refuse");
+        let asked = server.finish();
+
+        assert!(
+            matches!(error, FetchError::Status { code: 404, .. }),
+            "got {error:?}"
+        );
+        assert_eq!(
+            asked,
+            vec!["/openai/whisper-fixture/resolve/0000000000000000000000000000000000000000/model.safetensors".to_string()]
+        );
     }
 }
