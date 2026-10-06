@@ -114,8 +114,8 @@ pub enum Ready {
     /// to print would change the `command` engine's report, which is not this
     /// issue's to change.
     Command { model: Option<PathBuf> },
-    /// The endpoint engine. Its address is validated here; nothing else about
-    /// it can be judged without a request, which `check_with` does not make.
+    /// The endpoint engine. `check_with` establishes that the url is set; nothing
+    /// else about it can be judged without a request, which it does not make.
     Http,
     Candle {
         device: candle::device::Selection,
