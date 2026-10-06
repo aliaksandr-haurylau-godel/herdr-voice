@@ -124,3 +124,16 @@ gate:
 Reviewer notes, none held back READY, all three fixed in `PLAN_28.md`: the dependency diagram swapped the numbers of the docs and gates tasks; Task 4 step 8 was worded confusingly (it removes `#[allow(dead_code)]` from `shorten` only); the Task 8 commit listed `src/rewrite/command.rs`, which Task 8 does not touch.
 
 S3 is closed. Next is S4.
+
+### S4 Implement
+
+Decisions confirmed before S4: the key `[stt] command_timeout_seconds` (default 60,
+floor 1) and the per-call policy (delivery 10 seconds, pane read 5 seconds, rewrite
+command 30 seconds, all fixed) stand as designed, and the key name is final. The two
+scope additions, the push-to-talk watcher path and the rewrite command, stand.
+
+The plan's Windows dead-code check found one defect that the macOS gates did not:
+`with_bound` in `src/delivery.rs` and `src/rewrite/command.rs` was `#[cfg(test)]` but
+used only by Unix tests, so a Windows test build would have failed on dead code.
+Both are now `#[cfg(all(test, unix))]` (commit "Keep the test-only bound setters off
+the Windows build").
