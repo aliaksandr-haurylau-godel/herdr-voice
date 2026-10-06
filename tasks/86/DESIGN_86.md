@@ -41,22 +41,24 @@ the same way, so the person cannot learn that their keystrokes never arrived.
 **Decision.** `run` matches on `answer()`. For `None` it prints, after a blank line:
 
 ```text
-the question could not be answered: no input reached this process, so nothing was
-changed. Run `herdr-voice setup` in a terminal that passes your keystrokes on.
+the question could not be answered: standard input ended before an answer
+arrived, so nothing was changed. If you did not end it yourself, run
+`herdr-voice setup` in a terminal that passes your keystrokes on.
 ```
 
 then the legacy report, and returns **1**. `Some(...)` goes through the existing
 decline-or-write code unchanged, so a declined offer keeps its text and its exit
 code 0.
 
-**Why.** The text names what happened (no input arrived), what the state is
-(nothing changed) and what to do (a terminal that forwards keystrokes), and shares
-no sentence with the decline text. It says "no input reached this process" rather
-than "end of file" because the same branch is taken when the read fails. Exit 1
-because the task the person started was not done and nothing they can retry by
-doing nothing differently will do it; a decline is a decision and stays 0. Every
-other path in `run` where the setup could not do its job (no config path, unreadable
-file, bad TOML, refused pane) already returns 1.
+**Why.** The text names what happened (standard input ended or could not be
+read), what the state is (nothing changed) and what to do (a terminal that
+forwards keystrokes), and shares no line with the decline text. The second
+sentence starts with "If you did not end it yourself" because a person at a
+working terminal who presses Ctrl-D reaches the same branch and must not be told
+their terminal is broken. Exit 1 because the task the person started was not
+done and repeating it the same way fails the same way; a decline is a decision
+and stays 0. Every other path in `run` where the setup could not do its job (no
+config path, unreadable file, bad TOML, refused pane) already returns 1.
 
 ## 3. The design document
 

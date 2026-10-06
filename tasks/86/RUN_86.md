@@ -117,3 +117,24 @@ Reviewer notes, none held back READY: the filter `setup::tests::no_answer` also 
 line exceeds `max_width = 100`, so `cargo fmt` is run before `cargo fmt --check`.
 
 S3 is closed. Next is S4 Implement.
+
+### S4 Implement
+- code: `src/setup.rs`, `docs/design.md`; commit `fix: setup says when its question could not be answered (#86)`
+- gates at that commit: `cargo test` (714 unit tests and the process tests, all passing),
+  `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`,
+  `python3 scripts/check_manifest.py`, and the Windows dead-code check on a scratch copy,
+  all passing. Red steps seen before the code: a compile error naming `read_answer`, then
+  two failures with `left: 0, right: 1`.
+
+Code review (a fresh general-purpose subagent over `3dd45b8..a030c47`, read-only,
+no cargo): no Critical, no Important issue, verdict "With fixes", fixes optional.
+Minor findings and what was done:
+- Ctrl-D at a working terminal reaches the same branch and got the advice "no input
+  reached this process", which is wrong for that person. Fixed: the message now says
+  "standard input ended before an answer arrived, so nothing was changed. If you did not
+  end it yourself, run `herdr-voice setup` in a terminal that passes your keystrokes on."
+  `DESIGN_86.md` section 2 and `PLAN_86.md` Task 2 carry the new text.
+- The edited paragraph in `docs/design.md` had a short line. Reflowed.
+- A sentence in `DESIGN_86.md` section 2 was hard to parse. Reworded.
+- The reviewer noted the commit trailer names Sonnet 5.5; that is the model that wrote
+  the code.

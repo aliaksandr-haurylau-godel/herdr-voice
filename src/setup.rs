@@ -899,9 +899,10 @@ pub fn run(
         // believing their `y` was refused.
         let _ = writeln!(
             out,
-            "\nthe question could not be answered: no input reached this process, \
-             so nothing was changed. Run `herdr-voice setup` in a terminal that \
-             passes your keystrokes on."
+            "\nthe question could not be answered: standard input ended before an \
+             answer arrived, so nothing was changed. If you did not end it \
+             yourself, run `herdr-voice setup` in a terminal that passes your \
+             keystrokes on."
         );
         report_legacy(legacy, out);
         return 1;
