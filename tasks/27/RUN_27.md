@@ -4,7 +4,7 @@
 |---|---|
 | issue | #27 — doctor says "command" is ready without having checked anything about the program |
 | input | GitHub issue, read with `gh issue view 27 --comments` (no comments; the body carries the argument) |
-| stage | S1 |
+| stage | S5 |
 | branch | fix/27-doctor-command-engine |
 | opened | 2026-10-06 |
 
@@ -108,3 +108,35 @@ cargo): no Critical issue, one Important, three Minor, verdict "With fixes".
   `Ready::Http` (`src/stt.rs`) said "Its address is validated here", but `check_with` only
   checks that the url is non-empty. It now says that. It is the same unverified claim this
   issue is about, in one line, and no behaviour changes.
+
+Mutation test (a second fresh subagent, after the review, in a scratch copy, one cargo
+process at a time): 40 mutations of the two new arms and of the three new tests. Every
+mutation of the code was killed except one that does not change behaviour (`Ok(stt::Ready::Http)`
+replaced by `Ok(_)`, which can only match Http, since the Command and Candle arms precede it
+and `Ready` has three variants). Survivors, all in the tests, and what was done:
+- Removing the `State::Ok` assert from the command test, and the `is ready` and
+  quoted-kind asserts from the third test: no mutation of the code depends on them; the
+  exact-text tests and the older tests pin the same facts. The two text asserts are kept
+  because `AC_27.md` R2 asks for them.
+- Removing the `State::Ok` assert from the http test: it is the only check on the http arm's
+  state (shown by the four http-state mutations, all killed by that assert). It stays.
+- The program set to `sh`: passes, as designed; the line makes no claim about the program.
+- Next to the diff, not in it: the text of the candle line is pinned only by "metal" or
+  "cpu" in `the_candle_engine_line_names_the_device`. The candle line is out of bounds
+  (`AC_27.md`), so it is left as it is.
+
+S4 is closed. Next is S5 Verify.
+
+### S5 Verify
+- artifact: section "What `doctor` says about a configured transcriber, for issue #27" in `docs/evidence.md`
+- platform: macOS (Darwin), this machine, 2026-10-07
+- result: pass. `doctor` run in an empty environment with scratch configuration, before
+  (`3dd45b8`) and after: `"command" is ready` for a program absent from `PATH` and for one
+  present, and `"http" is ready` for a url, became the two new lines, identical for the
+  absent and the present program; the empty-list `missing` line is unchanged.
+- caught on the way: the first "after" binary was the one a mutation run had linked last
+  into the shared target directory (case C printed `missing`); rebuilt into a directory of
+  its own and rerun. The scratch copies of a run share one target directory, and the file
+  `target/debug/herdr-voice` there belongs to whichever package was built last, so a binary
+  to be run by hand needs a directory of its own.
+- not exercised: a take with a missing program through a daemon.
