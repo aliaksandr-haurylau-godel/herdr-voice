@@ -4,7 +4,7 @@
 |---|---|
 | issue | #97 — The leak gate skips the last entry of .leakwords when the file has no final newline |
 | input | GitHub issue, read with `gh issue view 97 --comments` (no comments; the body carries the reproduction) |
-| stage | S1 |
+| stage | S4 |
 | branch | fix/97-leakwords-last-line |
 | opened | 2026-10-06 |
 
@@ -85,3 +85,17 @@ S3 is closed. Next is S4 Implement.
 - gates: `cargo test` (708 unit tests and the process tests, all passing), `cargo clippy
   --all-targets -- -D warnings`, `cargo fmt --check`, `python3 scripts/check_manifest.py`,
   all passing. The Windows dead-code check is skipped: the diff touches no Rust.
+
+Code review (a fresh general-purpose subagent over `3dd45b8..3aba8b6`, read-only, no cargo;
+it ran `sh scripts/test-pre-commit.sh` and probes in a temporary directory): no Critical,
+no Important issue; verdict "Yes". It ran the loop under `sh`, `dash`, `bash`,
+`bash --posix`, `ksh` and `zsh --emulate sh`, under `set -e`, on ten inputs (unterminated
+last line, terminated, empty file, lone newline, trailing blank line, unterminated comment,
+spaces only, CR line endings, a last line `-n`, a last line `!`), with the same result in
+all six; `shellcheck -s sh` passes on both files; no other reader of `.leakwords` exists.
+Minor findings and what was done:
+- This file's header said `S1`. Updated to the current stage.
+- The comment of case 11 described case 12 as well. Narrowed.
+- Case 12 did not check that standard output is empty. Added.
+- The S5 section in `docs/evidence.md` must say that it closes the gap listed in the section
+  for issue #64. It will.

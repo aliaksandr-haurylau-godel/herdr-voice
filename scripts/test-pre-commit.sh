@@ -155,9 +155,9 @@ printf 'zzz-no-such-word\nordinary\n' > "${repo}/.leakwords"
 run_hook
 expect_exit "second entry" 1
 
-# 11. The last entry is checked when the file does not end in a newline: after
-# another entry, and as the only line. `read` returns non-zero on such a line,
-# so a loop that tests only its status never runs the body for it.
+# 11. The last entry is checked when the file does not end in a newline, here
+# after another entry. `read` returns non-zero on such a line, so a loop that
+# tests only its status never runs the body for it.
 printf 'zzz-no-such-word\nordinary' > "${repo}/.leakwords"
 run_hook
 expect_exit "unterminated last entry" 1
@@ -165,10 +165,11 @@ expect_stdout_empty "unterminated last entry"
 expect_stderr_equals "unterminated last entry" 'leak gate: staged changes match a private word-list entry
 the matching pattern is in .leakwords; nothing is printed here on purpose'
 
-# 12. The same, with the entry as the only line.
+# 12. The same, with the entry as the only line of the file.
 printf 'ordinary' > "${repo}/.leakwords"
 run_hook
 expect_exit "unterminated only entry" 1
+expect_stdout_empty "unterminated only entry"
 expect_stderr_contains "unterminated only entry" "match a private word-list entry"
 
 # 13. An unterminated last line that matches nothing passes without a word.
