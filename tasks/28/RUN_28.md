@@ -205,3 +205,24 @@ Explained and left:
   that survives `SIGKILL`, which a test cannot make.
 - the `try_wait` error arm returning `TimedOut` for `Start`: the error cannot be
   provoked from a test; the arm is two lines.
+
+### S5 Verify
+
+A daemon started from the worktree with its own socket, state, configuration and `HOME`
+and a script as herdr, driven through real takes from the default microphone, against
+`main` at `3dd45b8` and against this branch. Recorded in `docs/evidence.md`, "A wedged
+herdr, transcriber or rewrite command, through a daemon". Result:
+
+- Baseline reproduces both defects: 120 seconds and "the daemon did not answer", a
+  sleeping program left behind per take, threads that stay; on a hold, no report and the
+  next hold refused.
+- Branch: the transcriber is stopped at its bound (2.1 s with the key set to 2), delivery
+  and the pane read at 10 and 5 seconds (15.1 s together), the rewrite at 30 seconds; each
+  message names the program; the thread count does not grow; nothing is left running;
+  the hold path reports in the journal and accepts the next hold.
+- Not established: a real herdr, the time a working herdr takes for one call, toasts with
+  herdr wedged by hand, Windows.
+
+Gates, fresh on the final tree: `cargo test` 750 passed, `cargo clippy --all-targets -- -D
+warnings`, `cargo fmt --check`, `python3 scripts/check_manifest.py`, and the Windows
+dead-code check on a scratch copy, all clean.
