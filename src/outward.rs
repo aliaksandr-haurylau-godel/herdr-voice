@@ -191,6 +191,38 @@ mod tests {
         }
     }
 
+    /// No `truncate` on text from outside the process may come back (issue #94).
+    /// The needle is assembled so this file does not match itself. The one
+    /// allowed use cuts a byte vector a test fixture owns.
+    #[test]
+    fn no_source_file_cuts_a_string_with_truncate() {
+        let needle = [".trunc", "ate("].concat();
+        let fixture = ["files[0].2.trunc", "ate(8);"].concat();
+        let allowed = [("stt/fetch.rs", fixture.as_str())];
+        let mut found = Vec::new();
+        let mut pending = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("read src") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("read source");
+                    for (index, line) in text.lines().enumerate() {
+                        if line.contains(&needle)
+                            && !allowed
+                                .iter()
+                                .any(|(tail, code)| path.ends_with(tail) && line.trim() == *code)
+                        {
+                            found.push(format!("{}:{}", path.display(), index + 1));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "cut with a truncate: {found:?}");
+    }
+
     #[cfg(unix)]
     mod run_tests {
         use super::super::*;
