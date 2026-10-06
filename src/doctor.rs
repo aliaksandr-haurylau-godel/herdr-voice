@@ -107,12 +107,37 @@ fn on_path(program: &str) -> bool {
 }
 
 fn herdr_finding() -> Finding {
-    let binary = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
-    match Command::new(&binary).arg("--version").output() {
-        Err(_) => Finding {
+    herdr_finding_at(&std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string()))
+}
+
+/// What to tell a person whose herdr could not be started, read from the kind
+/// the operating system gave: absent, present and not runnable, or something
+/// else with the system's own text.
+fn cannot_run_herdr(binary: &str, error: &std::io::Error) -> String {
+    use crate::delivery::StartFailure;
+    match crate::delivery::start_failure(binary, error) {
+        StartFailure::NotFound { .. } => {
+            format!("cannot run {binary}; install herdr, or set HERDR_BIN_PATH to it")
+        }
+        StartFailure::NotExecutable { .. } => format!(
+            "{binary} was found but this process is not allowed to run it; make it executable \
+             (on Unix, chmod +x), or point HERDR_BIN_PATH at the herdr program itself"
+        ),
+        StartFailure::Other { reason, .. } => format!(
+            "cannot run {binary}: the operating system reported {reason:?}; try again, and if \
+             it keeps happening, report that text"
+        ),
+    }
+}
+
+/// Takes the program as a parameter so a test can reach it without setting an
+/// environment variable the parallel suite shares.
+fn herdr_finding_at(binary: &str) -> Finding {
+    match Command::new(binary).arg("--version").output() {
+        Err(error) => Finding {
             name: "herdr",
             state: State::Missing,
-            detail: format!("cannot run {binary}; install herdr, or set HERDR_BIN_PATH to it"),
+            detail: cannot_run_herdr(binary, &error),
         },
         Ok(output) => {
             let printed = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1694,6 +1719,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_herdr_that_is_not_there_says_to_install_it_or_set_the_path() {
+        let finding = herdr_finding_at("herdr-voice-no-such-program");
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(
+            finding.detail.contains("install herdr") && finding.detail.contains("HERDR_BIN_PATH"),
+            "got {}",
+            finding.detail
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_herdr_without_the_execute_bit_says_it_was_found_and_cannot_be_run() {
+        let dir = scratch_dir("herdr-noexec");
+        let path = dir.join("herdr");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        let finding = herdr_finding_at(&path.to_string_lossy());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(finding.state, State::Missing, "got {finding:?}");
+        assert!(
+            finding.detail.contains("was found"),
+            "got {}",
+            finding.detail
+        );
+        assert!(
+            finding.detail.contains("HERDR_BIN_PATH"),
+            "got {}",
+            finding.detail
+        );
+        assert!(
+            !finding.detail.contains("install herdr"),
+            "got {}",
+            finding.detail
+        );
+    }
+
+    #[test]
+    fn any_other_failure_to_start_herdr_carries_the_operating_systems_text() {
+        let detail = cannot_run_herdr(
+            "/opt/herdr",
+            &std::io::Error::other("Text file busy (os error 26)"),
+        );
+        assert!(
+            detail.contains("Text file busy (os error 26)"),
+            "got {detail}"
+        );
+        assert!(detail.contains("try again"), "got {detail}");
+        assert!(!detail.contains("install herdr"), "got {detail}");
     }
 
     #[test]
