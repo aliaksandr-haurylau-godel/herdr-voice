@@ -1986,3 +1986,98 @@ for v in sys.argv[2:]:
     drain(1.5)
 if attach: os.kill(pid, signal.SIGKILL)
 ```
+
+## A wedged herdr, transcriber or rewrite command, through a daemon, for issues #28 and #94
+
+Run on 2026-10-06 on macOS 27.0.1 (Darwin 27.0.0, arm64), debug builds of `0.1.0-beta.5`:
+the baseline from `main` at `3dd45b8` (built from `git archive` into a scratch directory)
+and the branch `fix/28-94-outward-calls` at `9b7e284`, plus this entry.
+
+**Method.** A Python script kept outside the repository starts `herdr-voice daemon` with
+`HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_CONFIG_DIR` and `HOME` pointing into a scratch
+directory, every other `HERDR_*` variable removed, and `HERDR_BIN_PATH` naming a script in
+that directory. Nothing it did could reach a running herdr. Two `herdr-voice dictate`
+presses three seconds apart make one take, recorded from the real default microphone
+(`[audio] silence_db = -120` so an empty room is not refused as silent); two `herdr-voice
+ptt` presses half a second apart make a hold. The program that wedges is `sh -c "sleep
+731"`, or a fake herdr that sleeps 731 seconds on `pane`; the number lets a left-over
+process be found with `ps`. The daemon's thread count is `ps -M` rows. Configuration:
+`engine = "command"`, `command_timeout_seconds = 2` where the transcriber wedges.
+
+**The instrument, checked first: the baseline.** Transcriber wedged, two takes, on `main`:
+
+```
+take 1, second press  exit 1 after 120.0s  stderr 'the daemon did not answer within 120 seconds; check `herdr plugin log list --plugin herdr-voice`'
+  threads in the daemon: 7; leftover sleeping programs: 1
+take 2, second press  exit 1 after 120.0s  stderr 'the daemon did not answer within 120 seconds; ...'
+  threads in the daemon: 7; leftover sleeping programs: 2
+-- leftover sleeping programs after the daemon was stopped: 2
+```
+
+The wedge costs the person two minutes and names the daemon; the program is still running
+after each take. On a hold, `main` never reports and refuses the next hold:
+
+```
+hold 1, press / repeat   exit 0   'holding for w1:p1'
+hold 2, press            exit 1   'the take held for w1:p1 is still being transcribed; hold the key again once it lands'
+a press after the failed holds   exit 1   (the same refusal)
+journal: ptt w1:p1: released after 675 ms and 2 repeats / bias attempted=... (and nothing more)
+```
+
+**Transcriber wedged, the branch, `dictate`:**
+
+```
+take 1, second press  exit 1 after 2.1s  stderr '"sh" did not finish within 2 seconds, so it was stopped. A long take can need more: raise [stt] command_timeout_seconds, or run the program by hand on the take to see where it stops — the take is kept at <scratch>/state/takes/1791295299646-18441-1.wav'
+  threads in the daemon: 9; leftover sleeping programs: 0
+take 2, second press  exit 1 after 2.1s  (the same message, a second take)
+  threads in the daemon: 8; leftover sleeping programs: 0
+cancel afterwards     exit 0   'nothing to cancel'
+```
+
+The thread count does not grow from one take to the next (9, then 8; it was 4 before
+any take), no program is left running, and the daemon answers afterwards.
+
+**Herdr wedged on `pane`, the branch, `dictate`, with the real bounds** (the pane read
+and the delivery both go through `pane`, so both are stopped, 5 and 10 seconds):
+
+```
+take 1, second press  exit 1 after 15.1s  stderr 'could not deliver to w1:p1 ("<scratch>/herdr-fake.sh" did not answer within 10 seconds, so the plugin stopped it. The text may already have reached the pane, so look there first. If herdr is not responding, restart it) — the take is kept at <scratch>/state/takes/...-1.wav; text: fix the worklog entry'
+  threads in the daemon: 5; leftover sleeping programs: 0
+take 2, second press  exit 1 after 15.1s  (the same)
+journal: bias attempted=... pane_error="\"<scratch>/herdr-fake.sh\" did not answer within 5 seconds, so the plugin stopped it and went on without the pane's text. If herdr is not responding, restart it"
+         delivering: fix the worklog entry
+         delivery failed: pane=w1:p1 reason="<scratch>/herdr-fake.sh" did not answer within 10 seconds, so the plugin stopped it. ...
+```
+
+**Rewrite command wedged, the branch, `dictate`:** the take is delivered, unrewritten,
+after 30.1 seconds, twice; the reason is journaled once:
+
+```
+take 1, second press  exit 0 after 30.1s  stdout 'delivered to w1:p1 [-45.9 dB]'
+journal: rewrite unavailable: "sh" did not finish within 30 seconds, so it was stopped and the transcript was delivered unrewritten. Run the command by hand on a transcript to see where it stops
+```
+
+**Holds, the branch.** Transcriber wedged: both holds end, are reported in the journal by
+name, and the press after them is accepted (`holding for w1:p1`), where `main` refused it:
+
+```
+journal: ptt w1:p1: the take failed ("sh" did not finish within 2 seconds, so it was stopped. A long take can need more: raise [stt] command_timeout_seconds, ... — the take is kept at <scratch>/state/takes/...-1.wav); nothing was delivered
+hold 2, press   exit 0   'holding for w1:p1'
+a press after the failed holds   exit 0   'holding for w1:p1'
+```
+
+Herdr wedged on `pane`: the same two journal lines as the `dictate` case above (the pane
+read at 5 seconds, `delivery failed` at 10), threads 7 and 7, no leftover program, the
+following presses accepted.
+
+**What this does not establish.**
+
+- A real herdr. The by-hand check used a script as herdr, for the reason `docs/evidence.md`
+  gives for #93: an isolated herdr whose plugin registry is separate from the person's
+  could not be arranged. The time a working herdr takes for one of these calls was not
+  measured, because that would run commands against the owner's live session; the 10 and
+  5 second bounds rest on the calls handing a few bytes to herdr, not on a measurement.
+- The toast path with herdr wedged (`[ui] toasts = true`): covered by
+  `a_hold_over_a_herdr_that_answers_nothing_still_ends_within_two_bounds` and not run here.
+- Windows: the kill reaches the direct child only. Not run.
+- The model-backed transcriber. The transcriber here is `sh`; no whisper model was involved.
