@@ -2325,3 +2325,119 @@ nothing else, and all four cases were run again; the table above is from that ru
 What it does not show: a take whose program is missing, run through a daemon. That the
 failure comes after the take, naming the `PATH` searched, is what the code does
 (`src/daemon.rs`, `transcribe_take`; `src/stt/command.rs`), and it was not run here.
+
+
+## `setup` when its question cannot be answered, for issue #86
+
+Platform: macOS (Darwin), this machine, 2026-10-06. Standard input is a pseudoterminal
+slave, the case `setup` meets when it is started somewhere that shows a terminal and
+forwards no keystrokes: `is_terminal()` is true, the interactive branch asks its question,
+and the first read ends. A pipe cannot stand in, because `is_terminal()` is false for a
+pipe and the run takes the branch that opens a pane. The unit tests call `run` directly and
+cannot reach the closure in `main`; this run is the only one that does.
+
+What stands in for the person: the program below opens a pseudoterminal, starts the binary
+as `herdr-voice setup` on it, with a scratch configuration file holding one binding that
+names the plugin's previous id (so the question is asked), waits for the question, writes
+the given bytes to the terminal, and prints what follows the question, the exit code, and
+whether the configuration file changed. `HERDR_BIN_PATH` is `/usr/bin/false`: it is never
+called, because nothing is written. End of file is the terminal's end-of-file character,
+`^D` (`\x04`) at the start of a line, which makes the next `read` return zero bytes.
+
+```python
+import os, pty, sys, time, select, tempfile, hashlib
+
+binary, keys = sys.argv[1], sys.argv[2].encode().decode("unicode_escape").encode()
+d = tempfile.mkdtemp(prefix="hv86-")
+cfg = os.path.join(d, "config.toml")
+open(cfg, "w").write('[[keys.command]]\nkey = "ctrl+g"\ncommand = "haurylau.voice.ptt"\n')
+before = hashlib.sha256(open(cfg, "rb").read()).hexdigest()
+env = {"PATH": os.environ["PATH"], "HERDR_CONFIG_PATH": cfg, "HERDR_BIN_PATH": "/usr/bin/false",
+       "HOME": d, "TERM": "xterm"}
+pid, fd = pty.fork()
+if pid == 0:
+    os.execve(binary, [binary, "setup"], env)
+
+def read_until(marker, limit=10):
+    buf = b""
+    end = time.time() + limit
+    while time.time() < end and marker not in buf:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if r:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+    return buf
+
+out = read_until(b"then Enter: ")
+os.write(fd, keys)          # the keystrokes under test
+rest = b""
+end = time.time() + 10
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], 0.2)
+    if r:
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        rest += chunk
+    else:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+_, status = os.waitpid(pid, 0) if 'status' not in dir() or not isinstance(status, int) else (0, status)
+after = hashlib.sha256(open(cfg, "rb").read()).hexdigest()
+text = (out + rest).decode(errors="replace").replace("\r\n", "\n")
+# show only what follows the question
+print(text[text.index("then Enter: "):])
+print("exit code:", os.waitstatus_to_exitcode(status))
+print("config unchanged:", before == after)
+```
+
+The binary "before" is `3dd45b8` (`0.1.0-beta.5`) built from `git archive` into a scratch
+directory; "after" is this branch's `target/debug/herdr-voice`.
+
+```sh
+python3 -I pty_setup.py <binary before> '\x04'
+python3 -I pty_setup.py <binary after> '\x04'
+python3 -I pty_setup.py <binary after> 'n\n'
+```
+
+```text
+=== BEFORE (3dd45b8), end of file ===
+then Enter: ^D
+nothing was changed.
+
+exit code: 0
+config unchanged: True
+=== AFTER, end of file ===
+then Enter: ^D
+the question could not be answered: standard input ended before an answer arrived, so nothing was changed. If you did not end it yourself, run `herdr-voice setup` in a terminal that passes your keystrokes on.
+
+exit code: 1
+config unchanged: True
+=== AFTER, n then Enter ===
+then Enter: n
+
+nothing was changed.
+
+exit code: 0
+config unchanged: True
+```
+
+What this shows: before the change, a question that ended at end of file printed the same
+`nothing was changed.` and exited 0 as a declined one. After it, the same input prints
+its own message and exits 1, the configuration file is untouched in both, and a declined
+offer prints what it printed before and exits 0.
+
+What it does not show: a command runner that gives the child a terminal for output and
+forwards no keystrokes was not run. The reader sees the same thing there, a read that
+returns zero bytes on a terminal, and `^D` produces exactly that, but the runner itself
+is not exercised. The `y` answer is not run here; it is covered by the existing unit tests
+and was not changed.

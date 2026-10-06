@@ -910,7 +910,20 @@ pub fn run(
     // passed — every one of them writes into a buffer that needs no flushing.
     let _ = out.flush();
 
-    let said = answer().unwrap_or_default();
+    let Some(said) = answer() else {
+        // Nobody could answer: a terminal that shows output and forwards no
+        // keystrokes would read as a decline otherwise, and the person is left
+        // believing their `y` was refused.
+        let _ = writeln!(
+            out,
+            "\nthe question could not be answered: standard input ended before an \
+             answer arrived, so nothing was changed. If you did not end it \
+             yourself, run `herdr-voice setup` in a terminal that passes your \
+             keystrokes on."
+        );
+        report_legacy(legacy, out);
+        return 1;
+    };
     if !matches!(said.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
         let _ = writeln!(out, "\nnothing was changed.");
         report_legacy(legacy, out);
@@ -1029,17 +1042,24 @@ fn legacy() -> Legacy {
     }
 }
 
+/// One line from `reader`, or `None` when there is no answer to give: the read
+/// failed, or it returned zero bytes, which is end of file. An empty line is
+/// `"\n"`, not zero bytes, and is an answer.
+fn read_answer(reader: &mut dyn std::io::BufRead) -> Option<String> {
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(line),
+    }
+}
+
 /// What `src/main.rs` calls: resolves the path, asks the process whether it has
 /// a terminal, and reads the answer from standard input.
 pub fn main() -> u8 {
-    use std::io::{BufRead, IsTerminal};
+    use std::io::IsTerminal;
     let herdr = HerdrCli::new();
     let interactive = std::io::stdin().is_terminal();
-    let mut answer = || {
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line).ok()?;
-        Some(line)
-    };
+    let mut answer = || read_answer(&mut std::io::stdin().lock());
     let mut out = std::io::stdout();
     run(
         &herdr,
@@ -1293,6 +1313,107 @@ mod tests {
         let (code, _) = capture(&FakeHerdr::clean(), Some(path.clone()), true, vec!["n"]);
         assert_eq!(code, 0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[theme]\n");
+    }
+
+    #[test]
+    fn an_empty_reader_is_no_answer_and_an_empty_line_is_one() {
+        assert_eq!(read_answer(&mut std::io::Cursor::new("")), None);
+        assert_eq!(
+            read_answer(&mut std::io::Cursor::new("\n")),
+            Some("\n".to_string())
+        );
+    }
+
+    #[test]
+    fn a_last_line_without_a_newline_is_still_an_answer() {
+        assert_eq!(
+            read_answer(&mut std::io::Cursor::new("y")),
+            Some("y".to_string())
+        );
+    }
+
+    #[test]
+    fn a_failed_read_is_no_answer() {
+        // Bytes that are not UTF-8 make `read_line` fail with `InvalidData`.
+        assert_eq!(
+            read_answer(&mut std::io::Cursor::new(vec![0xff, 0xfe, b'\n'])),
+            None
+        );
+    }
+
+    const UNANSWERED: &str = "the question could not be answered";
+
+    #[test]
+    fn no_answer_is_not_a_decline_and_changes_nothing() {
+        let path = scratch("run-eof");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let herdr = FakeHerdr::clean();
+        let (code, said) = capture(&herdr, Some(path.clone()), true, vec![]);
+        assert_eq!(code, 1, "{said}");
+        assert!(said.contains(UNANSWERED), "{said}");
+        assert!(
+            said.contains("herdr-voice setup"),
+            "it says what to run: {said}"
+        );
+        assert!(
+            said.contains("terminal that passes your keystrokes on"),
+            "{said}"
+        );
+        assert!(
+            said.contains("so nothing was changed"),
+            "it is the only place that says the configuration is untouched: {said}"
+        );
+        assert!(
+            said.contains("Enter: \nthe question could not be answered"),
+            "the message starts on a line of its own, after the unanswered prompt: {said:?}"
+        );
+        assert!(
+            said.lines().all(|line| line != "nothing was changed."),
+            "a decline prints that sentence as a line of its own; this must not: {said}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[theme]\n");
+        assert!(herdr.calls().is_empty(), "{:?}", herdr.calls());
+    }
+
+    #[test]
+    fn a_decline_does_not_say_the_question_went_unanswered() {
+        let path = scratch("run-no-text");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        for said_no in ["n\n", "\n", ""] {
+            let herdr = FakeHerdr::clean();
+            let (code, said) = capture(&herdr, Some(path.clone()), true, vec![said_no]);
+            assert_eq!(code, 0, "{said_no:?}: {said}");
+            assert!(said.contains("nothing was changed."), "{said_no:?}: {said}");
+            assert!(!said.contains(UNANSWERED), "{said_no:?}: {said}");
+        }
+    }
+
+    #[test]
+    fn no_answer_still_prints_the_legacy_report() {
+        let path = scratch("run-eof-legacy");
+        std::fs::write(&path, "[theme]\n").unwrap();
+        let legacy = Legacy {
+            config_file: Some(PathBuf::from("/tmp/c/haurylau.voice/config.toml")),
+            current_config_dir: Some(PathBuf::from("/tmp/c/herdr-voice")),
+            daemon_socket: None,
+        };
+        let mut said = Vec::new();
+        let code = run(
+            &FakeHerdr::clean(),
+            Some(path),
+            &legacy,
+            true,
+            &mut || None,
+            &mut said,
+        );
+        let said = String::from_utf8(said).unwrap();
+        assert_eq!(code, 1);
+        let legacy_at = said.find("/tmp/c/haurylau.voice/config.toml").expect(&said);
+        let message_at = said.find(UNANSWERED).expect(&said);
+        assert!(
+            message_at < legacy_at,
+            "the message comes first, the report after it: {said}"
+        );
     }
 
     #[test]
