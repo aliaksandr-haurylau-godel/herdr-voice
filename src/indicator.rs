@@ -81,26 +81,46 @@ pub fn strip(label: &str) -> String {
 }
 
 /// Why a paint did not happen. Mirrors `crate::delivery::DeliveryError`: the
-/// two talk to the same binary and fail in the same two ways.
+/// two talk to the same binary and fail in the same ways.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaintError {
     /// The code alone, extracted from herdr's structured refusal, or the raw
     /// output when it did not parse as that shape.
     Rejected(String),
-    /// `herdr` itself could not be started.
+    /// `herdr` itself was not found.
     NotFound { binary: String, path: String },
+    /// `herdr` was found and this process is not allowed to run it.
+    NotExecutable { binary: String },
+    /// Starting `herdr` failed for another reason, which is the operating
+    /// system's own text.
+    StartFailed { binary: String, reason: String },
 }
 
 impl std::fmt::Display for PaintError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::delivery::{not_executable_message, not_found_message, start_failed_message};
         match self {
             PaintError::Rejected(why) => write!(f, "{why}"),
-            PaintError::NotFound { binary, path } => write!(
-                f,
-                "cannot run {binary:?}: it is not on the PATH this process has, which is \
-                 {path:?}. Set HERDR_BIN_PATH to herdr's location, or start herdr from a shell \
-                 where it is on the PATH"
-            ),
+            PaintError::NotFound { binary, path } => {
+                write!(f, "{}", not_found_message(binary, path))
+            }
+            PaintError::NotExecutable { binary } => {
+                write!(f, "{}", not_executable_message(binary))
+            }
+            PaintError::StartFailed { binary, reason } => {
+                write!(f, "{}", start_failed_message(binary, reason))
+            }
+        }
+    }
+}
+
+impl From<crate::delivery::StartFailure> for PaintError {
+    fn from(failure: crate::delivery::StartFailure) -> Self {
+        use crate::delivery::StartFailure;
+        match failure {
+            StartFailure::NotFound { binary, path } => PaintError::NotFound { binary, path },
+            StartFailure::NotExecutable { binary } => PaintError::NotExecutable { binary },
+            StartFailure::Other { binary, reason } => PaintError::StartFailed { binary, reason },
         }
     }
 }
@@ -224,10 +244,7 @@ impl HerdrPainter {
         match std::process::Command::new(&self.binary).args(args).output() {
             // herdr starts plugin commands with a minimal PATH — the same
             // reasoning src/delivery.rs states for delivery.
-            Err(_) => Err(PaintError::NotFound {
-                binary: self.binary.clone(),
-                path: std::env::var("PATH").unwrap_or_default(),
-            }),
+            Err(error) => Err(crate::delivery::start_failure(&self.binary, &error).into()),
             Ok(output) if output.status.success() => Ok(output.stdout),
             Ok(output) => {
                 let text = if !output.stdout.is_empty() {
@@ -1236,6 +1253,52 @@ mod tests {
                 other => panic!("expected NotFound, got {other:?}"),
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_herdr_without_the_execute_bit_is_not_runnable_and_not_missing() {
+        let fake = FakeHerdr::new("noexec", "herdr.sh");
+        std::fs::write(&fake.script, "#!/bin/sh\nexit 0\n").expect("write the file");
+        let painter = fake.painter();
+        for outcome in [
+            painter.tabs().map(|_| ()),
+            painter.rename("w1:t1", "1"),
+            painter.token("w1:p1", "🎙️🔴 REC 0:00", 1_800),
+        ] {
+            assert_eq!(
+                outcome,
+                Err(PaintError::NotExecutable {
+                    binary: fake.binary()
+                })
+            );
+        }
+        let why = PaintError::NotExecutable {
+            binary: fake.binary(),
+        }
+        .to_string();
+        assert!(why.contains("was found"), "got {why}");
+        assert!(!why.contains("not on the PATH"), "got {why}");
+        let line = paint_failed_line(&why);
+        assert!(line.contains("was found"), "got {line}");
+    }
+
+    #[test]
+    fn any_other_failure_to_start_is_the_operating_systems_text_and_not_the_path_sentence() {
+        let error = PaintError::from(crate::delivery::start_failure(
+            "/opt/herdr",
+            &std::io::Error::other("Text file busy (os error 26)"),
+        ));
+        assert_eq!(
+            error,
+            PaintError::StartFailed {
+                binary: "/opt/herdr".to_string(),
+                reason: "Text file busy (os error 26)".to_string(),
+            }
+        );
+        let why = error.to_string();
+        assert!(why.contains("Text file busy (os error 26)"), "got {why}");
+        assert!(!why.contains("PATH"), "got {why}");
     }
 
     #[test]
