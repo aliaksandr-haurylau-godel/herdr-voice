@@ -1987,6 +1987,7 @@ for v in sys.argv[2:]:
 if attach: os.kill(pid, signal.SIGKILL)
 ```
 
+
 ## A wedged herdr, transcriber or rewrite command, through a daemon, for issues #28 and #94
 
 Run on 2026-10-06 on macOS 27.0.1 (Darwin 27.0.0, arm64), debug builds of `0.1.0-beta.5`:
@@ -2231,6 +2232,215 @@ acceptance criteria.
 `bias::pane::read` (`src/bias/pane.rs`) maps every failure to start herdr to the
 same "install herdr, or set HERDR_BIN_PATH" message. #101 does not name it; it was
 not changed.
+
+## What `doctor` says about a configured transcriber, for issue #27
+
+Platform: macOS (Darwin), this machine, 2026-10-07. The binary "before" is built from
+`3dd45b8` (`0.1.0-beta.5`) into a scratch directory; "after" is this branch's
+`target/debug/herdr-voice`, built into a directory of its own. `doctor` runs with an empty
+environment apart from the variables below, so it reads and writes nothing of any real
+configuration or state: a stand-in for herdr that prints `herdr 0.9.1`, an empty herdr
+configuration file, and scratch plugin configuration and state directories. It never starts
+or contacts a daemon.
+
+```sh
+#!/bin/sh
+# usage: s5_27.sh <binary> <label> <[stt] table text>
+bin="$1"; label="$2"; table="$3"
+D=$(mktemp -d)
+mkdir -p "$D/config" "$D/state"
+printf '#!/bin/sh\necho "herdr 0.9.1"\n' > "$D/herdr"; chmod +x "$D/herdr"
+printf '%s\n' "$table" > "$D/config/config.toml"
+: > "$D/herdr-config.toml"
+env -i PATH="/usr/bin:/bin" HOME="$D" \
+  HERDR_BIN_PATH="$D/herdr" HERDR_CONFIG_PATH="$D/herdr-config.toml" \
+  HERDR_PLUGIN_CONFIG_DIR="$D/config" HERDR_PLUGIN_STATE_DIR="$D/state" \
+  "$bin" doctor > "$D/out" 2>&1
+code=$?
+printf '%s\n' "-- $label"
+grep -E '^engine ' "$D/out" | sed 's/^/   /'
+printf '   exit %s\n' "$code"
+rm -rf "$D"
+```
+
+Run once per binary, with these `[stt]` tables:
+
+```text
+A  engine = "command", command = ["hv27-no-such-program", "{audio}"]   (not on PATH)
+B  engine = "command", command = ["sh", "-c", "echo hi"]               (on PATH)
+C  engine = "http",    url = "http://127.0.0.1:9/transcribe"
+D  engine = "command", command = []                                    (refused)
+```
+
+```text
+=== before (3dd45b8)
+-- A command, program absent from PATH
+   engine        ok       "command" is ready
+-- B command, program present (sh)
+   engine        ok       "command" is ready
+-- C http, url set
+   engine        ok       "http" is ready
+-- D command, empty list (missing)
+   engine        missing  [stt] engine is "command" but [stt] command is empty, so there is nothing to run. For example:
+=== after
+-- A command, program absent from PATH
+   engine        ok       [stt] command is set; its program is not looked for until a take is transcribed
+-- B command, program present (sh)
+   engine        ok       [stt] command is set; its program is not looked for until a take is transcribed
+-- C http, url set
+   engine        ok       [stt] url is set; the endpoint is not contacted until a take is transcribed
+-- D command, empty list (missing)
+   engine        missing  [stt] engine is "command" but [stt] command is empty, so there is nothing to run. For example:
+```
+
+The exit code is 1 in every case, before and after, and the cause is the other lines of
+the report in this empty environment, not the engine line. The whole report for case A
+after the change:
+
+```text
+herdr         ok       herdr 0.9.1, this plugin needs 0.8.0 or newer
+daemon        missing  nothing is listening at <scratch>/state/voice.sock; start it with `herdr-voice daemon`, or restart herdr
+notifications missing  no [ui.toast] delivery in <scratch>/herdr-config.toml (herdr's default is "off"): this plugin's failure messages are not expected to appe...
+config        ok       <scratch>/config/config.toml
+engine        ok       [stt] command is set; its program is not looked for until a take is transcribed
+model         unused   [stt] model (large-v3-turbo) is not used by this configuration; nothing in it asks for one. It would be looked for in <scratch>/state/mod...
+rewrite       missing  none of ["claude"] is on PATH, and this build does not yet invoke the agent engine for rewrite either way; transcripts are delivered unre...
+record        default  off; set [record] transcripts = true to keep each take's transcript and rewrite beside its recording
+exit 1
+```
+
+What this shows: before the change, a program that is not on `PATH` (A) and one that is
+(B) both printed `"command" is ready`, and `http` with only a url set printed
+`"http" is ready`. After it, the line is the same for A and B, because it claims nothing
+about the program, and says what was established and what was not. The `missing` line for
+an empty list (D) is unchanged, and the state of the other two stays `ok`.
+
+**A first run of the "after" binary was wrong, and was caught before it was written
+down.** It printed `engine missing  [stt] url is set; ...` for case C, which the unit
+test asserts cannot happen. The binary at `target/debug/herdr-voice` of the directory
+shared with a mutation run was the one that run had linked last, with the state of the
+http arm changed on purpose. The "after" binary was then rebuilt into a directory used by
+nothing else, and all four cases were run again; the table above is from that run.
+
+What it does not show: a take whose program is missing, run through a daemon. That the
+failure comes after the take, naming the `PATH` searched, is what the code does
+(`src/daemon.rs`, `transcribe_take`; `src/stt/command.rs`), and it was not run here.
+
+
+## `setup` when its question cannot be answered, for issue #86
+
+Platform: macOS (Darwin), this machine, 2026-10-06. Standard input is a pseudoterminal
+slave, the case `setup` meets when it is started somewhere that shows a terminal and
+forwards no keystrokes: `is_terminal()` is true, the interactive branch asks its question,
+and the first read ends. A pipe cannot stand in, because `is_terminal()` is false for a
+pipe and the run takes the branch that opens a pane. The unit tests call `run` directly and
+cannot reach the closure in `main`; this run is the only one that does.
+
+What stands in for the person: the program below opens a pseudoterminal, starts the binary
+as `herdr-voice setup` on it, with a scratch configuration file holding one binding that
+names the plugin's previous id (so the question is asked), waits for the question, writes
+the given bytes to the terminal, and prints what follows the question, the exit code, and
+whether the configuration file changed. `HERDR_BIN_PATH` is `/usr/bin/false`: it is never
+called, because nothing is written. End of file is the terminal's end-of-file character,
+`^D` (`\x04`) at the start of a line, which makes the next `read` return zero bytes.
+
+```python
+import os, pty, sys, time, select, tempfile, hashlib
+
+binary, keys = sys.argv[1], sys.argv[2].encode().decode("unicode_escape").encode()
+d = tempfile.mkdtemp(prefix="hv86-")
+cfg = os.path.join(d, "config.toml")
+open(cfg, "w").write('[[keys.command]]\nkey = "ctrl+g"\ncommand = "haurylau.voice.ptt"\n')
+before = hashlib.sha256(open(cfg, "rb").read()).hexdigest()
+env = {"PATH": os.environ["PATH"], "HERDR_CONFIG_PATH": cfg, "HERDR_BIN_PATH": "/usr/bin/false",
+       "HOME": d, "TERM": "xterm"}
+pid, fd = pty.fork()
+if pid == 0:
+    os.execve(binary, [binary, "setup"], env)
+
+def read_until(marker, limit=10):
+    buf = b""
+    end = time.time() + limit
+    while time.time() < end and marker not in buf:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if r:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+    return buf
+
+out = read_until(b"then Enter: ")
+os.write(fd, keys)          # the keystrokes under test
+rest = b""
+end = time.time() + 10
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], 0.2)
+    if r:
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        rest += chunk
+    else:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+_, status = os.waitpid(pid, 0) if 'status' not in dir() or not isinstance(status, int) else (0, status)
+after = hashlib.sha256(open(cfg, "rb").read()).hexdigest()
+text = (out + rest).decode(errors="replace").replace("\r\n", "\n")
+# show only what follows the question
+print(text[text.index("then Enter: "):])
+print("exit code:", os.waitstatus_to_exitcode(status))
+print("config unchanged:", before == after)
+```
+
+The binary "before" is `3dd45b8` (`0.1.0-beta.5`) built from `git archive` into a scratch
+directory; "after" is this branch's `target/debug/herdr-voice`.
+
+```sh
+python3 -I pty_setup.py <binary before> '\x04'
+python3 -I pty_setup.py <binary after> '\x04'
+python3 -I pty_setup.py <binary after> 'n\n'
+```
+
+```text
+=== BEFORE (3dd45b8), end of file ===
+then Enter: ^D
+nothing was changed.
+
+exit code: 0
+config unchanged: True
+=== AFTER, end of file ===
+then Enter: ^D
+the question could not be answered: standard input ended before an answer arrived, so nothing was changed. If you did not end it yourself, run `herdr-voice setup` in a terminal that passes your keystrokes on.
+
+exit code: 1
+config unchanged: True
+=== AFTER, n then Enter ===
+then Enter: n
+
+nothing was changed.
+
+exit code: 0
+config unchanged: True
+```
+
+What this shows: before the change, a question that ended at end of file printed the same
+`nothing was changed.` and exited 0 as a declined one. After it, the same input prints
+its own message and exits 1, the configuration file is untouched in both, and a declined
+offer prints what it printed before and exits 0.
+
+What it does not show: a command runner that gives the child a terminal for output and
+forwards no keystrokes was not run. The reader sees the same thing there, a read that
+returns zero bytes on a terminal, and `^D` produces exactly that, but the runner itself
+is not exercised. The `y` answer is not run here; it is covered by the existing unit tests
+and was not changed.
 
 
 ## The leak gate checks an unterminated last line of `.leakwords`, for issue #97
