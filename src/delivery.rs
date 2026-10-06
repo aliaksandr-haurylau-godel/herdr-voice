@@ -254,7 +254,7 @@ impl HerdrDeliverer {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn with_bound(mut self, bound: Duration) -> Self {
         self.bound = bound;
         self

@@ -45,7 +45,7 @@ impl CommandEngine {
         CommandEngine { argv, bound: BOUND }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn with_bound(mut self, bound: Duration) -> CommandEngine {
         self.bound = bound;
         self
