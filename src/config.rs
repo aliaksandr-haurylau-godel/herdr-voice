@@ -72,6 +72,16 @@ pub struct Stt {
     /// from `model`, which stays a local-model identifier for `engine =
     /// "command"` and is not read by the http engine.
     pub http_model: String,
+    /// How long `engine = "command"` lets the program run before it is stopped
+    /// and the take is reported as failed. Not a cap on work somebody wants to
+    /// wait for: it exists so a program that hangs becomes a message. Read through
+    /// `load`, which raises anything under `MIN_COMMAND_TIMEOUT_SECONDS` to it.
+    pub command_timeout_seconds: u64,
+}
+
+impl Stt {
+    /// A bound of zero would stop every program the moment it started.
+    pub const MIN_COMMAND_TIMEOUT_SECONDS: u64 = 1;
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -112,6 +122,11 @@ impl Default for Stt {
             url: String::new(),
             token: String::new(),
             http_model: String::new(),
+            // Sixty seconds is about thirty-six times the 1.65 seconds a
+            // 70-second take needed (`docs/evidence.md`), and under the client's
+            // two-minute wait for `dictate`, so a timeout is reported by name
+            // rather than as a daemon that did not answer.
+            command_timeout_seconds: 60,
         }
     }
 }
@@ -312,6 +327,10 @@ pub fn load(directory: Option<&Path>) -> Loaded {
                 // the key has to remember, and the drawing loop's own `.max(1)`
                 // only keeps the loop from having no wait in it at all.
                 config.ui.blink_ms = config.ui.blink_ms.max(Ui::MIN_BLINK_MS);
+                config.stt.command_timeout_seconds = config
+                    .stt
+                    .command_timeout_seconds
+                    .max(Stt::MIN_COMMAND_TIMEOUT_SECONDS);
                 Loaded {
                     config,
                     source: Source::File(path),
@@ -672,6 +691,58 @@ mod tests {
         // A value over the floor is left exactly as it was asked for.
         std::fs::write(directory.join("config.toml"), "[ui]\nblink_ms = 250\n").unwrap();
         assert_eq!(load(Some(&directory)).config.ui.blink_ms, 250);
+    }
+
+    #[test]
+    fn the_transcriber_bound_defaults_to_sixty_seconds() {
+        assert_eq!(Stt::default().command_timeout_seconds, 60);
+        let directory = scratch("command-timeout-absent");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[stt]\nengine = \"command\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load(Some(&directory)).config.stt.command_timeout_seconds,
+            60
+        );
+    }
+
+    #[test]
+    fn the_transcriber_bound_is_read_from_the_file() {
+        let directory = scratch("command-timeout-set");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[stt]\ncommand_timeout_seconds = 300\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load(Some(&directory)).config.stt.command_timeout_seconds,
+            300
+        );
+    }
+
+    #[test]
+    fn a_transcriber_bound_of_zero_is_raised_to_the_floor_rather_than_obeyed() {
+        let directory = scratch("command-timeout-zero");
+        std::fs::write(
+            directory.join("config.toml"),
+            "[stt]\ncommand_timeout_seconds = 0\n",
+        )
+        .unwrap();
+        let loaded = load(Some(&directory));
+        assert_eq!(Stt::MIN_COMMAND_TIMEOUT_SECONDS, 1);
+        assert_eq!(loaded.config.stt.command_timeout_seconds, 1);
+        std::fs::write(
+            directory.join("config.toml"),
+            "[stt]\ncommand_timeout_seconds = 1\n",
+        )
+        .unwrap();
+        assert_eq!(load(Some(&directory)).config.stt.command_timeout_seconds, 1);
+        assert!(
+            matches!(loaded.source, Source::File(_)),
+            "the file still loads"
+        );
     }
 
     #[test]
