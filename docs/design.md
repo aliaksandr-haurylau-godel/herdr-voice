@@ -215,6 +215,26 @@ A take that was delivered keeps neither its recording nor what the two text
 stages produced, unless `[record] transcripts` says so. A take that ended some
 other way keeps its recording either way — section 7.
 
+### Bounds on outward calls
+
+Every program the daemon waits for has a bound, so a program that stops answering
+becomes a message and not a thread that never returns.
+
+| Call | Bound | What the person gets after it |
+|---|---|---|
+| `herdr pane send-text`, `agent prompt`, `notification show` | 10 seconds | The `delivery failed` journal line and a reply naming herdr; the take is kept |
+| `herdr pane read`, before recognition | 5 seconds | The take goes on with file names alone; the failure is in the bias journal line |
+| the transcriber command | 60 seconds, `[stt] command_timeout_seconds` | The take is reported as failed, naming the program, the bound and the key; the take is kept |
+| the rewrite command | 30 seconds | The transcript is delivered unrewritten and the failure is told once |
+
+On the `dictate` path the pane read, transcription, rewrite and delivery run in turn
+inside the client's 120-second wait, and their bounds add to 105 seconds, so the
+message that arrives names the program and not the daemon. On a hold there is no
+client waiting; the watcher is back within the same sum and the report is the
+journal line. The toast of a delivery failure goes through the same herdr and has its
+own 10-second bound, so when herdr is the program that wedged, the journal line is
+the report to rely on and the toast is best effort.
+
 ## 5. Push-to-talk
 
 ### Context
@@ -349,6 +369,7 @@ silence_db = -60
 engine = "command"        # command | candle | http
 model  = "large-v3-turbo"
 language = "auto"
+command_timeout_seconds = 60   # stop a command transcriber after this long
 
 [rewrite]
 engine = "agent"          # agent | http | command | off
@@ -380,6 +401,13 @@ submit = false
 [record]
 transcripts = false       # keep each take's transcript and rewrite on disk
 ```
+
+`[stt] command_timeout_seconds` is read only by `engine = "command"`. A transcriber
+that is still running after it is stopped together with what it started, and the
+take is reported as failed, naming the program, the bound and this key. A value
+under 1 is raised to 1. It is a key because a slower transcriber on a long take is a
+legitimate reason to wait longer; the other bounds in the table under "Bounds on
+outward calls" are not keys.
 
 `blink_ms` is raised to 100 ms when a configuration file asks for less. Every
 tick runs up to three herdr subprocesses — a listing, a rename and a token — so

@@ -122,10 +122,10 @@ impl Default for Stt {
             url: String::new(),
             token: String::new(),
             http_model: String::new(),
-            // Sixty seconds is thirty-six times the longest take measured in
-            // `docs/evidence.md`, and under the client's two-minute wait for
-            // `dictate`, so a timeout is reported by name rather than as a
-            // daemon that did not answer.
+            // Sixty seconds is about thirty-six times the 1.65 seconds a
+            // 70-second take needed (`docs/evidence.md`), and under the client's
+            // two-minute wait for `dictate`, so a timeout is reported by name
+            // rather than as a daemon that did not answer.
             command_timeout_seconds: 60,
         }
     }
