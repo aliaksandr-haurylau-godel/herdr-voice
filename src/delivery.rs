@@ -467,17 +467,10 @@ mod tests {
     #[cfg(unix)]
     fn recorder(tag: &str) -> Recorder {
         let recorder = Recorder::new(tag, "record.sh");
-        std::fs::write(
+        crate::script_fixture::write_executable(
             &recorder.script,
-            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\n", recorder.out),
-        )
-        .expect("write recorder script");
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&recorder.script)
-            .expect("stat")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&recorder.script, perms).expect("chmod");
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\n", recorder.out),
+        );
         recorder
     }
 
@@ -711,17 +704,10 @@ mod tests {
     #[test]
     fn a_program_that_starts_and_fails_is_still_a_rejection() {
         let recorder = Recorder::new("rejects", "herdr-rejecting");
-        std::fs::write(
+        crate::script_fixture::write_executable(
             &recorder.script,
             "#!/bin/sh\necho '{\"error\":{\"code\":\"pane_not_found\",\"message\":\"gone\"}}'\nexit 1\n",
-        )
-        .expect("write");
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&recorder.script)
-            .expect("stat")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&recorder.script, perms).expect("chmod");
+        );
         let deliverer = HerdrDeliverer::with_binary(recorder.script.to_string_lossy().into_owned());
         assert_eq!(
             deliverer.insert("w1:p2", "hello"),

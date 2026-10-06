@@ -1060,18 +1060,13 @@ mod tests {
     fn fake_herdr(tag: &str, answer: &str, code: i32) -> FakeHerdr {
         let fake = FakeHerdr::new(tag, "herdr.sh");
         std::fs::write(&fake.answer, answer).expect("write the answer");
-        std::fs::write(
+        crate::script_fixture::write_executable(
             &fake.script,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\ncat {:?}\nexit {code}\n",
                 fake.argv, fake.answer
             ),
-        )
-        .expect("write the script");
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&fake.script).expect("stat").permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&fake.script, perms).expect("chmod");
+        );
         fake
     }
 

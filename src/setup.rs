@@ -2165,7 +2165,6 @@ mod tests {
 
         impl Recorder {
             fn new(tag: &str, text: &str, code: i32) -> Self {
-                use std::os::unix::fs::PermissionsExt;
                 let dir = std::env::temp_dir().join(format!(
                     "herdr-voice-setup-recorder-{tag}-{}",
                     std::process::id()
@@ -2177,9 +2176,9 @@ mod tests {
                     out: dir.join("record.out"),
                     dir,
                 };
-                std::fs::write(
+                crate::script_fixture::write_executable(
                     &recorder.script,
-                    format!(
+                    &format!(
                         "#!/bin/sh\n\
                          {{ printf '%s\\n' \"$@\"; \
                          printf 'HERDR_CONFIG_PATH=%s\\n' \"${{HERDR_CONFIG_PATH-unset}}\"; \
@@ -2190,13 +2189,7 @@ mod tests {
                         text = text,
                         code = code,
                     ),
-                )
-                .expect("write the recorder script");
-                let mut perms = std::fs::metadata(&recorder.script)
-                    .expect("stat")
-                    .permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&recorder.script, perms).expect("chmod");
+                );
                 recorder
             }
 
