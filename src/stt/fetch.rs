@@ -295,6 +295,15 @@ mod tests {
     /// while the kernel still holds unread bytes can turn the close into a reset,
     /// which surfaces as an intermittent, unrelated-looking failure.
     fn serve(files: Vec<(&'static str, &'static str, Vec<u8>)>) -> (String, Server) {
+        serve_with(files, std::time::Duration::from_secs(5))
+    }
+
+    /// `serve` with the time a connected client may stay silent chosen by the
+    /// caller.
+    fn serve_with(
+        files: Vec<(&'static str, &'static str, Vec<u8>)>,
+        read_timeout: std::time::Duration,
+    ) -> (String, Server) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         listener.set_nonblocking(true).expect("nonblocking");
         let addr = listener.local_addr().expect("addr");
@@ -322,7 +331,7 @@ mod tests {
                 // A client that connects and never sends must not hold the
                 // thread, and with it `finish`, forever.
                 stream
-                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .set_read_timeout(Some(read_timeout))
                     .expect("read timeout");
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
@@ -628,6 +637,53 @@ mod tests {
         fetch_into(&base, &entry(), &dir, &mut Silent).expect("must succeed");
         handle.finish();
         assert!(dir.join("tokenizer.json").exists());
+    }
+
+    #[test]
+    fn dropping_the_server_closes_the_listener() {
+        let (base, server) = serve(vec![]);
+        let addr = base.trim_start_matches("http://").to_string();
+        drop(server);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::net::TcpStream::connect(&addr).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the listener is still bound after the Server was dropped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_client_that_connects_and_never_sends_does_not_hold_finish_forever() {
+        let (base, server) = serve_with(vec![], std::time::Duration::from_millis(200));
+        let _silent =
+            std::net::TcpStream::connect(base.trim_start_matches("http://")).expect("connect");
+        // Time for the thread to accept it and start reading.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = server.finish();
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("finish must return while a silent client is still connected");
+    }
+
+    #[test]
+    fn a_client_that_sends_late_is_still_answered_and_recorded() {
+        let (base, server) = serve(vec![]);
+        let mut client =
+            std::net::TcpStream::connect(base.trim_start_matches("http://")).expect("connect");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        client
+            .write_all(b"GET /late HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        let mut answer = String::new();
+        client.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 404"), "got {answer}");
+        assert_eq!(server.finish(), vec!["/late".to_string()]);
     }
 
     #[test]

@@ -58,8 +58,9 @@ pub fn write_executable(path: &Path, content: &str) {
 
 /// Executes the script once with the probe variable set, retrying every 5 ms
 /// while the spawn fails with `ETXTBSY`, and returns the number of retries.
-/// Any other spawn error, or `ETXTBSY` still present after `deadline`, panics
-/// with the path and the error.
+/// Any other spawn error, `ETXTBSY` still present after `deadline`, or a probe
+/// that does not exit successfully (the guard line did not run), panics with
+/// the path and the error.
 pub fn wait_until_executable(path: &Path, deadline: Duration) -> u32 {
     let start = Instant::now();
     let mut retries = 0;
@@ -71,7 +72,11 @@ pub fn wait_until_executable(path: &Path, deadline: Duration) -> u32 {
             .stderr(Stdio::null())
             .status();
         match spawned {
-            Ok(_) => return retries,
+            Ok(status) if status.success() => return retries,
+            Ok(status) => panic!(
+                "{} exited with {status} when probed: its guard line did not run",
+                path.display()
+            ),
             Err(e) if e.raw_os_error() == Some(ETXTBSY) && start.elapsed() < deadline => {
                 retries += 1;
                 std::thread::sleep(Duration::from_millis(5));
@@ -196,13 +201,58 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "cannot be executed")]
     fn a_script_that_cannot_be_executed_for_another_reason_panics_at_once() {
         let scratch = Scratch::new("noexec");
         let path = scratch.path("s.sh");
         // `fs::write` creates the file without the execute bit.
         std::fs::write(&path, format!("#!/bin/sh\n{GUARD}\n")).unwrap();
-        wait_until_executable(&path, Duration::from_secs(10));
+        let started = Instant::now();
+        let outcome =
+            std::panic::catch_unwind(|| wait_until_executable(&path, Duration::from_secs(10)));
+        let message = match outcome {
+            Err(payload) => payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default(),
+            Ok(_) => panic!("it must panic"),
+        };
+        assert!(message.contains("cannot be executed"), "got {message}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "it waited for the deadline instead of failing at once"
+        );
+    }
+
+    #[test]
+    fn write_executable_waits_for_a_descriptor_held_elsewhere_on_the_file() {
+        let scratch = Scratch::new("heldwrite");
+        let path = scratch.path("s.sh");
+        guarded_script(&path);
+        let held = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("hold the script open for writing");
+        let released = Arc::new(AtomicBool::new(false));
+        let release = released.clone();
+        let (go, started) = std::sync::mpsc::channel::<()>();
+        let releaser = std::thread::spawn(move || {
+            started.recv().expect("the write is about to begin");
+            std::thread::sleep(Duration::from_millis(400));
+            release.store(true, Ordering::SeqCst);
+            drop(held);
+        });
+        go.send(()).unwrap();
+        write_executable(&path, "#!/bin/sh\nexit 0\n");
+        let released_when_it_returned = released.load(Ordering::SeqCst);
+        releaser.join().unwrap();
+        if cfg!(target_os = "linux") {
+            assert!(
+                released_when_it_returned,
+                "write_executable returned while the script was still open for writing"
+            );
+        }
+        let status = Command::new(&path).status().expect("run the script");
+        assert!(status.success());
     }
 
     #[test]
@@ -222,9 +272,11 @@ mod tests {
         let scratch = Scratch::new("existing");
         let path = scratch.path("s.sh");
         // `fs::write` creates the file without the execute bit; the mode of
-        // `OpenOptions` applies only to a file it creates.
-        std::fs::write(&path, "stale\n").unwrap();
-        write_executable(&path, "#!/bin/sh\nexit 0\n");
+        // `OpenOptions` applies only to a file it creates. The old content is
+        // longer than the new, so a write that does not truncate leaves a line
+        // that is not a command after the script.
+        std::fs::write(&path, format!("{}\n", "x".repeat(200))).unwrap();
+        write_executable(&path, "#!/bin/sh\ntrue\n");
         let status = Command::new(&path).status().expect("run the script");
         assert!(status.success());
     }

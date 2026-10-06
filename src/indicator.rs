@@ -1250,6 +1250,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_herdr_that_is_not_found_says_so_and_names_the_path_and_the_variable() {
+        let message = PaintError::NotFound {
+            binary: "/opt/herdr".to_string(),
+            path: "/usr/bin".to_string(),
+        }
+        .to_string();
+        assert!(message.contains("not on the PATH"), "got {message}");
+        assert!(message.contains("\"/usr/bin\""), "got {message}");
+        assert!(message.contains("HERDR_BIN_PATH"), "got {message}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_herdr_without_the_execute_bit_is_not_runnable_and_not_missing() {

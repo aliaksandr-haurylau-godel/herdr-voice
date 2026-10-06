@@ -2297,8 +2297,9 @@ mod tests {
                 .check_config(std::path::Path::new("config.toml"))
                 .unwrap_err();
             match err {
-                HerdrError::NotFound { binary, .. } => {
-                    assert_eq!(binary, "herdr-voice-no-such-program")
+                HerdrError::NotFound { binary, path } => {
+                    assert_eq!(binary, "herdr-voice-no-such-program");
+                    assert_eq!(path, std::env::var("PATH").unwrap_or_default());
                 }
                 other => panic!("expected a not-found failure, got {other:?}"),
             }

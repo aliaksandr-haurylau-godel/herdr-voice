@@ -1730,6 +1730,11 @@ mod tests {
             "got {}",
             finding.detail
         );
+        assert!(
+            finding.detail.contains("herdr-voice-no-such-program"),
+            "it must name the program it tried: {}",
+            finding.detail
+        );
     }
 
     #[cfg(unix)]
@@ -1744,6 +1749,11 @@ mod tests {
         assert!(
             finding.detail.contains("was found"),
             "got {}",
+            finding.detail
+        );
+        assert!(
+            finding.detail.contains(&*path.to_string_lossy()),
+            "it must name the program it tried: {}",
             finding.detail
         );
         assert!(
