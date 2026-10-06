@@ -299,5 +299,6 @@ mod tests {
     #[test]
     fn the_bound_is_thirty_seconds() {
         assert_eq!(BOUND, std::time::Duration::from_secs(30));
+        assert_eq!(CommandEngine::new(argv(&["true"])).bound, BOUND);
     }
 }

@@ -171,3 +171,37 @@ No Critical finding. Nine findings, graded by effect and decided:
 - Minor, deferred: the child is its own process group, so Ctrl-C in a terminal no longer
   reaches it when the daemon runs in the foreground, and a program that opens
   `/dev/tty` can be stopped by SIGTTIN and then times out.
+
+#### S4 mutation test (second fresh subagent, run after the review finished)
+
+51 mutations of the production lines the diff adds or changes, one at a time, each
+run with `cargo test --bin herdr-voice` in a scratch copy: 36 killed, 15 survived, one
+of those an equivalent mutant (`<` for `<=` in the early return of `shorten`: at equal
+length the cut gives the same string). The 14 real survivors, and what was done:
+
+Killed by new tests, each shown red against its mutation (`KILL` to `TERM` and removing
+`.with_bound(..)` in `resolve_with` were re-applied by hand to confirm):
+- `[stt] command_timeout_seconds` reaching the engine (`resolve_with` could drop it and
+  every test passed): `command_timeout_seconds_reaches_the_engine_it_builds`.
+- the floor's value (a floor of 0 or 2 passed because the test compared with the
+  constant): the floor test now asserts 1 and that a configured 1 stays 1.
+- `CommandEngine::new` using the default bound, in `src/stt/command.rs` and
+  `src/rewrite/command.rs`: both bound tests now read the field after `new`.
+- `pane::read` using `BOUND` (a 1-second constant passed): `read_gives_herdr_the_real_five_second_bound`,
+  which takes five seconds; the pane text's "restart" is asserted as well.
+- `kill -s KILL` replaced by `TERM`: `a_program_that_ignores_the_polite_signal_is_still_stopped_with_what_it_started`.
+- `POLL` of 1 second: `a_fast_program_returns_promptly`.
+- `collect` on a stream that was never opened:
+  `a_stream_that_was_never_opened_has_nothing_to_say`.
+
+Explained and left:
+- `DRAIN` of 0 and the three variants of the drain deadline (`until`): the grace after a
+  late exit matters only when a program exits within a millisecond of its bound with
+  output in flight. A test for it races the bound against the exit and would be flaky;
+  an equivalent test that cannot race does not exist.
+- `REAP` of 0 or 40 seconds, the `break` after a started `kill`, the direct
+  `child.kill()` after the group kill, the sleep in the reap loop, `<` for `<=` on the
+  deadline: each changes timing or redundancy and no observable result without a process
+  that survives `SIGKILL`, which a test cannot make.
+- the `try_wait` error arm returning `TimedOut` for `Start`: the error cannot be
+  provoked from a test; the arm is two lines.

@@ -241,6 +241,11 @@ mod tests {
         assert!(found.is_empty(), "cut with a truncate: {found:?}");
     }
 
+    #[test]
+    fn a_stream_that_was_never_opened_has_nothing_to_say() {
+        assert_eq!(collect(None, Instant::now()), Some(Vec::new()));
+    }
+
     #[cfg(unix)]
     mod run_tests {
         use super::super::*;
@@ -381,6 +386,29 @@ mod tests {
                 "returned after {:?}",
                 started.elapsed()
             );
+            let pid = std::fs::read_to_string(&pidfile).expect("the script wrote it");
+            assert!(gone(pid.trim()), "process {} is still running", pid.trim());
+        }
+        #[test]
+        fn a_fast_program_returns_promptly() {
+            let started = Instant::now();
+            run(&mut sh("exit 0"), Duration::from_secs(5)).expect("runs");
+            assert!(
+                started.elapsed() < Duration::from_millis(600),
+                "took {:?}",
+                started.elapsed()
+            );
+        }
+
+        #[test]
+        fn a_program_that_ignores_the_polite_signal_is_still_stopped_with_what_it_started() {
+            let dir = scratch("ignore-term");
+            let pidfile = dir.join("pid");
+            // Ignored signals are inherited, so the grandchild ignores TERM as
+            // well: only KILL stops it.
+            let script = format!("trap '' TERM; sleep 30 & echo $! > {pidfile:?}; wait");
+            let error = run(&mut sh(&script), Duration::from_secs(2)).expect_err("times out");
+            assert!(matches!(error, RunError::TimedOut), "got {error:?}");
             let pid = std::fs::read_to_string(&pidfile).expect("the script wrote it");
             assert!(gone(pid.trim()), "process {} is still running", pid.trim());
         }

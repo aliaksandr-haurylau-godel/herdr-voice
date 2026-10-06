@@ -477,5 +477,7 @@ mod tests {
     #[test]
     fn the_default_bound_is_sixty_seconds() {
         assert_eq!(DEFAULT_BOUND, std::time::Duration::from_secs(60));
+        let engine = CommandEngine::new(argv(&["true"]), None, "auto".to_string());
+        assert_eq!(engine.bound, DEFAULT_BOUND);
     }
 }

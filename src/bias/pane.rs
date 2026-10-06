@@ -260,10 +260,25 @@ mod tests {
             text.contains("without the pane"),
             "says what the take does next: {text}"
         );
+        assert!(text.contains("restart"), "says what to do: {text}");
     }
 
     #[test]
     fn the_bound_is_five_seconds() {
         assert_eq!(BOUND, std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_gives_herdr_the_real_five_second_bound() {
+        let binary = crate::delivery::tests_support::herdr_that_hangs_on("pane-real", &["pane"]);
+        let started = std::time::Instant::now();
+        let error = read("w1:p2", 80, &binary).expect_err("must fail");
+        assert!(
+            matches!(&error, PaneError::TimedOut { bound, .. } if *bound == BOUND),
+            "got {error:?}"
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(4_900));
+        assert!(started.elapsed() < std::time::Duration::from_secs(8));
     }
 }

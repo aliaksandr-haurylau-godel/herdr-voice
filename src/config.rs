@@ -731,10 +731,14 @@ mod tests {
         )
         .unwrap();
         let loaded = load(Some(&directory));
-        assert_eq!(
-            loaded.config.stt.command_timeout_seconds,
-            Stt::MIN_COMMAND_TIMEOUT_SECONDS
-        );
+        assert_eq!(Stt::MIN_COMMAND_TIMEOUT_SECONDS, 1);
+        assert_eq!(loaded.config.stt.command_timeout_seconds, 1);
+        std::fs::write(
+            directory.join("config.toml"),
+            "[stt]\ncommand_timeout_seconds = 1\n",
+        )
+        .unwrap();
+        assert_eq!(load(Some(&directory)).config.stt.command_timeout_seconds, 1);
         assert!(
             matches!(loaded.source, Source::File(_)),
             "the file still loads"

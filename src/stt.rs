@@ -490,4 +490,23 @@ mod tests {
         ]));
         assert!(resolve(&stt("command", &["prog", "{audio}"]), &nowhere()).is_ok());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_seconds_reaches_the_engine_it_builds() {
+        let config = Stt {
+            engine: "command".to_string(),
+            command: vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()],
+            command_timeout_seconds: 1,
+            ..Stt::default()
+        };
+        let engine = resolve_with(&config, ModelState::NotUsed).expect("a command engine");
+        let started = std::time::Instant::now();
+        let message = engine
+            .transcribe(Path::new("/takes/one.wav"), "")
+            .expect_err("must time out")
+            .to_string();
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert!(message.contains("within 1 second,"), "got {message}");
+    }
 }
