@@ -192,3 +192,12 @@ Ledger (S4):
   - Equivalent or timing-only, left alive: F09 (`.mode(0o755)` on creation, overridden by `set_permissions` on the descriptor; kept so the file is never visible without the execute bit), F05 (the 5 ms sleep in the retry loop, no observable effect), F02 (`<` against `<=` at a one-nanosecond boundary), H16 (a mutation of the port-0 test itself: ports 0 and 1 are both refused).
   - Killable on Linux only, not on this machine: F01 (`ETXTBSY` = 27), F03, F04, F13 — the Linux branch of `a_script_still_open_for_writing_is_waited_for_and_not_reported_as_busy` kills them on CI; F12 and F19 (`write_executable` not waiting, or a zero deadline) — the new `write_executable_waits_for_a_descriptor_held_elsewhere_on_the_file` asserts the wait on Linux only. None of these can be shown killed until the Linux CI run.
 - After the fixes: `cargo test` → 728 + 4 + 4 + 9 passed, 1 ignored; clippy, fmt, `check_manifest.py` and the Windows dead-code check clean.
+
+### S5 Verify
+- artifact: the section "Text file busy in test fixtures, a start error that names its cause, and the download double" in `docs/evidence.md`, with the platform on every measurement (macOS here; `ubuntu-latest`, `macos-latest`, `windows-latest` on CI).
+- verdict: pass. Results, each with its command and output in that section:
+  - #101: the real binary, base `3dd45b8` against the branch, for a missing program, a file without the execute bit and a directory, in `doctor` and `setup`; the branch names the cause in each case and the base did not.
+  - #48: the mutation (fetch from `main`) now fails two tests, left `.../resolve/main/...`, right `.../resolve/<zeros>/...`.
+  - #62: a late client (1200 ms) was refused by the old `serve` with `Connection refused (os error 61)`; the new double keeps its listener and three tests pin it.
+  - #66: macOS cannot produce `ETXTBSY` (measured). On `ubuntu-latest`, run 37484114599, attempts 1 to 6 of the `ubuntu-latest` job all succeeded (job ids 112339613355, 112340825767, 112341522960, 112342065449, 112342511088, 112343091481), against a before rate of about 5 failures in about 12 runs. The Linux-only tests ran and passed in attempt 1. Local loop on macOS: 50 of 50 runs.
+- CI failures to record under the brief's rerun rule: none; no test failed in CI.
