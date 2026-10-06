@@ -1988,99 +1988,6 @@ if attach: os.kill(pid, signal.SIGKILL)
 ```
 
 
-## What `doctor` says about a configured transcriber, for issue #27
-
-Platform: macOS (Darwin), this machine, 2026-10-07. The binary "before" is built from
-`3dd45b8` (`0.1.0-beta.5`) into a scratch directory; "after" is this branch's
-`target/debug/herdr-voice`, built into a directory of its own. `doctor` runs with an empty
-environment apart from the variables below, so it reads and writes nothing of any real
-configuration or state: a stand-in for herdr that prints `herdr 0.9.1`, an empty herdr
-configuration file, and scratch plugin configuration and state directories. It never starts
-or contacts a daemon.
-
-```sh
-#!/bin/sh
-# usage: s5_27.sh <binary> <label> <[stt] table text>
-bin="$1"; label="$2"; table="$3"
-D=$(mktemp -d)
-mkdir -p "$D/config" "$D/state"
-printf '#!/bin/sh\necho "herdr 0.9.1"\n' > "$D/herdr"; chmod +x "$D/herdr"
-printf '%s\n' "$table" > "$D/config/config.toml"
-: > "$D/herdr-config.toml"
-env -i PATH="/usr/bin:/bin" HOME="$D" \
-  HERDR_BIN_PATH="$D/herdr" HERDR_CONFIG_PATH="$D/herdr-config.toml" \
-  HERDR_PLUGIN_CONFIG_DIR="$D/config" HERDR_PLUGIN_STATE_DIR="$D/state" \
-  "$bin" doctor > "$D/out" 2>&1
-code=$?
-printf '%s\n' "-- $label"
-grep -E '^engine ' "$D/out" | sed 's/^/   /'
-printf '   exit %s\n' "$code"
-rm -rf "$D"
-```
-
-Run once per binary, with these `[stt]` tables:
-
-```text
-A  engine = "command", command = ["hv27-no-such-program", "{audio}"]   (not on PATH)
-B  engine = "command", command = ["sh", "-c", "echo hi"]               (on PATH)
-C  engine = "http",    url = "http://127.0.0.1:9/transcribe"
-D  engine = "command", command = []                                    (refused)
-```
-
-```text
-=== before (3dd45b8)
--- A command, program absent from PATH
-   engine        ok       "command" is ready
--- B command, program present (sh)
-   engine        ok       "command" is ready
--- C http, url set
-   engine        ok       "http" is ready
--- D command, empty list (missing)
-   engine        missing  [stt] engine is "command" but [stt] command is empty, so there is nothing to run. For example:
-=== after
--- A command, program absent from PATH
-   engine        ok       [stt] command is set; its program is not looked for until a take is transcribed
--- B command, program present (sh)
-   engine        ok       [stt] command is set; its program is not looked for until a take is transcribed
--- C http, url set
-   engine        ok       [stt] url is set; the endpoint is not contacted until a take is transcribed
--- D command, empty list (missing)
-   engine        missing  [stt] engine is "command" but [stt] command is empty, so there is nothing to run. For example:
-```
-
-The exit code is 1 in every case, before and after, and the cause is the other lines of
-the report in this empty environment, not the engine line. The whole report for case A
-after the change:
-
-```text
-herdr         ok       herdr 0.9.1, this plugin needs 0.8.0 or newer
-daemon        missing  nothing is listening at <scratch>/state/voice.sock; start it with `herdr-voice daemon`, or restart herdr
-notifications missing  no [ui.toast] delivery in <scratch>/herdr-config.toml (herdr's default is "off"): this plugin's failure messages are not expected to appe...
-config        ok       <scratch>/config/config.toml
-engine        ok       [stt] command is set; its program is not looked for until a take is transcribed
-model         unused   [stt] model (large-v3-turbo) is not used by this configuration; nothing in it asks for one. It would be looked for in <scratch>/state/mod...
-rewrite       missing  none of ["claude"] is on PATH, and this build does not yet invoke the agent engine for rewrite either way; transcripts are delivered unre...
-record        default  off; set [record] transcripts = true to keep each take's transcript and rewrite beside its recording
-exit 1
-```
-
-What this shows: before the change, a program that is not on `PATH` (A) and one that is
-(B) both printed `"command" is ready`, and `http` with only a url set printed
-`"http" is ready`. After it, the line is the same for A and B, because it claims nothing
-about the program, and says what was established and what was not. The `missing` line for
-an empty list (D) is unchanged, and the state of the other two stays `ok`.
-
-**A first run of the "after" binary was wrong, and was caught before it was written
-down.** It printed `engine missing  [stt] url is set; ...` for case C, which the unit
-test asserts cannot happen. The binary at `target/debug/herdr-voice` of the directory
-shared with a mutation run was the one that run had linked last, with the state of the
-http arm changed on purpose. The "after" binary was then rebuilt into a directory used by
-nothing else, and all four cases were run again; the table above is from that run.
-
-What it does not show: a take whose program is missing, run through a daemon. That the
-failure comes after the take, naming the `PATH` searched, is what the code does
-(`src/daemon.rs`, `transcribe_take`; `src/stt/command.rs`), and it was not run here.
-
 ## A wedged herdr, transcriber or rewrite command, through a daemon, for issues #28 and #94
 
 Run on 2026-10-06 on macOS 27.0.1 (Darwin 27.0.0, arm64), debug builds of `0.1.0-beta.5`:
@@ -2325,3 +2232,96 @@ acceptance criteria.
 `bias::pane::read` (`src/bias/pane.rs`) maps every failure to start herdr to the
 same "install herdr, or set HERDR_BIN_PATH" message. #101 does not name it; it was
 not changed.
+
+## What `doctor` says about a configured transcriber, for issue #27
+
+Platform: macOS (Darwin), this machine, 2026-10-07. The binary "before" is built from
+`3dd45b8` (`0.1.0-beta.5`) into a scratch directory; "after" is this branch's
+`target/debug/herdr-voice`, built into a directory of its own. `doctor` runs with an empty
+environment apart from the variables below, so it reads and writes nothing of any real
+configuration or state: a stand-in for herdr that prints `herdr 0.9.1`, an empty herdr
+configuration file, and scratch plugin configuration and state directories. It never starts
+or contacts a daemon.
+
+```sh
+#!/bin/sh
+# usage: s5_27.sh <binary> <label> <[stt] table text>
+bin="$1"; label="$2"; table="$3"
+D=$(mktemp -d)
+mkdir -p "$D/config" "$D/state"
+printf '#!/bin/sh\necho "herdr 0.9.1"\n' > "$D/herdr"; chmod +x "$D/herdr"
+printf '%s\n' "$table" > "$D/config/config.toml"
+: > "$D/herdr-config.toml"
+env -i PATH="/usr/bin:/bin" HOME="$D" \
+  HERDR_BIN_PATH="$D/herdr" HERDR_CONFIG_PATH="$D/herdr-config.toml" \
+  HERDR_PLUGIN_CONFIG_DIR="$D/config" HERDR_PLUGIN_STATE_DIR="$D/state" \
+  "$bin" doctor > "$D/out" 2>&1
+code=$?
+printf '%s\n' "-- $label"
+grep -E '^engine ' "$D/out" | sed 's/^/   /'
+printf '   exit %s\n' "$code"
+rm -rf "$D"
+```
+
+Run once per binary, with these `[stt]` tables:
+
+```text
+A  engine = "command", command = ["hv27-no-such-program", "{audio}"]   (not on PATH)
+B  engine = "command", command = ["sh", "-c", "echo hi"]               (on PATH)
+C  engine = "http",    url = "http://127.0.0.1:9/transcribe"
+D  engine = "command", command = []                                    (refused)
+```
+
+```text
+=== before (3dd45b8)
+-- A command, program absent from PATH
+   engine        ok       "command" is ready
+-- B command, program present (sh)
+   engine        ok       "command" is ready
+-- C http, url set
+   engine        ok       "http" is ready
+-- D command, empty list (missing)
+   engine        missing  [stt] engine is "command" but [stt] command is empty, so there is nothing to run. For example:
+=== after
+-- A command, program absent from PATH
+   engine        ok       [stt] command is set; its program is not looked for until a take is transcribed
+-- B command, program present (sh)
+   engine        ok       [stt] command is set; its program is not looked for until a take is transcribed
+-- C http, url set
+   engine        ok       [stt] url is set; the endpoint is not contacted until a take is transcribed
+-- D command, empty list (missing)
+   engine        missing  [stt] engine is "command" but [stt] command is empty, so there is nothing to run. For example:
+```
+
+The exit code is 1 in every case, before and after, and the cause is the other lines of
+the report in this empty environment, not the engine line. The whole report for case A
+after the change:
+
+```text
+herdr         ok       herdr 0.9.1, this plugin needs 0.8.0 or newer
+daemon        missing  nothing is listening at <scratch>/state/voice.sock; start it with `herdr-voice daemon`, or restart herdr
+notifications missing  no [ui.toast] delivery in <scratch>/herdr-config.toml (herdr's default is "off"): this plugin's failure messages are not expected to appe...
+config        ok       <scratch>/config/config.toml
+engine        ok       [stt] command is set; its program is not looked for until a take is transcribed
+model         unused   [stt] model (large-v3-turbo) is not used by this configuration; nothing in it asks for one. It would be looked for in <scratch>/state/mod...
+rewrite       missing  none of ["claude"] is on PATH, and this build does not yet invoke the agent engine for rewrite either way; transcripts are delivered unre...
+record        default  off; set [record] transcripts = true to keep each take's transcript and rewrite beside its recording
+exit 1
+```
+
+What this shows: before the change, a program that is not on `PATH` (A) and one that is
+(B) both printed `"command" is ready`, and `http` with only a url set printed
+`"http" is ready`. After it, the line is the same for A and B, because it claims nothing
+about the program, and says what was established and what was not. The `missing` line for
+an empty list (D) is unchanged, and the state of the other two stays `ok`.
+
+**A first run of the "after" binary was wrong, and was caught before it was written
+down.** It printed `engine missing  [stt] url is set; ...` for case C, which the unit
+test asserts cannot happen. The binary at `target/debug/herdr-voice` of the directory
+shared with a mutation run was the one that run had linked last, with the state of the
+http arm changed on purpose. The "after" binary was then rebuilt into a directory used by
+nothing else, and all four cases were run again; the table above is from that run.
+
+What it does not show: a take whose program is missing, run through a daemon. That the
+failure comes after the take, naming the `PATH` searched, is what the code does
+(`src/daemon.rs`, `transcribe_take`; `src/stt/command.rs`), and it was not run here.
