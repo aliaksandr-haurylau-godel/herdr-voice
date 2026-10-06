@@ -161,3 +161,12 @@ The last S4 commit changes only assertions inside `#[cfg(test)]` code, no `cfg` 
 and no item, so the Windows dead-code check run at the first commit stands.
 
 S4 is closed. Next is S5 Verify.
+
+### S5 Verify
+- artifact: section "`setup` when its question cannot be answered, for issue #86" in `docs/evidence.md`
+- platform: macOS (Darwin), this machine, 2026-10-06
+- result: pass. Run on a pseudoterminal at end of file: the base commit prints
+  `nothing was changed.` and exits 0; this branch prints the unanswered message and exits
+  1; both leave the configuration file unchanged; `n` then Enter still prints
+  `nothing was changed.` and exits 0. Not exercised: a command runner that forwards no
+  keystrokes (the terminal's end-of-file character produces the same read).
