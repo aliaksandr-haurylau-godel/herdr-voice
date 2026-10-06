@@ -140,3 +140,11 @@ S4 is closed. Next is S5 Verify.
   `target/debug/herdr-voice` there belongs to whichever package was built last, so a binary
   to be run by hand needs a directory of its own.
 - not exercised: a take with a missing program through a daemon.
+
+### Merge of main
+`origin/main` had moved 18 commits (the pull request for issues #28 and #94). The only
+conflict was the end of `docs/evidence.md`, where both branches appended a section; both
+are kept, unchanged. `src/stt.rs` merged without conflict. On the merged tree: `cargo test`
+(753 unit tests and the process tests, all passing), `cargo clippy --all-targets -- -D
+warnings`, `cargo fmt --check`, `python3 scripts/check_manifest.py`, and the Windows
+dead-code check, all passing.

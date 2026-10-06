@@ -200,11 +200,10 @@ pub fn resolve_with(
     state: ModelState,
 ) -> Result<Box<dyn Engine + Send + Sync>, EngineError> {
     match check_with(stt, &state)? {
-        Ready::Command { model } => Ok(Box::new(command::CommandEngine::new(
-            stt.command.clone(),
-            model,
-            stt.language.clone(),
-        ))),
+        Ready::Command { model } => Ok(Box::new(
+            command::CommandEngine::new(stt.command.clone(), model, stt.language.clone())
+                .with_bound(std::time::Duration::from_secs(stt.command_timeout_seconds)),
+        )),
         Ready::Http => Ok(Box::new(http::HttpEngine::new(
             stt.url.clone(),
             stt.token.clone(),
@@ -490,5 +489,24 @@ mod tests {
             "{audio}".to_string()
         ]));
         assert!(resolve(&stt("command", &["prog", "{audio}"]), &nowhere()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_seconds_reaches_the_engine_it_builds() {
+        let config = Stt {
+            engine: "command".to_string(),
+            command: vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()],
+            command_timeout_seconds: 1,
+            ..Stt::default()
+        };
+        let engine = resolve_with(&config, ModelState::NotUsed).expect("a command engine");
+        let started = std::time::Instant::now();
+        let message = engine
+            .transcribe(Path::new("/takes/one.wav"), "")
+            .expect_err("must time out")
+            .to_string();
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert!(message.contains("within 1 second,"), "got {message}");
     }
 }

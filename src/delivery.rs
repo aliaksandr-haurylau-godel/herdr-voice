@@ -1,6 +1,8 @@
 //! Putting a take's text into a pane, or telling somebody it could not go
 //! there. Mirrors the shape src/stt.rs uses for the transcriber.
 
+use std::time::Duration;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryError {
     /// The code alone, extracted from herdr's structured refusal — see
@@ -14,6 +16,8 @@ pub enum DeliveryError {
     /// Starting `herdr` failed for another reason, which is the operating
     /// system's own text.
     StartFailed { binary: String, reason: String },
+    /// `herdr` was started and did not finish; it has been stopped.
+    TimedOut { binary: String, bound: Duration },
 }
 
 impl std::fmt::Display for DeliveryError {
@@ -32,6 +36,13 @@ impl std::fmt::Display for DeliveryError {
                 "cannot run {binary:?}: the file was found but this process is not allowed to \
                  run it. Make it executable (on Unix, chmod +x), or point HERDR_BIN_PATH at the \
                  herdr program itself"
+            ),
+            DeliveryError::TimedOut { binary, bound } => write!(
+                f,
+                "{binary:?} did not answer within {}, so the plugin stopped it. The text may \
+                 already have reached the pane, so look there first. If herdr is not \
+                 responding, restart it",
+                crate::http_failure::bound_text(*bound)
             ),
             DeliveryError::StartFailed { binary, reason } => write!(
                 f,
@@ -80,6 +91,28 @@ pub fn deliver(
 pub mod tests_support {
     use super::{Deliverer, DeliveryError};
     use std::sync::{Arc, Mutex};
+
+    /// A script that sleeps thirty seconds when its first argument is one of
+    /// `subcommands` (`"*"` means any), and exits 0 otherwise. Written the way
+    /// the recorder in this file's tests is: closed before it is run.
+    #[cfg(unix)]
+    pub fn herdr_that_hangs_on(tag: &str, subcommands: &[&str]) -> String {
+        let dir =
+            std::env::temp_dir().join(format!("herdr-voice-hang-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch");
+        let script = dir.join("herdr.sh");
+        let patterns = subcommands.join("|");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ncase \"$1\" in {patterns}) sleep 30;; esac\nexit 0\n"),
+        )
+        .expect("write script");
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod script");
+        script.to_string_lossy().into_owned()
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Call {
@@ -196,8 +229,13 @@ fn start_failure(binary: &str, error: &std::io::Error) -> DeliveryError {
     }
 }
 
+/// How long one herdr call may take. `docs/decisions.md`, the entry for
+/// delivery's herdr calls.
+pub const BOUND: Duration = Duration::from_secs(10);
+
 pub struct HerdrDeliverer {
     binary: String,
+    bound: Duration,
 }
 
 impl HerdrDeliverer {
@@ -213,14 +251,27 @@ impl HerdrDeliverer {
     pub fn with_binary(binary: impl Into<String>) -> Self {
         HerdrDeliverer {
             binary: binary.into(),
+            bound: BOUND,
         }
     }
 
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_bound(mut self, bound: Duration) -> Self {
+        self.bound = bound;
+        self
+    }
+
     fn run(&self, args: &[&str]) -> Result<(), DeliveryError> {
-        match std::process::Command::new(&self.binary).args(args).output() {
+        let mut command = std::process::Command::new(&self.binary);
+        command.args(args);
+        match crate::outward::run(&mut command, self.bound) {
+            Err(crate::outward::RunError::TimedOut) => Err(DeliveryError::TimedOut {
+                binary: self.binary.clone(),
+                bound: self.bound,
+            }),
             // herdr starts plugin commands with a minimal PATH — the same
             // reasoning src/stt/command.rs:78-86 states for the transcriber.
-            Err(error) => Err(start_failure(&self.binary, &error)),
+            Err(crate::outward::RunError::Start(error)) => Err(start_failure(&self.binary, &error)),
             Ok(output) if output.status.success() => Ok(()),
             Ok(output) => {
                 let text = if !output.stdout.is_empty() {
@@ -691,5 +742,61 @@ mod tests {
             deliverer.insert("w1:p2", "hello"),
             Err(DeliveryError::Rejected("pane_not_found".to_string()))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_herdr_that_never_answers_is_stopped_and_named() {
+        let binary = tests_support::herdr_that_hangs_on("hang-insert", &["pane"]);
+        let deliverer =
+            HerdrDeliverer::with_binary(binary.clone()).with_bound(Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        let error = deliverer.insert("w1:p2", "hello").expect_err("must fail");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(
+            error,
+            DeliveryError::TimedOut {
+                binary: binary.clone(),
+                bound: Duration::from_millis(200)
+            }
+        );
+        let message = error.to_string();
+        assert!(message.contains(&binary), "names herdr: {message}");
+        assert!(
+            message.contains("200 milliseconds"),
+            "names the bound: {message}"
+        );
+        assert!(
+            message.contains("restart"),
+            "says what to do next: {message}"
+        );
+        assert!(
+            message.contains("look there first"),
+            "the text may have landed, so it says to look before dictating again: {message}"
+        );
+        assert!(!message.contains("daemon"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn each_of_the_three_subcommands_is_bounded() {
+        let binary = tests_support::herdr_that_hangs_on("hang-all", &["*"]);
+        let deliverer = HerdrDeliverer::with_binary(binary).with_bound(Duration::from_millis(200));
+        for result in [
+            deliverer.insert("w1:p2", "hello"),
+            deliverer.submit("w1:p2", "hello"),
+            deliverer.notify("title", "body"),
+        ] {
+            assert!(
+                matches!(result, Err(DeliveryError::TimedOut { .. })),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bound_is_ten_seconds() {
+        assert_eq!(BOUND, Duration::from_secs(10));
+        assert_eq!(HerdrDeliverer::with_binary("herdr").bound, BOUND);
     }
 }
