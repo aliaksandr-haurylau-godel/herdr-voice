@@ -702,7 +702,10 @@ mod tests {
             "[stt]\nengine = \"command\"\n",
         )
         .unwrap();
-        assert_eq!(load(Some(&directory)).config.stt.command_timeout_seconds, 60);
+        assert_eq!(
+            load(Some(&directory)).config.stt.command_timeout_seconds,
+            60
+        );
     }
 
     #[test]
@@ -713,7 +716,10 @@ mod tests {
             "[stt]\ncommand_timeout_seconds = 300\n",
         )
         .unwrap();
-        assert_eq!(load(Some(&directory)).config.stt.command_timeout_seconds, 300);
+        assert_eq!(
+            load(Some(&directory)).config.stt.command_timeout_seconds,
+            300
+        );
     }
 
     #[test]
