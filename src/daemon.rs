@@ -4910,4 +4910,195 @@ mod tests {
         assert!(std::path::Path::new(path).exists(), "kept at {path:?}");
         std::fs::remove_file(path).ok();
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_delivery_that_times_out_on_dictate_is_journaled_and_names_herdr_not_the_daemon() {
+        let binary = crate::delivery::tests_support::herdr_that_hangs_on("toggle-hang", &["pane"]);
+        let (mut runtime, journal) =
+            runtime_reading_back(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.deliverer = Box::new(
+            crate::delivery::HerdrDeliverer::with_binary(binary.clone())
+                .with_bound(std::time::Duration::from_millis(200)),
+        );
+        let recorder = tone_recorder("toggle-hang");
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        let (reply, _) = answer(&request, &recorder, &runtime);
+        let message = match reply {
+            Reply::Error(message) => message,
+            other => panic!("a wedged herdr is an error reply, got {other:?}"),
+        };
+        assert!(message.contains(&binary), "names herdr: {message}");
+        assert!(
+            message.contains("did not answer within 200 milliseconds"),
+            "{message}"
+        );
+        assert!(!message.contains("the daemon did not answer"), "{message}");
+        let lines = journalled(&journal);
+        assert!(
+            lines.iter().any(|line| line.starts_with("delivery failed:")
+                && line.contains("did not answer within 200 milliseconds")),
+            "the delivery-failed line is written: {lines:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_transcriber_that_times_out_on_dictate_names_the_program_not_the_daemon() {
+        let mut runtime = fake_runtime("unused");
+        runtime.recognition = Ok(Box::new(
+            crate::stt::command::CommandEngine::new(
+                vec!["sh".into(), "-c".into(), "sleep 30".into()],
+                None,
+                "en".into(),
+            )
+            .with_bound(std::time::Duration::from_millis(200)),
+        ));
+        let (_, second) = two_presses_over_a_socket("transcriber-timeout", runtime);
+        assert_eq!(second.code, 1, "{second:?}");
+        let message = second.message.expect("a failure says why");
+        assert!(
+            message.contains("\"sh\" did not finish within 200 milliseconds"),
+            "{message}"
+        );
+        assert!(message.contains("command_timeout_seconds"), "{message}");
+        assert!(!message.contains("the daemon did not answer"), "{message}");
+        let path = kept_path(&message);
+        assert!(
+            std::path::Path::new(path).exists(),
+            "the take is kept at {path:?}"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rewrite_that_times_out_delivers_the_transcript_and_says_which_program() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, journal) = runtime_reading_back(fake.clone(), false);
+        runtime.rewrite = crate::rewrite::Resolution::Engine(Box::new(
+            crate::rewrite::command::CommandEngine::new(vec![
+                "sh".into(),
+                "-c".into(),
+                "sleep 30".into(),
+            ])
+            .with_bound(std::time::Duration::from_millis(200)),
+        ));
+        runtime.skip_if_plain = false;
+        let recorder = tone_recorder("rewrite-timeout");
+        let request = dictate_request();
+        answer(&request, &recorder, &runtime);
+        answer(&request, &recorder, &runtime);
+        assert!(
+            fake.calls().iter().any(|call| matches!(
+                call,
+                crate::delivery::tests_support::Call::Insert(_, text)
+                    if text == "fix the worklog entry"
+            )),
+            "the transcript is delivered unrewritten: {:?}",
+            fake.calls()
+        );
+        let lines = journalled(&journal);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\"sh\" did not finish within 200 milliseconds")),
+            "{lines:?}"
+        );
+    }
+
+    /// Returns the journal, how long the watcher took from the release to the
+    /// hold being idle again, and whether a following `ptt` was accepted.
+    #[cfg(unix)]
+    fn a_hold_over_a_wedged_herdr(
+        tag: &str,
+        wedged: &[&str],
+    ) -> (Vec<String>, std::time::Duration, bool) {
+        let binary = crate::delivery::tests_support::herdr_that_hangs_on(tag, wedged);
+        let (mut runtime, clock) =
+            runtime_with_clock(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        runtime.deliverer = Box::new(
+            crate::delivery::HerdrDeliverer::with_binary(binary)
+                .with_bound(std::time::Duration::from_millis(200)),
+        );
+        runtime.delivery_settings.toasts = true;
+        let journal = std::sync::Arc::new(RecordingJournal::default());
+        runtime.journal = Box::new(TestJournal(std::sync::Arc::clone(&journal)));
+        let runtime = std::sync::Arc::new(runtime);
+        let recorder = std::sync::Arc::new(tone_recorder(tag));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let recorder = std::sync::Arc::clone(&recorder);
+            let runtime = std::sync::Arc::clone(&runtime);
+            let stop = std::sync::Arc::clone(&stop);
+            thread::spawn(move || watch(recorder, runtime, stop))
+        };
+
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        clock.advance(400);
+        answer(&request("ptt", PANE_1), &recorder, &runtime);
+        let released = std::time::Instant::now();
+        clock.advance(1_000);
+
+        wait_for_journal(&journal, "delivery failed", WITHIN);
+        wait_for_idle(&runtime);
+        let took = released.elapsed();
+
+        // The hold is over, so a press starts a new one rather than being
+        // refused with "still being transcribed".
+        let (reply, _) = answer(&request("ptt", PANE_1), &recorder, &runtime);
+        let accepted = !matches!(
+            &reply,
+            Reply::Error(message) if message.contains("still being transcribed")
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        runtime.clock.wake();
+        clock.advance(1);
+        watcher.join().unwrap();
+        let lines = journal.0.lock().unwrap().clone();
+        (lines, took, accepted)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hold_whose_delivery_times_out_ends_and_is_reported_once_naming_herdr() {
+        let (lines, took, accepted) = a_hold_over_a_wedged_herdr("hold-hang", &["pane"]);
+        let failures: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.starts_with("delivery failed:"))
+            .collect();
+        assert_eq!(failures.len(), 1, "one failure, one line: {lines:?}");
+        assert!(
+            failures[0].contains("did not answer within 200 milliseconds"),
+            "{}",
+            failures[0]
+        );
+        assert!(accepted, "the next press is not refused");
+        assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+        assert!(
+            !lines.iter().any(|line| line.starts_with("toast failed:")),
+            "only the delivery was wedged, so the toast went out: {lines:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hold_over_a_herdr_that_answers_nothing_still_ends_within_two_bounds() {
+        let (lines, took, accepted) = a_hold_over_a_wedged_herdr("hold-hang-all", &["*"]);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("delivery failed:")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("toast failed:")
+                && line.contains("did not answer within 200 milliseconds")),
+            "the toast goes through the same herdr and its failure is journaled: {lines:?}"
+        );
+        assert!(accepted, "the next press is not refused");
+        assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+    }
 }

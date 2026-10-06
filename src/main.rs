@@ -24,10 +24,15 @@ mod doctor;
 mod gate;
 mod http_failure;
 mod indicator;
+mod outward;
 mod proto;
 mod ptt;
 mod record;
 mod rewrite;
+/// Test-only, unix-only: writes a script a test then runs, and returns only
+/// once it can be executed.
+#[cfg(all(test, unix))]
+mod script_fixture;
 mod setup;
 mod stderr;
 mod stt;

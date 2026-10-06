@@ -7,6 +7,9 @@
 
 use std::fmt;
 use std::process::Command;
+use std::time::Duration;
+
+use crate::outward::{self, RunError};
 
 /// Replace the placeholders, and append the transcript when the list never
 /// asks for it — so a program that simply takes text still works. `{bias}`
@@ -28,13 +31,24 @@ pub fn render(argv: &[String], transcript: &str, bias: &str) -> Vec<String> {
     rendered
 }
 
+/// How long the program may run: the bound `src/rewrite/http.rs` already uses.
+/// `docs/decisions.md`, the entry for the rewrite command.
+pub const BOUND: Duration = Duration::from_secs(30);
+
 pub struct CommandEngine {
     argv: Vec<String>,
+    bound: Duration,
 }
 
 impl CommandEngine {
     pub fn new(argv: Vec<String>) -> CommandEngine {
-        CommandEngine { argv }
+        CommandEngine { argv, bound: BOUND }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_bound(mut self, bound: Duration) -> CommandEngine {
+        self.bound = bound;
+        self
     }
 }
 
@@ -51,6 +65,10 @@ pub enum CommandError {
     },
     Silent {
         program: String,
+    },
+    TimedOut {
+        program: String,
+        bound: Duration,
     },
 }
 
@@ -71,6 +89,13 @@ impl fmt::Display for CommandError {
                 code,
                 stderr,
             } => write!(f, "{program:?} failed ({code}): {stderr}"),
+            CommandError::TimedOut { program, bound } => write!(
+                f,
+                "{program:?} did not finish within {}, so it was stopped and the transcript \
+                 was delivered unrewritten. Run the command by hand on a transcript to see \
+                 where it stops",
+                crate::http_failure::bound_text(*bound)
+            ),
             CommandError::Silent { program } => write!(
                 f,
                 "{program:?} printed no rewritten text. Run it by hand on the take to see what \
@@ -93,16 +118,23 @@ impl CommandEngine {
             program: String::new(),
         })?;
 
-        let output = Command::new(program).args(arguments).output();
-        let output = match output {
+        let mut command = Command::new(program);
+        command.args(arguments);
+        let output = match outward::run(&mut command, self.bound) {
             Ok(output) => output,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(RunError::TimedOut) => {
+                return Err(CommandError::TimedOut {
+                    program: program.clone(),
+                    bound: self.bound,
+                })
+            }
+            Err(RunError::Start(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(CommandError::NotFound {
                     program: program.clone(),
                     path: std::env::var("PATH").unwrap_or_default(),
                 })
             }
-            Err(e) => {
+            Err(RunError::Start(e)) => {
                 return Err(CommandError::Failed {
                     program: program.clone(),
                     code: "could not start".to_string(),
@@ -112,8 +144,8 @@ impl CommandEngine {
         };
 
         if !output.status.success() {
-            let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            stderr.truncate(STDERR_LIMIT);
+            let mut stderr =
+                outward::shorten(String::from_utf8_lossy(&output.stderr).trim(), STDERR_LIMIT);
             if stderr.is_empty() {
                 stderr = "it printed nothing on standard error".to_string();
             }
@@ -207,5 +239,66 @@ mod tests {
             error.to_string().contains("no rewritten text"),
             "got {error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standard_error_with_a_two_byte_character_across_byte_400_is_cut_not_a_panic() {
+        let engine = CommandEngine::new(argv(&[
+            "sh",
+            "-c",
+            "head -c 399 /dev/zero | tr '\\0' a >&2; printf '\\303\\251' >&2; exit 1",
+        ]));
+        let message = engine
+            .rewrite("hello there", "")
+            .expect_err("must fail")
+            .to_string();
+        assert!(message.contains("exit 1"), "got {message}");
+        assert!(message.contains(&"a".repeat(399)), "got {message}");
+        assert!(!message.contains('é'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standard_error_with_a_four_byte_character_across_byte_400_is_cut_not_a_panic() {
+        // 397 bytes, then a four-byte character (0xF0 0x9F 0x98 0x80).
+        let engine = CommandEngine::new(argv(&[
+            "sh",
+            "-c",
+            "head -c 397 /dev/zero | tr '\\0' a >&2; printf '\\360\\237\\230\\200' >&2; exit 1",
+        ]));
+        let message = engine
+            .rewrite("hello there", "")
+            .expect_err("must fail")
+            .to_string();
+        assert!(message.contains(&"a".repeat(397)), "got {message}");
+        assert!(!message.contains('😀'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_outlasts_the_bound_is_named_with_the_bound() {
+        let engine = CommandEngine::new(argv(&["sh", "-c", "sleep 30"]))
+            .with_bound(std::time::Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        let error = engine.rewrite("hello there", "").expect_err("must fail");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        let message = error.to_string();
+        assert!(message.contains("\"sh\""), "names the program: {message}");
+        assert!(
+            message.contains("200 milliseconds"),
+            "names the bound: {message}"
+        );
+        assert!(
+            message.contains("by hand"),
+            "says what to do next: {message}"
+        );
+        assert!(!message.contains("daemon"), "{message}");
+    }
+
+    #[test]
+    fn the_bound_is_thirty_seconds() {
+        assert_eq!(BOUND, std::time::Duration::from_secs(30));
+        assert_eq!(CommandEngine::new(argv(&["true"])).bound, BOUND);
     }
 }
