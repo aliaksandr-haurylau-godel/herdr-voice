@@ -82,3 +82,29 @@ engine lines (criterion 6 of `AC_27.md`).
   `PLAN_27.md`, state `ok`: `[stt] command is set; its program is not looked for until a
   take starts` and `[stt] url is set; the endpoint is not contacted until a take starts`.
   Criterion 6 of `AC_27.md` is met.
+- red step: the three new tests failed against the unchanged code (`"command" is ready`,
+  `"http" is ready`). Green: `cargo test` 711 unit tests and the process tests, all passing;
+  clippy, fmt, manifest and the Windows dead-code check, all passing.
+
+Code review (a fresh general-purpose subagent over `3dd45b8..46bd712`, read-only, no
+cargo): no Critical issue, one Important, three Minor, verdict "With fixes".
+- Important: "until a take starts" is false. `CommandEngine::new` and `HttpEngine::new`
+  look for nothing; `transcribe_take` runs the program or contacts the endpoint on the
+  finished recording (`src/daemon.rs`, `engine.transcribe(&take.path, bias)`), so a person
+  with a missing program records the whole take and gets the error only after it ends.
+  Checked against the code. The approved wording therefore stated a false thing; it was
+  changed to "until a take is transcribed" for both lines, decided by the orchestrator, and
+  `AC_27.md`, `DESIGN_27.md`, `PLAN_27.md`, the two literals and the two test constants
+  carry the new text. The approval recorded above was of the wording as proposed.
+- Minor: the code comment said `check_with` establishes only that the key is set, and put
+  the shell reason above both arms. Rewritten: it names the model, and the shell reason
+  is about `doctor`.
+- Minor: `neither_external_engine_line_says_ready_or_quotes_the_engine_kind` overlaps the
+  two exact-text tests. Kept: requirement R2 of `AC_27.md` asks for it, and it guards a
+  later rewording that updates the constants.
+- Minor: each sentence exists as a literal and as a test constant. Deliberate pinning; all
+  four places changed together.
+- Side finding, fixed here at the orchestrator's instruction: the doc comment on
+  `Ready::Http` (`src/stt.rs`) said "Its address is validated here", but `check_with` only
+  checks that the url is non-empty. It now says that. It is the same unverified claim this
+  issue is about, in one line, and no behaviour changes.

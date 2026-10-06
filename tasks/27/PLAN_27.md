@@ -21,8 +21,8 @@
 
 ## The wording (proposal)
 
-- `command`: `[stt] command is set; its program is not looked for until a take starts`
-- `http`: `[stt] url is set; the endpoint is not contacted until a take starts`
+- `command`: `[stt] command is set; its program is not looked for until a take is transcribed`
+- `http`: `[stt] url is set; the endpoint is not contacted until a take is transcribed`
 
 ## Review Focus
 
@@ -40,9 +40,9 @@
 
 ```rust
     const COMMAND_LINE: &str =
-        "[stt] command is set; its program is not looked for until a take starts";
+        "[stt] command is set; its program is not looked for until a take is transcribed";
     const HTTP_LINE: &str =
-        "[stt] url is set; the endpoint is not contacted until a take starts";
+        "[stt] url is set; the endpoint is not contacted until a take is transcribed";
 
     #[test]
     fn the_command_engine_line_claims_only_that_the_command_is_set() {
@@ -111,13 +111,13 @@ with
         Ok(stt::Ready::Command { .. }) => Finding {
             name: "engine",
             state: State::Ok,
-            detail: "[stt] command is set; its program is not looked for until a take starts"
+            detail: "[stt] command is set; its program is not looked for until a take is transcribed"
                 .to_string(),
         },
         Ok(stt::Ready::Http) => Finding {
             name: "engine",
             state: State::Ok,
-            detail: "[stt] url is set; the endpoint is not contacted until a take starts"
+            detail: "[stt] url is set; the endpoint is not contacted until a take is transcribed"
                 .to_string(),
         },
 ```

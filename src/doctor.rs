@@ -247,20 +247,24 @@ fn engine_finding_from(stt: &config::Stt, state: &stt::ModelState) -> Finding {
                 crate::stt::candle::device::describe(&device)
             ),
         },
-        // What `check_with` established is that the key is set. It does not look
-        // for the program or contact the endpoint, and must not: the first
-        // element of the list is often a shell, and running a configured program
-        // to test it can hang. The line says so instead of claiming readiness.
+        // What `check_with` established is that the key is set (and, when the list
+        // has `{model}`, that the model resolves, which the model line reports). It
+        // does not look for the program or contact the endpoint, and the lines say
+        // so instead of claiming readiness.
+        //
+        // `doctor` must not look for the program: the first element of the list is
+        // often a shell, and running a configured program to test it can hang.
         Ok(stt::Ready::Command { .. }) => Finding {
             name: "engine",
             state: State::Ok,
-            detail: "[stt] command is set; its program is not looked for until a take starts"
-                .to_string(),
+            detail:
+                "[stt] command is set; its program is not looked for until a take is transcribed"
+                    .to_string(),
         },
         Ok(stt::Ready::Http) => Finding {
             name: "engine",
             state: State::Ok,
-            detail: "[stt] url is set; the endpoint is not contacted until a take starts"
+            detail: "[stt] url is set; the endpoint is not contacted until a take is transcribed"
                 .to_string(),
         },
         Err(e) => Finding {
@@ -1250,8 +1254,9 @@ mod tests {
     }
 
     const COMMAND_LINE: &str =
-        "[stt] command is set; its program is not looked for until a take starts";
-    const HTTP_LINE: &str = "[stt] url is set; the endpoint is not contacted until a take starts";
+        "[stt] command is set; its program is not looked for until a take is transcribed";
+    const HTTP_LINE: &str =
+        "[stt] url is set; the endpoint is not contacted until a take is transcribed";
 
     #[test]
     fn the_command_engine_line_claims_only_that_the_command_is_set() {

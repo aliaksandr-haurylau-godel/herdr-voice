@@ -27,8 +27,8 @@ sentence, both with state `ok`:
 
 | engine | detail |
 |---|---|
-| `command` | `[stt] command is set; its program is not looked for until a take starts` |
-| `http` | `[stt] url is set; the endpoint is not contacted until a take starts` |
+| `command` | `[stt] command is set; its program is not looked for until a take is transcribed` |
+| `http` | `[stt] url is set; the endpoint is not contacted until a take is transcribed` |
 
 The candle arm, every `missing` finding and the exit code are untouched.
 
