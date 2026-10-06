@@ -56,35 +56,55 @@ fn drain<R: Read + Send + 'static>(mut source: R) -> mpsc::Receiver<Vec<u8>> {
     receiver
 }
 
-/// What a stream carried, or `None` when it did not end in `wait`.
-fn collect(stream: Option<mpsc::Receiver<Vec<u8>>>, wait: Duration) -> Option<Vec<u8>> {
+/// What a stream carried, or `None` when it did not end by `until`. One instant
+/// for both streams: a wait given to each in turn would let a call last twice
+/// its bound.
+fn collect(stream: Option<mpsc::Receiver<Vec<u8>>>, until: Instant) -> Option<Vec<u8>> {
     match stream {
         None => Some(Vec::new()),
-        Some(receiver) => receiver.recv_timeout(wait).ok(),
+        Some(receiver) => receiver
+            .recv_timeout(until.saturating_duration_since(Instant::now()))
+            .ok(),
     }
 }
+
+/// How long a killed child is waited for. A process in uninterruptible sleep
+/// does not die on a kill, and a wait with no end would make the timeout path
+/// the thing that hangs.
+const REAP: Duration = Duration::from_secs(2);
 
 /// Stops the child and everything it started, then reaps it.
 ///
 /// The standard library cannot signal a process group and `libc` is not a
 /// dependency, so on Unix the group is signalled by running `kill`. The child
-/// is its own group leader (see `run`), so the group id is its process id. The
-/// direct kill after it covers a machine where `kill` is not there.
+/// is its own group leader (see `run`), so the group id is its process id.
+/// herdr starts plugin commands with a minimal PATH, so the usual absolute
+/// locations are tried before a lookup. The direct kill after it covers a
+/// machine where none of them is there.
 fn stop(child: &mut Child) {
     #[cfg(unix)]
     {
-        let _ = Command::new("kill")
-            .arg("-s")
-            .arg("KILL")
-            .arg("--")
-            .arg(format!("-{}", child.id()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let group = format!("-{}", child.id());
+        for program in ["/bin/kill", "/usr/bin/kill", "kill"] {
+            let signalled = Command::new(program)
+                .args(["-s", "KILL", "--", &group])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if signalled.is_ok() {
+                break;
+            }
+        }
     }
     let _ = child.kill();
-    let _ = child.wait();
+    let deadline = Instant::now() + REAP;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(None) => thread::sleep(POLL),
+            _ => break,
+        }
+    }
 }
 
 /// Runs `command` and waits at most `bound` for it and for its output.
@@ -123,10 +143,8 @@ pub fn run(command: &mut Command, bound: Duration) -> Result<Output, RunError> {
         }
     };
 
-    let wait = deadline
-        .saturating_duration_since(Instant::now())
-        .max(DRAIN);
-    match (collect(stdout, wait), collect(stderr, wait)) {
+    let until = deadline.max(Instant::now() + DRAIN);
+    match (collect(stdout, until), collect(stderr, until)) {
         (Some(stdout), Some(stderr)) => Ok(Output {
             status,
             stdout,
@@ -244,8 +262,8 @@ mod tests {
                     .arg(pid)
                     .stderr(std::process::Stdio::null())
                     .status()
-                    .map(|status| status.success())
-                    .unwrap_or(false);
+                    .expect("kill can be run to look for a process")
+                    .success();
                 if !alive {
                     return true;
                 }
@@ -327,7 +345,7 @@ mod tests {
             // `sh -c "program"` is how a transcriber is usually configured;
             // the grandchild is the real program.
             let script = format!("sleep 30 & echo $! > {pidfile:?}; wait");
-            let error = run(&mut sh(&script), Duration::from_millis(500)).expect_err("times out");
+            let error = run(&mut sh(&script), Duration::from_secs(2)).expect_err("times out");
             assert!(matches!(error, RunError::TimedOut), "got {error:?}");
             let pid = std::fs::read_to_string(&pidfile).expect("the script wrote it");
             assert!(gone(pid.trim()), "process {} is still running", pid.trim());
@@ -343,6 +361,23 @@ mod tests {
             assert!(matches!(error, RunError::TimedOut), "got {error:?}");
             assert!(
                 started.elapsed() < Duration::from_secs(4),
+                "returned after {:?}",
+                started.elapsed()
+            );
+            let pid = std::fs::read_to_string(&pidfile).expect("the script wrote it");
+            assert!(gone(pid.trim()), "process {} is still running", pid.trim());
+        }
+        #[test]
+        fn a_program_that_exits_but_leaves_a_pipe_open_is_reported_within_the_bound_not_twice_it() {
+            let dir = scratch("twice");
+            let pidfile = dir.join("pid");
+            let script = format!("sleep 30 & echo $! > {pidfile:?}");
+            let started = Instant::now();
+            let error = run(&mut sh(&script), Duration::from_secs(2)).expect_err("times out");
+            assert!(matches!(error, RunError::TimedOut), "got {error:?}");
+            // Each stream used to be given the whole remaining time in turn.
+            assert!(
+                started.elapsed() < Duration::from_millis(3200),
                 "returned after {:?}",
                 started.elapsed()
             );

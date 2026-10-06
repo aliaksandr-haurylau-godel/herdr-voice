@@ -229,7 +229,10 @@ becomes a message and not a thread that never returns.
 
 On the `dictate` path the pane read, transcription, rewrite and delivery run in turn
 inside the client's 120-second wait, and their bounds add to 105 seconds, so the
-message that arrives names the program and not the daemon. On a hold there is no
+message that arrives names the program and not the daemon. With herdr wedged as well,
+each failure also raises a toast through it, bounded at 10 seconds, and the worst case
+is 125 seconds: the client's report can then come first, and the take still finishes
+and is journaled. On a hold there is no
 client waiting; the watcher is back within the same sum and the report is the
 journal line. The toast of a delivery failure goes through the same herdr and has its
 own 10-second bound, so when herdr is the program that wedged, the journal line is

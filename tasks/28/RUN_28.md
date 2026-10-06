@@ -137,3 +137,37 @@ The plan's Windows dead-code check found one defect that the macOS gates did not
 used only by Unix tests, so a Windows test build would have failed on dead code.
 Both are now `#[cfg(all(test, unix))]` (commit "Keep the test-only bound setters off
 the Windows build").
+
+#### S4 code review (fresh subagent, whole diff, read-only)
+
+No Critical finding. Nine findings, graded by effect and decided:
+
+- Important, fixed: after a normal exit the wait for both pipes was given in turn, so a
+  program that left a child holding them was reported after twice its bound.
+  `a_program_that_exits_but_leaves_a_pipe_open_is_reported_within_the_bound_not_twice_it`
+  was red (4.0 s for a 2 s bound), now green; both streams share one deadline.
+- Important, not in this pull request: `src/indicator.rs:224` runs herdr on the drawing
+  thread with no bound, and `doctor` runs `herdr --version` with none. `AC_28.md`
+  lists both under "Out of scope / noticed". Reported to the orchestrator as a
+  candidate for its own issue; a wedged herdr there stops drawing and holds the
+  shutdown join.
+- Important, ruled: the rewrite command's 30 seconds has no key. The cited measurements
+  are the agent engine's, so `docs/decisions.md` now says they support the order of
+  magnitude and not the margin, and says what a longer rewrite command gets. Cost if
+  wrong: a person with a slow rewrite command loses the rewrite on every take until a
+  key is added.
+- Minor, fixed: the documented worst case was 105 seconds and left out the toast a
+  rewrite failure raises; it is 125 seconds with herdr wedged as well, stated in
+  `docs/decisions.md` and `docs/design.md`.
+- Minor, fixed: `kill` is tried at `/bin/kill` and `/usr/bin/kill` before a PATH
+  lookup, because herdr starts plugin commands with a minimal PATH; the wait after the
+  kill is bounded at 2 seconds.
+- Minor, fixed: the test helper `gone` no longer reports a missing `kill` as a dead
+  process; the group-kill test's bound is 2 seconds so the script can write its pid.
+- Minor, fixed: the delivery timeout text says the text may already have reached the
+  pane and to look there first.
+- Minor, deferred: a `try_wait` error is returned as `RunError::Start`, so the caller
+  words it as "could not start"; rare.
+- Minor, deferred: the child is its own process group, so Ctrl-C in a terminal no longer
+  reaches it when the daemon runs in the foreground, and a program that opens
+  `/dev/tty` can be stopped by SIGTTIN and then times out.

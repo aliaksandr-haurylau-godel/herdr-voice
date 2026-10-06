@@ -39,8 +39,9 @@ impl std::fmt::Display for DeliveryError {
             ),
             DeliveryError::TimedOut { binary, bound } => write!(
                 f,
-                "{binary:?} did not answer within {}, so the plugin stopped it. If herdr is \
-                 not responding, restart it, then dictate again",
+                "{binary:?} did not answer within {}, so the plugin stopped it. The text may \
+                 already have reached the pane, so look there first. If herdr is not \
+                 responding, restart it",
                 crate::http_failure::bound_text(*bound)
             ),
             DeliveryError::StartFailed { binary, reason } => write!(
@@ -768,6 +769,10 @@ mod tests {
         assert!(
             message.contains("restart"),
             "says what to do next: {message}"
+        );
+        assert!(
+            message.contains("look there first"),
+            "the text may have landed, so it says to look before dictating again: {message}"
         );
         assert!(!message.contains("daemon"), "{message}");
     }
