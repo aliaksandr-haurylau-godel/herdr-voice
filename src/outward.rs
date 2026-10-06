@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 /// `String::truncate` panics when the length is not on a boundary, and program
 /// output reaches here through `String::from_utf8_lossy`, where any multi-byte
 /// character, or the replacement character, can straddle the limit (issue #94).
-#[allow(dead_code)]
 pub fn shorten(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_string();
@@ -126,7 +125,9 @@ pub fn run(command: &mut Command, bound: Duration) -> Result<Output, RunError> {
         }
     };
 
-    let wait = deadline.saturating_duration_since(Instant::now()).max(DRAIN);
+    let wait = deadline
+        .saturating_duration_since(Instant::now())
+        .max(DRAIN);
     match (collect(stdout, wait), collect(stderr, wait)) {
         (Some(stdout), Some(stderr)) => Ok(Output {
             status,
@@ -224,10 +225,8 @@ mod tests {
         }
 
         fn scratch(tag: &str) -> std::path::PathBuf {
-            let dir = std::env::temp_dir().join(format!(
-                "herdr-voice-outward-{tag}-{}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir()
+                .join(format!("herdr-voice-outward-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("create scratch");
             dir
@@ -281,7 +280,8 @@ mod tests {
         #[test]
         fn a_program_that_outlasts_the_bound_is_stopped_and_reported() {
             let started = Instant::now();
-            let error = run(&mut sh("sleep 30"), Duration::from_millis(200)).expect_err("times out");
+            let error =
+                run(&mut sh("sleep 30"), Duration::from_millis(200)).expect_err("times out");
             assert!(matches!(error, RunError::TimedOut), "got {error:?}");
             assert!(
                 started.elapsed() < Duration::from_secs(3),

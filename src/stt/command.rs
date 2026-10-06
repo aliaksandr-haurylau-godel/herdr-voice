@@ -7,6 +7,9 @@
 use std::fmt;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
+
+use crate::outward::{self, RunError};
 
 use super::{Engine, EngineError};
 
@@ -43,10 +46,15 @@ pub fn render(
     rendered
 }
 
+/// How long the program may run when `[stt] command_timeout_seconds` says
+/// nothing. See `docs/decisions.md`, the entry for the transcriber command.
+pub const DEFAULT_BOUND: Duration = Duration::from_secs(60);
+
 pub struct CommandEngine {
     argv: Vec<String>,
     model: Option<std::path::PathBuf>,
     language: String,
+    bound: Duration,
 }
 
 impl CommandEngine {
@@ -62,7 +70,14 @@ impl CommandEngine {
             argv,
             model,
             language,
+            bound: DEFAULT_BOUND,
         }
+    }
+
+    /// The bound from `[stt] command_timeout_seconds`.
+    pub fn with_bound(mut self, bound: Duration) -> CommandEngine {
+        self.bound = bound;
+        self
     }
 }
 
@@ -79,6 +94,10 @@ pub enum CommandError {
     },
     Silent {
         program: String,
+    },
+    TimedOut {
+        program: String,
+        bound: Duration,
     },
 }
 
@@ -99,6 +118,13 @@ impl fmt::Display for CommandError {
                 code,
                 stderr,
             } => write!(f, "{program:?} failed ({code}): {stderr}"),
+            CommandError::TimedOut { program, bound } => write!(
+                f,
+                "{program:?} did not finish within {}, so it was stopped. A long take can \
+                 need more: raise [stt] command_timeout_seconds, or run the program by hand \
+                 on the take to see where it stops",
+                crate::http_failure::bound_text(*bound)
+            ),
             CommandError::Silent { program } => write!(
                 f,
                 "{program:?} printed no transcript. Run it by hand on the take to see what \
@@ -129,16 +155,23 @@ impl Engine for CommandEngine {
             example: super::COMMAND_EXAMPLE,
         })?;
 
-        let output = Command::new(program).args(arguments).output();
-        let output = match output {
+        let mut command = Command::new(program);
+        command.args(arguments);
+        let output = match outward::run(&mut command, self.bound) {
             Ok(output) => output,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(RunError::TimedOut) => {
+                return Err(EngineError::Command(CommandError::TimedOut {
+                    program: program.clone(),
+                    bound: self.bound,
+                }))
+            }
+            Err(RunError::Start(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(EngineError::Command(CommandError::NotFound {
                     program: program.clone(),
                     path: std::env::var("PATH").unwrap_or_default(),
                 }))
             }
-            Err(e) => {
+            Err(RunError::Start(e)) => {
                 return Err(EngineError::Command(CommandError::Failed {
                     program: program.clone(),
                     code: "could not start".to_string(),
@@ -148,8 +181,8 @@ impl Engine for CommandEngine {
         };
 
         if !output.status.success() {
-            let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            stderr.truncate(STDERR_LIMIT);
+            let mut stderr =
+                outward::shorten(String::from_utf8_lossy(&output.stderr).trim(), STDERR_LIMIT);
             if stderr.is_empty() {
                 stderr = "it printed nothing on standard error".to_string();
             }
@@ -367,5 +400,82 @@ mod tests {
             rendered,
             argv(&["whisper-cli", "--prompt", "", "/takes/one.wav"])
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standard_error_with_a_two_byte_character_across_byte_400_is_cut_not_a_panic() {
+        // 399 ASCII bytes, then "é" (0xC3 0xA9): the cut at 400 lands inside it.
+        let engine = CommandEngine::new(
+            argv(&[
+                "sh",
+                "-c",
+                "head -c 399 /dev/zero | tr '\\0' a >&2; printf '\\303\\251' >&2; exit 1",
+            ]),
+            None,
+            "auto".to_string(),
+        );
+        let error = engine
+            .transcribe(Path::new("/takes/one.wav"), "")
+            .expect_err("must fail");
+        let message = error.to_string();
+        assert!(message.contains("exit 1"), "got {message}");
+        assert!(message.contains(&"a".repeat(399)), "got {message}");
+        assert!(
+            !message.contains('é'),
+            "the straddling character is dropped whole"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standard_error_with_a_three_byte_character_across_byte_400_is_cut_not_a_panic() {
+        // "—" is 0xE2 0x80 0x94, starting at byte 398.
+        let engine = CommandEngine::new(
+            argv(&[
+                "sh",
+                "-c",
+                "head -c 398 /dev/zero | tr '\\0' a >&2; printf '\\342\\200\\224' >&2; exit 1",
+            ]),
+            None,
+            "auto".to_string(),
+        );
+        let message = engine
+            .transcribe(Path::new("/takes/one.wav"), "")
+            .expect_err("must fail")
+            .to_string();
+        assert!(message.contains(&"a".repeat(398)), "got {message}");
+        assert!(!message.contains('—'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_that_outlasts_the_bound_is_named_with_the_bound_and_the_key() {
+        let engine = CommandEngine::new(argv(&["sh", "-c", "sleep 30"]), None, "auto".to_string())
+            .with_bound(std::time::Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        let error = engine
+            .transcribe(Path::new("/takes/one.wav"), "")
+            .expect_err("must fail");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        let message = error.to_string();
+        assert!(message.contains("\"sh\""), "names the program: {message}");
+        assert!(
+            message.contains("200 milliseconds"),
+            "names the bound: {message}"
+        );
+        assert!(
+            message.contains("[stt] command_timeout_seconds"),
+            "says what to change: {message}"
+        );
+        assert!(
+            !message.contains("daemon"),
+            "does not blame the daemon: {message}"
+        );
+    }
+
+    #[test]
+    fn the_default_bound_is_sixty_seconds() {
+        assert_eq!(DEFAULT_BOUND, std::time::Duration::from_secs(60));
     }
 }

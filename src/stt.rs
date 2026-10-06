@@ -200,11 +200,10 @@ pub fn resolve_with(
     state: ModelState,
 ) -> Result<Box<dyn Engine + Send + Sync>, EngineError> {
     match check_with(stt, &state)? {
-        Ready::Command { model } => Ok(Box::new(command::CommandEngine::new(
-            stt.command.clone(),
-            model,
-            stt.language.clone(),
-        ))),
+        Ready::Command { model } => Ok(Box::new(
+            command::CommandEngine::new(stt.command.clone(), model, stt.language.clone())
+                .with_bound(std::time::Duration::from_secs(stt.command_timeout_seconds)),
+        )),
         Ready::Http => Ok(Box::new(http::HttpEngine::new(
             stt.url.clone(),
             stt.token.clone(),
