@@ -185,6 +185,20 @@ run_hook
 expect_exit "unterminated comment" 0
 expect_silent "unterminated comment"
 
+# 15. A one-character unterminated last entry is still an entry. The staged diff
+# names `file.txt`, so `x` matches it.
+printf 'zzz-no-such-word\nx' > "${repo}/.leakwords"
+run_hook
+expect_exit "unterminated one-character entry" 1
+
+# 16. A backslash in an entry reaches grep as written: `read` without `-r` would
+# drop it, turn `ordin\(a\)ry` into the group `ordin(a)ry`, and match the staged
+# line `an ordinary line`. Written, it asks for literal parentheses and matches nothing.
+printf 'ordin\\(a\\)ry\n' > "${repo}/.leakwords"
+run_hook
+expect_exit "backslash kept" 0
+expect_silent "backslash kept"
+
 if [ "${failures}" -ne 0 ]; then
     printf '%s check(s) failed\n' "${failures}"
     exit 1

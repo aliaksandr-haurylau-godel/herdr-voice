@@ -1986,3 +1986,77 @@ for v in sys.argv[2:]:
     drain(1.5)
 if attach: os.kill(pid, signal.SIGKILL)
 ```
+
+
+## The leak gate checks an unterminated last line of `.leakwords`, for issue #97
+
+Platform: macOS (Darwin), this machine, 2026-10-06, with gitleaks 8.30.1 installed, so
+the hook ran its first check as well as the word list. Real `git commit` in a scratch
+repository in a temporary directory, with the hook named per command through
+`git -c core.hooksPath=<directory>`, so no configuration of any checkout was touched. The
+hook "before" is `.githooks/pre-commit` at `3dd45b8` (`git show`); the hook "after" is the
+one on this branch. This closes the gap that the section for issue #64 lists as not
+covered ("A `.leakwords` whose last line has no trailing newline").
+
+Each case commits one file containing the line `a note about zebra-marker`, with the
+`.leakwords` written by `printf` as shown. The program:
+
+```sh
+#!/bin/sh
+# usage: s5_97.sh <hook dir> <label> <leakwords printf format>
+HOOKS="$1"; label="$2"; fmt="$3"
+R=$(mktemp -d); cd "$R" || exit 2
+git init -q .
+cp "$GITLEAKS_TOML" .gitleaks.toml
+printf 'a note about zebra-marker\n' > note.txt
+git add note.txt .gitleaks.toml
+printf "$fmt" > .leakwords
+git -c core.hooksPath="$HOOKS" -c user.name=t -c user.email=t@example.invalid commit -q -m "scratch $label" > out.txt 2> err.txt
+code=$?
+printf '%s: exit %s, commits: %s\n' "$label" "$code" "$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+grep -v 'INF' err.txt | sed 's/^/    stderr: /'
+cd /; rm -rf "$R"
+```
+
+Run once per hook, with `GITLEAKS_TOML` set to the repository's `.gitleaks.toml`:
+
+```sh
+sh s5_97.sh <hook dir> "A unterminated, matches" 'zebra-marker'
+sh s5_97.sh <hook dir> "B terminated, matches" 'zebra-marker\n'
+sh s5_97.sh <hook dir> "C unterminated, no match" 'some-other-word'
+sh s5_97.sh <hook dir> "D two entries, last unterminated and matching" 'other-word\nzebra-marker'
+```
+
+```text
+== hook: before (3dd45b8)
+A unterminated, matches: exit 0, commits: 1
+B terminated, matches: exit 1, commits: 0
+    stderr: leak gate: staged changes match a private word-list entry
+    stderr: the matching pattern is in .leakwords; nothing is printed here on purpose
+C unterminated, no match: exit 0, commits: 1
+D two entries, last unterminated and matching: exit 0, commits: 1
+== hook: after
+A unterminated, matches: exit 1, commits: 0
+    stderr: leak gate: staged changes match a private word-list entry
+    stderr: the matching pattern is in .leakwords; nothing is printed here on purpose
+B terminated, matches: exit 1, commits: 0
+    stderr: leak gate: staged changes match a private word-list entry
+    stderr: the matching pattern is in .leakwords; nothing is printed here on purpose
+C unterminated, no match: exit 0, commits: 1
+D two entries, last unterminated and matching: exit 1, commits: 0
+    stderr: leak gate: staged changes match a private word-list entry
+    stderr: the matching pattern is in .leakwords; nothing is printed here on purpose
+```
+
+What this shows: before the change, a commit containing the word went through, exit 0 and
+a commit created, whenever the matching entry was the unterminated last line (A and D),
+and said nothing. After it, both are refused with the message the hook prints for a
+terminated entry. A terminated entry (B) is refused by both, and an unterminated line that
+matches nothing (C) passes in both, so the change moves only the case the issue
+describes. `sh scripts/test-pre-commit.sh` on the branch prints 36 `ok` lines and no
+`FAIL`.
+
+What it does not show: the Ubuntu runner (the same script runs there in the `scripts`
+job of `check.yml`; the loop was also run under `dash`, `bash`, `ksh` and
+`zsh --emulate sh` by the code review of this change), and a `.leakwords` with CRLF line
+endings, which is out of bounds and behaves as before.

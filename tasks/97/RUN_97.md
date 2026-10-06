@@ -99,3 +99,37 @@ Minor findings and what was done:
 - Case 12 did not check that standard output is empty. Added.
 - The S5 section in `docs/evidence.md` must say that it closes the gap listed in the section
   for issue #64. It will.
+
+Mutation test (a second fresh subagent after the review, in a scratch copy, running only
+`sh scripts/test-pre-commit.sh`): mutations of the loop condition, of the skip line, of the
+four new cases, and five alternative fixes. Killed: removing `|| [ -n "$pattern" ]` (cases
+11 and 12, four failures), `||` to `&&`, removing the `'#'*` alternative (case 14 among
+others), flipping any expected exit code, and the fixes that check the leftover line after
+the loop without the comment skip (case 14 alone). Mutations that loop forever
+(`-n` to `-z`, `[ -n "${pattern}x" ]`, an unquoted `[ -n $pattern ]`) are ended only by the
+outer time limit; the script has none of its own, which is a suggestion outside this diff.
+Survivors, and what was done:
+- H6, `-r` removed from `read`: not killed. Added case 16, an entry `ordin\(a\)ry`
+  (literal parentheses), which matches nothing as written and matches the staged line once
+  `read` strips the backslashes. Re-applied by hand: it fails with `exit 1, expected 0`.
+- H8, `[ ${#pattern} -gt 1 ]` in place of `[ -n "$pattern" ]`: a one-character unterminated
+  entry is missed. Added case 15 (`x`, which the staged `file.txt` contains). Re-applied by
+  hand: it fails with `exit 0, expected 1`.
+- H5, `IFS=` removed: not killed. Explained: without `IFS=`, `read` strips leading and
+  trailing whitespace, so an entry of spaces only becomes blank and `  #x` becomes a
+  comment. That is a decision about what whitespace in an entry means, and it is not what
+  this issue asks; the line existed before this change and is left alone.
+- A3 (`grep -v` into a `while`) and A5 (`{ cat; echo; } | while`): equivalent fixes, so
+  nothing should kill them.
+
+S4 is closed. Next is S5 Verify.
+
+### S5 Verify
+- artifact: section "The leak gate checks an unterminated last line of `.leakwords`, for issue #97" in `docs/evidence.md`
+- platform: macOS (Darwin), this machine, 2026-10-06, gitleaks 8.30.1 installed
+- result: pass. Real `git commit` in a scratch repository, hook "before" (`3dd45b8`) and
+  "after" named per command with `git -c core.hooksPath`: an unterminated matching last
+  entry, alone or after another entry, was committed before and is refused after; a
+  terminated entry is refused by both; an unterminated entry that matches nothing passes
+  in both. `sh scripts/test-pre-commit.sh`: 36 `ok`, no `FAIL`.
+- not exercised: the Ubuntu runner, CRLF files (out of bounds).
