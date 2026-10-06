@@ -397,22 +397,42 @@ use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HerdrError {
-    /// herdr could not be started at all.
+    /// herdr itself was not found.
     NotFound { binary: String, path: String },
+    /// herdr was found and this process is not allowed to run it.
+    NotExecutable { binary: String },
+    /// Starting herdr failed for another reason, which is the operating
+    /// system's own text.
+    StartFailed { binary: String, reason: String },
     /// herdr ran and refused. The string is what it said.
     Rejected(String),
 }
 
 impl std::fmt::Display for HerdrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::delivery::{not_executable_message, not_found_message, start_failed_message};
         match self {
             HerdrError::Rejected(why) => write!(f, "{why}"),
-            HerdrError::NotFound { binary, path } => write!(
-                f,
-                "cannot run {binary:?}: it is not on the PATH this process has, which is \
-                 {path:?}. Set HERDR_BIN_PATH to herdr's location, or start herdr from a \
-                 shell where it is on the PATH"
-            ),
+            HerdrError::NotFound { binary, path } => {
+                write!(f, "{}", not_found_message(binary, path))
+            }
+            HerdrError::NotExecutable { binary } => {
+                write!(f, "{}", not_executable_message(binary))
+            }
+            HerdrError::StartFailed { binary, reason } => {
+                write!(f, "{}", start_failed_message(binary, reason))
+            }
+        }
+    }
+}
+
+impl From<crate::delivery::StartFailure> for HerdrError {
+    fn from(failure: crate::delivery::StartFailure) -> Self {
+        use crate::delivery::StartFailure;
+        match failure {
+            StartFailure::NotFound { binary, path } => HerdrError::NotFound { binary, path },
+            StartFailure::NotExecutable { binary } => HerdrError::NotExecutable { binary },
+            StartFailure::Other { binary, reason } => HerdrError::StartFailed { binary, reason },
         }
     }
 }
@@ -489,11 +509,8 @@ impl HerdrCli {
         }
     }
 
-    fn not_found(&self) -> HerdrError {
-        HerdrError::NotFound {
-            binary: self.binary.clone(),
-            path: std::env::var("PATH").unwrap_or_default(),
-        }
+    fn start_failed(&self, error: &std::io::Error) -> HerdrError {
+        crate::delivery::start_failure(&self.binary, error).into()
     }
 }
 
@@ -509,7 +526,7 @@ impl Herdr for HerdrCli {
             .args(open_pane_args())
             .output()
         {
-            Err(_) => Err(self.not_found()),
+            Err(error) => Err(self.start_failed(&error)),
             Ok(out) if out.status.success() => Ok(()),
             Ok(out) => Err(HerdrError::Rejected(
                 String::from_utf8_lossy(if out.stdout.is_empty() {
@@ -529,7 +546,7 @@ impl Herdr for HerdrCli {
             .env("HERDR_CONFIG_PATH", path)
             .output()
         {
-            Err(_) => Err(self.not_found()),
+            Err(error) => Err(self.start_failed(&error)),
             Ok(out) => {
                 let mut text = String::from_utf8_lossy(&out.stdout).to_string();
                 text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -546,7 +563,7 @@ impl Herdr for HerdrCli {
             .args(crate::delivery::notify_args(title, body))
             .output()
         {
-            Err(_) => Err(self.not_found()),
+            Err(error) => Err(self.start_failed(&error)),
             Ok(out) if out.status.success() => Ok(()),
             Ok(out) => Err(HerdrError::Rejected(
                 String::from_utf8_lossy(&out.stderr).trim().to_string(),
@@ -2148,7 +2165,6 @@ mod tests {
 
         impl Recorder {
             fn new(tag: &str, text: &str, code: i32) -> Self {
-                use std::os::unix::fs::PermissionsExt;
                 let dir = std::env::temp_dir().join(format!(
                     "herdr-voice-setup-recorder-{tag}-{}",
                     std::process::id()
@@ -2160,9 +2176,9 @@ mod tests {
                     out: dir.join("record.out"),
                     dir,
                 };
-                std::fs::write(
+                crate::script_fixture::write_executable(
                     &recorder.script,
-                    format!(
+                    &format!(
                         "#!/bin/sh\n\
                          {{ printf '%s\\n' \"$@\"; \
                          printf 'HERDR_CONFIG_PATH=%s\\n' \"${{HERDR_CONFIG_PATH-unset}}\"; \
@@ -2173,13 +2189,7 @@ mod tests {
                         text = text,
                         code = code,
                     ),
-                )
-                .expect("write the recorder script");
-                let mut perms = std::fs::metadata(&recorder.script)
-                    .expect("stat")
-                    .permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&recorder.script, perms).expect("chmod");
+                );
                 recorder
             }
 
@@ -2287,13 +2297,83 @@ mod tests {
                 .check_config(std::path::Path::new("config.toml"))
                 .unwrap_err();
             match err {
-                HerdrError::NotFound { binary, .. } => {
-                    assert_eq!(binary, "herdr-voice-no-such-program")
+                HerdrError::NotFound { binary, path } => {
+                    assert_eq!(binary, "herdr-voice-no-such-program");
+                    assert_eq!(path, std::env::var("PATH").unwrap_or_default());
                 }
                 other => panic!("expected a not-found failure, got {other:?}"),
             }
             assert!(format!("{}", cli.open_pane().unwrap_err()).contains("HERDR_BIN_PATH"));
             assert!(cli.notify("t", "b").is_err());
+        }
+
+        /// A file that exists and may not be run: written without the execute bit.
+        struct PlainFile {
+            dir: std::path::PathBuf,
+            path: std::path::PathBuf,
+        }
+
+        impl Drop for PlainFile {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        fn a_file_that_is_not_executable(tag: &str) -> PlainFile {
+            let dir = std::env::temp_dir().join(format!(
+                "herdr-voice-setup-plain-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            let path = dir.join("herdr");
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write the file");
+            PlainFile { dir, path }
+        }
+
+        #[test]
+        fn a_program_without_the_execute_bit_is_reported_as_not_runnable_and_not_as_missing() {
+            let file = a_file_that_is_not_executable("noexec");
+            let binary = file.path.to_string_lossy().into_owned();
+            let cli = HerdrCli::with_binary(binary.clone());
+            for outcome in [
+                cli.open_pane(),
+                cli.check_config(std::path::Path::new("config.toml"))
+                    .map(|_| ()),
+                cli.notify("t", "b"),
+            ] {
+                assert_eq!(
+                    outcome,
+                    Err(HerdrError::NotExecutable {
+                        binary: binary.clone()
+                    })
+                );
+            }
+            let message = HerdrError::NotExecutable { binary }.to_string();
+            assert!(message.contains("was found"), "got {message}");
+            assert!(!message.contains("not on the PATH"), "got {message}");
+        }
+
+        #[test]
+        fn any_other_failure_to_start_carries_the_operating_systems_text_and_not_the_path_sentence()
+        {
+            let error = HerdrError::from(crate::delivery::start_failure(
+                "/opt/herdr",
+                &std::io::Error::other("Text file busy (os error 26)"),
+            ));
+            assert_eq!(
+                error,
+                HerdrError::StartFailed {
+                    binary: "/opt/herdr".to_string(),
+                    reason: "Text file busy (os error 26)".to_string(),
+                }
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("Text file busy (os error 26)"),
+                "got {message}"
+            );
+            assert!(!message.contains("PATH"), "got {message}");
         }
     }
 

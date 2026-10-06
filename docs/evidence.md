@@ -2081,3 +2081,153 @@ following presses accepted.
   `a_hold_over_a_herdr_that_answers_nothing_still_ends_within_two_bounds` and not run here.
 - Windows: the kill reaches the direct child only. Not run.
 - The model-backed transcriber. The transcriber here is `sh`; no whisper model was involved.
+
+## Text file busy in test fixtures, a start error that names its cause, and the download double, for issues #66, #101, #62 and #48
+
+Verified 2026-10-06. Platforms: macOS (Darwin, the author's machine) and
+`ubuntu-latest`, `macos-latest` and `windows-latest` on GitHub Actions. The
+branch is `fix/66-101-spawned-fixtures`, cut from `3dd45b8` (`0.1.0-beta.5`).
+
+### What macOS cannot show
+
+Executing a script while a write descriptor on it is open succeeds on macOS, so
+`ETXTBSY` ("Text file busy") cannot be produced here, and no loop on this machine
+can show the flake gone. Measured with Python's `subprocess` on a script written
+`0o755`:
+
+```
+f = open(p, "w"); f.write("#!/bin/sh\nexit 0\n"); f.flush(); os.chmod(p, 0o755)
+subprocess.run([p])        # -> "exec while write fd open: ok"
+f.close(); subprocess.run([p])   # -> "after close: ok"
+```
+
+No container runtime (`docker`, `podman`, `colima`, `orb`, `lima`) is installed
+on this machine either. The evidence for #66 is therefore the `ubuntu-latest` job,
+below. The reason is the same one for which the failure was only ever seen on
+Linux CI.
+
+### #66: `ubuntu-latest`, six clean attempts of one run
+
+The cause was established on 2026-10-05 from `delivery::tests::a_program_that_starts_and_fails_is_still_a_rejection`
+in run 37275092322: `StartFailed { reason: "Text file busy (os error 26)" }`.
+Before the change the suite failed on `ubuntu-latest` in roughly 5 of about 12
+runs between 2026-09-30 and 2026-10-05 (the count is from the issue's comments
+and the run record, not from a query made for this section).
+
+After the change the `ubuntu-latest` job of run 37484114599 (the `check`
+workflow, head `c342933`) was rerun alone with `gh run rerun 37484114599 --job
+<job id>` until six attempts had concluded. Every attempt passed:
+
+| attempt | job id | conclusion |
+|---|---|---|
+| 1 (the push) | 112339613355 | success |
+| 2 | 112340825767 | success |
+| 3 | 112341522960 | success |
+| 4 | 112342065449 | success |
+| 5 | 112342511088 | success |
+| 6 | 112343091481 | success |
+
+If the failure rate were still 5 in 12 and attempts were independent, six clean
+runs in a row would have a probability of (7/12)^6, about 4%. That is evidence,
+not proof, and every attempt is the same commit on a cached build, so it says
+nothing about a different commit's timing. No log shows an `ETXTBSY` retry
+happening: the helper does not print its retry count.
+
+The tests that exercise the error are Linux-only or assert differently on Linux,
+and they ran in attempt 1 (729 tests in the main binary on Linux against 728 on
+macOS; the difference is the first of these):
+
+```
+test script_fixture::tests::a_script_that_stays_open_past_the_deadline_panics_naming_the_script - should panic ... ok
+test script_fixture::tests::a_script_still_open_for_writing_is_waited_for_and_not_reported_as_busy ... ok
+test script_fixture::tests::write_executable_waits_for_a_descriptor_held_elsewhere_on_the_file ... ok
+test stt::fetch::tests::an_unreachable_address_says_so_rather_than_hanging ... ok
+test result: ok. 729 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.29s
+```
+
+The first line passing on Linux is the proof that a script held open for writing
+does return `ETXTBSY` there and that the helper reports it with the path. The
+same run was green on `macos-latest` and `windows-latest`, so the port-0
+connection of #62 fails at once on all three platforms.
+
+### #66, #62: the affected modules in a loop on macOS
+
+`indicator::`, `delivery::`, `setup::`, `bias::`, `stt::fetch` and
+`script_fixture`, 200 tests per run, `--test-threads=6`, one process at a time,
+a 120 second limit per run:
+
+```
+runs=50 pass=50 fail=0 elapsed=54s
+```
+
+This machine cannot produce `ETXTBSY`, so this loop shows the tests are stable
+here and nothing more.
+
+### #62: the 750 ms deadline closes the listener
+
+Measured in a scratch copy of the crate before the change. `a_good_transfer_leaves_three_files_and_no_part`
+with `std::thread::sleep(1200 ms)` inserted between `serve(...)` and
+`fetch_into(...)`:
+
+```
+a_good_transfer_leaves_three_files_and_no_part ... FAILED
+Connect error: Connection refused (os error 61)
+```
+
+The old `serve` returned after 750 ms with no connection, dropping its listener,
+so a client that connects late gets "Connection refused" on the address `serve`
+returned. That is the text in #62. The new `serve` keeps the listener until
+`Server::finish`, and
+`a_client_that_connects_and_never_sends_does_not_hold_finish_forever`,
+`dropping_the_server_closes_the_listener` and
+`a_client_that_sends_late_is_still_answered_and_recorded` pin the behaviour.
+`an_unreachable_address_says_so_rather_than_hanging` connects to
+`http://127.0.0.1:0`: it passes in 0.02 s on macOS and passed on all three CI
+platforms.
+
+### #48: the pinned revision
+
+The mutation from the issue, applied to the production line only
+(`entry.repo, entry.revision, file.name` in `one` changed to `entry.repo, "main",
+file.name`), then `cargo test --bin herdr-voice stt::fetch`:
+
+```
+test stt::fetch::tests::a_request_the_table_does_not_hold_is_answered_404_and_recorded ... FAILED
+test stt::fetch::tests::every_file_is_requested_at_the_revision_the_entry_pins ... FAILED
+  left: ["/openai/whisper-fixture/resolve/main/model.safetensors"]
+ right: ["/openai/whisper-fixture/resolve/0000000000000000000000000000000000000000/model.safetensors"]
+test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 711 filtered out; finished in 0.05s
+```
+
+On `3dd45b8` the same mutation left all tests passing (issue #48). A first
+attempt used `sed` on the whole file and also rewrote the test's own expected-path
+line, which made the new test pass; it was caught by reading the per-test output
+and redone on the production line alone. The mutation was reverted.
+
+### #101: the real binary, before and after
+
+`herdr-voice doctor` and `herdr-voice setup` built from `3dd45b8` and from the
+branch, run with an empty environment except for a scratch `HOME`, state,
+configuration and `PATH=/usr/bin:/bin`, so the owner's daemon and configuration
+were not touched. `<scratch>` is a temporary directory; `plain/herdr` is a shell
+script written without the execute bit.
+
+| `HERDR_BIN_PATH` | command | `3dd45b8` | the branch |
+|---|---|---|---|
+| `herdr-voice-no-such-program` | `doctor` | `herdr  missing  cannot run herdr-voice-no-such-program; install herdr, or set HERDR_BIN_PATH to it` | the same line |
+| `<scratch>/plain/herdr` (no execute bit) | `doctor` | `herdr  missing  cannot run <scratch>/plain/herdr; install herdr, or set HERDR_BIN_PATH to it` | `herdr  missing  <scratch>/plain/herdr was found but this process is not allowed to run it; make it executable (on Unix, chmod +x), or point HERDR_BIN_PATH at the herdr program itself` |
+| `<scratch>/plain` (a directory) | `doctor` | `... cannot run <scratch>/plain; install herdr, or set HERDR_BIN_PATH to it` | `... <scratch>/plain was found but this process is not allowed to run it; make it executable ...` |
+| `<scratch>/plain/herdr` | `setup` | `could not open the setup pane: cannot run "<scratch>/plain/herdr": it is not on the PATH this process has, which is "/usr/bin:/bin". Set HERDR_BIN_PATH to herdr's location, ...` | `could not open the setup pane: cannot run "<scratch>/plain/herdr": the file was found but this process is not allowed to run it. Make it executable (on Unix, chmod +x), or point HERDR_BIN_PATH at the herdr program itself. ...` |
+
+Exit status was 1 in every row, as before. The scratch directories were empty
+afterwards: nothing was written.
+
+On the branch, doctor still prints the state `missing` next to "was found but
+this process is not allowed to run it"; keeping that state is deliberate in the
+acceptance criteria.
+
+### Not covered by this section
+
+`bias::pane::read` (`src/bias/pane.rs`) maps every failure to start herdr to the
+same "install herdr, or set HERDR_BIN_PATH" message. #101 does not name it; it was
+not changed.

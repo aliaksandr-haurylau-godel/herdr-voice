@@ -150,14 +150,10 @@ mod tests {
         std::fs::write(&stdout_path, stdout).expect("write stdout fixture");
         std::fs::write(&stderr_path, stderr).expect("write stderr fixture");
         let script = dir.join("script.sh");
-        std::fs::write(
+        crate::script_fixture::write_executable(
             &script,
-            format!("#!/bin/sh\ncat {stdout_path:?}\ncat {stderr_path:?} >&2\nexit {exit_code}\n"),
-        )
-        .expect("write script");
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&script, perms).expect("chmod script");
+            &format!("#!/bin/sh\ncat {stdout_path:?}\ncat {stderr_path:?} >&2\nexit {exit_code}\n"),
+        );
         script
     }
 
