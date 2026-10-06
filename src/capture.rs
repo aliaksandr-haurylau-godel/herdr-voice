@@ -90,6 +90,15 @@ pub enum Started {
     CouldNotStart(String),
 }
 
+/// What `cancel` did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Cancelled {
+    /// A take was running and has been thrown away. `target` is its pane.
+    Discarded { target: String },
+    /// Nothing was running.
+    NothingRunning,
+}
+
 /// A finished take.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Take {
@@ -170,6 +179,9 @@ enum Command {
     Stop {
         reply: mpsc::Sender<Result<Take, CaptureError>>,
     },
+    Cancel {
+        reply: mpsc::Sender<Cancelled>,
+    },
 }
 
 /// The handle the daemon holds. The thread behind it lives as long as the daemon.
@@ -232,6 +244,9 @@ impl Recorder {
                             stop_one(source.as_mut(), &audio, &mut running, &mut remembered);
                         let _ = reply.send(answer);
                     }
+                    Command::Cancel { reply } => {
+                        let _ = reply.send(cancel_one(source.as_mut(), &mut running));
+                    }
                 }
             }
         });
@@ -281,6 +296,21 @@ impl Recorder {
         answer
             .recv()
             .unwrap_or_else(|_| Err(CaptureError::Unusable("the recorder thread is gone".into())))
+    }
+
+    /// Throws away the take that is running, if there is one. Answered on the
+    /// recorder thread from the same `running` value `start` and `stop` read, so
+    /// the three cannot disagree about whether a take exists.
+    pub fn cancel(&self) -> Cancelled {
+        let (reply, answer) = mpsc::channel();
+        let sent = self
+            .commands
+            .lock()
+            .map(|commands| commands.send(Command::Cancel { reply }));
+        if !matches!(sent, Ok(Ok(()))) {
+            return Cancelled::NothingRunning;
+        }
+        answer.recv().unwrap_or(Cancelled::NothingRunning)
     }
 }
 
@@ -345,6 +375,18 @@ fn start_one(
         path,
     });
     Started::Began
+}
+
+/// Throws a running take away without converting, measuring or writing it. The
+/// samples go with the `Running` value; `discard` removes the file if one exists.
+fn cancel_one(source: &mut dyn Source, running: &mut Option<Running>) -> Cancelled {
+    let Some(take) = running.take() else {
+        return Cancelled::NothingRunning;
+    };
+    source.stop();
+    let target = take.target.clone();
+    discard(Some(take));
+    Cancelled::Discarded { target }
 }
 
 fn stop_one(
@@ -812,5 +854,125 @@ mod tests {
             take.level_dbfs
         );
         std::fs::remove_file(&take.path).ok();
+    }
+
+    /// A source that counts how many times it was told to stop.
+    struct CountingSource {
+        stops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Source for CountingSource {
+        fn start(&mut self, _device: Option<&str>, sink: Sink) -> Result<Format, String> {
+            sink.push(Event::Samples(tone(0.3, 0.1)));
+            Ok(Format {
+                rate: 48_000,
+                channels: 1,
+            })
+        }
+
+        fn stop(&mut self) {
+            self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn cancel_discards_a_running_take_and_names_its_pane() {
+        let (recorder, _) = recorder_with("cancel-names", vec![Event::Samples(tone(0.3, 0.1))]);
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        assert_eq!(
+            recorder.cancel(),
+            Cancelled::Discarded {
+                target: "w1:p2".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_start_after_a_cancel_begins_a_new_take() {
+        let (recorder, _) = recorder_with("cancel-restart", vec![Event::Samples(tone(0.3, 0.1))]);
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        recorder.cancel();
+        assert_eq!(recorder.start("w1:p3", None, None, None), Started::Began);
+        let take = recorder.stop().expect("the new take");
+        assert_eq!(take.target, "w1:p3");
+        std::fs::remove_file(&take.path).ok();
+    }
+
+    #[test]
+    fn a_stop_after_a_cancel_finds_nothing_running() {
+        let (recorder, _) = recorder_with("cancel-stop", vec![Event::Samples(tone(0.3, 0.1))]);
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        recorder.cancel();
+        assert!(matches!(recorder.stop(), Err(CaptureError::NothingRunning)));
+    }
+
+    #[test]
+    fn cancel_with_nothing_running_says_so() {
+        let (recorder, _) = recorder_with("cancel-idle", vec![Event::Samples(tone(0.3, 0.1))]);
+        assert_eq!(recorder.cancel(), Cancelled::NothingRunning);
+    }
+
+    #[test]
+    fn cancel_twice_discards_once() {
+        let (recorder, _) = recorder_with("cancel-twice", vec![Event::Samples(tone(0.3, 0.1))]);
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        assert!(matches!(recorder.cancel(), Cancelled::Discarded { .. }));
+        assert_eq!(recorder.cancel(), Cancelled::NothingRunning);
+    }
+
+    #[test]
+    fn cancel_after_the_device_failed_still_discards_the_take() {
+        let (recorder, _) = recorder_with(
+            "cancel-failed",
+            vec![
+                Event::Samples(tone(0.3, 0.1)),
+                Event::Failed("gone".to_string()),
+            ],
+        );
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        assert_eq!(
+            recorder.cancel(),
+            Cancelled::Discarded {
+                target: "w1:p2".to_string()
+            }
+        );
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+    }
+
+    #[test]
+    fn cancel_stops_the_source_exactly_once() {
+        let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&stops);
+        let recorder = Recorder::spawn(
+            move || Box::new(CountingSource { stops: counted }),
+            Audio::default(),
+            takes_dir("cancel-counts"),
+        );
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        recorder.cancel();
+        // The reply is sent after the stop, so the count is final here.
+        assert_eq!(stops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        recorder.cancel();
+        assert_eq!(
+            stops.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a cancel that found nothing must not stop the source again"
+        );
+    }
+
+    #[test]
+    fn cancel_leaves_no_file_in_the_takes_directory() {
+        let (recorder, takes) = recorder_with("cancel-files", vec![Event::Samples(tone(0.3, 0.1))]);
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        recorder.cancel();
+        let wavs = std::fs::read_dir(&takes)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "wav"))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(wavs, 0);
     }
 }
