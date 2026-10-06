@@ -40,14 +40,21 @@ pub fn write_executable(path: &Path, content: &str) {
         "a fixture script must start with #!/bin/sh, got {interpreter:?}"
     );
     {
+        // Clippy asks for `truncate` to be spelled out beside `create`; the file
+        // is emptied by `set_len` below for the reason given there.
+        #[allow(clippy::suspicious_open_options)]
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
             .mode(0o755)
             .open(path)
             .unwrap_or_else(|e| panic!("cannot create {}: {e}", path.display()));
-        // The mode above applies only to a file this call creates.
+        // An existing file keeps its old content and mode unless they are
+        // reset here; the mode above applies only to a file this call creates.
+        // Not `OpenOptions::truncate`: a test in `src/outward.rs` forbids that
+        // spelling anywhere in `src`, to keep a string cut from coming back.
+        file.set_len(0)
+            .unwrap_or_else(|e| panic!("cannot empty {}: {e}", path.display()));
         file.set_permissions(std::fs::Permissions::from_mode(0o755))
             .unwrap_or_else(|e| panic!("cannot make {} executable: {e}", path.display()));
         file.write_all(format!("{interpreter}\n{GUARD}\n{rest}").as_bytes())
@@ -120,10 +127,11 @@ mod tests {
     /// `write_executable` creates it but without waiting, so a test can keep it
     /// open.
     fn guarded_script(path: &Path) {
+        // A new file in a new scratch directory: nothing to empty.
+        #[allow(clippy::suspicious_open_options)]
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
             .mode(0o755)
             .open(path)
             .expect("create the script");

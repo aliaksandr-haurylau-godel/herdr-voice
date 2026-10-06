@@ -8,11 +8,19 @@
 
 use std::fmt;
 use std::process::Command;
+use std::time::Duration;
+
+use crate::outward::{self, RunError};
 
 /// The pane branch has no budget of its own among the four `[context]` keys:
 /// the prototype's 80 lines, plus the overall `prompt_chars` cap, already
 /// bound the result (`tasks/21/DESIGN_21.md`, section 5).
 pub const PANE_LINES: usize = 80;
+
+/// How long `herdr pane read` may take. The take is waiting on it before
+/// recognition starts, and a miss costs only the bias, so it is shorter than
+/// delivery's bound. `docs/decisions.md`, the entry for the pane read.
+pub const BOUND: Duration = Duration::from_secs(5);
 
 /// Builds the exact `herdr pane read` command line. Pure: no process, no I/O.
 pub fn argv(pane: &str, lines: usize) -> Vec<String> {
@@ -34,6 +42,7 @@ pub fn argv(pane: &str, lines: usize) -> Vec<String> {
 pub enum PaneError {
     NotFound { program: String },
     Failed { program: String, code: String },
+    TimedOut { program: String, bound: Duration },
 }
 
 impl fmt::Display for PaneError {
@@ -46,6 +55,12 @@ impl fmt::Display for PaneError {
             PaneError::NotFound { program } => write!(
                 f,
                 "cannot run \"{program}\"; install herdr, or set HERDR_BIN_PATH to it"
+            ),
+            PaneError::TimedOut { program, bound } => write!(
+                f,
+                "\"{program}\" did not answer within {}, so the plugin stopped it and went on \
+                 without the pane's text. If herdr is not responding, restart it",
+                crate::http_failure::bound_text(*bound)
             ),
             PaneError::Failed { program, code } => {
                 write!(f, "\"{program}\" failed ({code})")
@@ -60,11 +75,28 @@ impl std::error::Error for PaneError {}
 /// its standard output. `binary` is an explicit parameter — this function does
 /// not resolve `HERDR_BIN_PATH` itself; that happens at the daemon call site.
 pub fn read(pane: &str, lines: usize, binary: &str) -> Result<String, PaneError> {
+    read_within(pane, lines, binary, BOUND)
+}
+
+/// `read` with the bound given, so a test does not wait the real one.
+pub fn read_within(
+    pane: &str,
+    lines: usize,
+    binary: &str,
+    bound: Duration,
+) -> Result<String, PaneError> {
     let arguments = &argv(pane, lines)[1..];
-    let output = Command::new(binary).args(arguments).output();
-    let output = match output {
+    let mut command = Command::new(binary);
+    command.args(arguments);
+    let output = match outward::run(&mut command, bound) {
         Ok(output) => output,
-        Err(_) => {
+        Err(RunError::TimedOut) => {
+            return Err(PaneError::TimedOut {
+                program: binary.to_string(),
+                bound,
+            })
+        }
+        Err(RunError::Start(_)) => {
             return Err(PaneError::NotFound {
                 program: binary.to_string(),
             })
@@ -200,5 +232,49 @@ mod tests {
             text.contains(script.to_str().unwrap()),
             "the message must name the program, got {text:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_herdr_that_never_answers_is_a_timeout_naming_it_and_the_bound() {
+        let binary = crate::delivery::tests_support::herdr_that_hangs_on("pane-hang", &["pane"]);
+        let started = std::time::Instant::now();
+        let error = read_within("w1:p2", 80, &binary, std::time::Duration::from_millis(200))
+            .expect_err("must fail");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        match &error {
+            PaneError::TimedOut { program, bound } => {
+                assert_eq!(program, &binary);
+                assert_eq!(*bound, std::time::Duration::from_millis(200));
+            }
+            other => panic!("expected TimedOut, got {other:?}"),
+        }
+        let text = error.to_string();
+        assert!(text.contains(&binary), "{text}");
+        assert!(text.contains("200 milliseconds"), "{text}");
+        assert!(
+            text.contains("without the pane"),
+            "says what the take does next: {text}"
+        );
+        assert!(text.contains("restart"), "says what to do: {text}");
+    }
+
+    #[test]
+    fn the_bound_is_five_seconds() {
+        assert_eq!(BOUND, std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_gives_herdr_the_real_five_second_bound() {
+        let binary = crate::delivery::tests_support::herdr_that_hangs_on("pane-real", &["pane"]);
+        let started = std::time::Instant::now();
+        let error = read("w1:p2", 80, &binary).expect_err("must fail");
+        assert!(
+            matches!(&error, PaneError::TimedOut { bound, .. } if *bound == BOUND),
+            "got {error:?}"
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(4_900));
+        assert!(started.elapsed() < std::time::Duration::from_secs(8));
     }
 }

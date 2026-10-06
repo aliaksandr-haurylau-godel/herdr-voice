@@ -145,7 +145,7 @@ pub fn body_note(text: &str) -> String {
     }
 }
 
-fn bound_text(bound: Duration) -> String {
+pub(crate) fn bound_text(bound: Duration) -> String {
     if bound.subsec_nanos() == 0 {
         match bound.as_secs() {
             1 => "1 second".to_string(),
