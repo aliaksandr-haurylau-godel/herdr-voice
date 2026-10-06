@@ -12,10 +12,11 @@
 //! it executes the script once with a probe variable set and retries while the
 //! spawn fails with `ETXTBSY`. A successful probe means no description open for
 //! writing exists any more, and nothing opens the file for writing again, so
-//! every later execution of it cannot fail that way.
+//! every later execution of it cannot fail that way. The scripts are POSIX
+//! shell: the probe depends on a line only `sh` understands.
 
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -29,15 +30,14 @@ const GUARD: &str = "[ -n \"$HERDR_VOICE_FIXTURE_PROBE\" ] && exit 0";
 const ETXTBSY: i32 = 26;
 
 /// Writes `content` to `path` with mode `0o755` and returns once the script can
-/// be executed. `content` must start with a `#!` line; a guard line is inserted
-/// after it so the probe execution does nothing.
+/// be executed. `content` must start with a `#!/bin/sh` line: the guard line
+/// that is inserted after it, so the probe execution does nothing, is POSIX
+/// shell.
 pub fn write_executable(path: &Path, content: &str) {
-    let (interpreter, rest) = content
-        .split_once('\n')
-        .expect("a fixture script has more than one line");
+    let (interpreter, rest) = content.split_once('\n').unwrap_or((content, ""));
     assert!(
-        interpreter.starts_with("#!"),
-        "a fixture script must start with #!, got {interpreter:?}"
+        interpreter.starts_with("#!/bin/sh"),
+        "a fixture script must start with #!/bin/sh, got {interpreter:?}"
     );
     {
         let mut file = std::fs::OpenOptions::new()
@@ -47,6 +47,9 @@ pub fn write_executable(path: &Path, content: &str) {
             .mode(0o755)
             .open(path)
             .unwrap_or_else(|e| panic!("cannot create {}: {e}", path.display()));
+        // The mode above applies only to a file this call creates.
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("cannot make {} executable: {e}", path.display()));
         file.write_all(format!("{interpreter}\n{GUARD}\n{rest}").as_bytes())
             .unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
     } // The write descriptor is closed here, before anything is executed.
@@ -200,6 +203,30 @@ mod tests {
         // `fs::write` creates the file without the execute bit.
         std::fs::write(&path, format!("#!/bin/sh\n{GUARD}\n")).unwrap();
         wait_until_executable(&path, Duration::from_secs(10));
+    }
+
+    #[test]
+    #[should_panic(expected = "must start with #!/bin/sh")]
+    fn a_script_for_another_interpreter_is_refused() {
+        // The guard line is POSIX shell; under another interpreter it would be a
+        // syntax error, or the probe would run the whole script.
+        let scratch = Scratch::new("otherinterpreter");
+        write_executable(
+            &scratch.path("s.py"),
+            "#!/usr/bin/env python3\nprint('hello')\n",
+        );
+    }
+
+    #[test]
+    fn a_file_that_already_exists_without_the_execute_bit_is_made_executable() {
+        let scratch = Scratch::new("existing");
+        let path = scratch.path("s.sh");
+        // `fs::write` creates the file without the execute bit; the mode of
+        // `OpenOptions` applies only to a file it creates.
+        std::fs::write(&path, "stale\n").unwrap();
+        write_executable(&path, "#!/bin/sh\nexit 0\n");
+        let status = Command::new(&path).status().expect("run the script");
+        assert!(status.success());
     }
 
     #[test]

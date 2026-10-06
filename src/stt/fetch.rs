@@ -310,7 +310,13 @@ mod tests {
                         std::thread::sleep(std::time::Duration::from_millis(5));
                         continue;
                     }
-                    Err(_) => return paths,
+                    // Any other accept error (a client that reset before it was
+                    // accepted, say) is not a reason to close the listener under
+                    // the tests that follow; only `finish` ends the loop.
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
                 };
                 stream.set_nonblocking(false).expect("blocking stream");
                 // A client that connects and never sends must not hold the

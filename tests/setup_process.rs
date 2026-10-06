@@ -19,6 +19,11 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// The crate's own helper for writing a script a test then runs, included by
+/// path because an integration test cannot reach the binary's modules.
+#[path = "../src/script_fixture.rs"]
+mod script_fixture;
+
 /// A scratch directory holding the stand-in for herdr, the file it records
 /// what it was given in, and the configuration path the run is pointed at.
 /// Unique per test and per process, and removed when it is dropped.
@@ -39,7 +44,6 @@ impl Scratch {
     /// `code` is what the stand-in exits with, which is how a refused pane is
     /// staged.
     fn new(tag: &str, code: i32) -> Self {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "herdr-voice-setup-process-{tag}-{}",
             std::process::id()
@@ -52,20 +56,14 @@ impl Scratch {
             config: dir.join("config.toml"),
             dir,
         };
-        std::fs::write(
+        script_fixture::write_executable(
             &scratch.script,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > {record:?}\n\
                  echo 'a popup pane is already open'\nexit {code}\n",
                 record = scratch.record,
             ),
-        )
-        .expect("write the stand-in");
-        let mut perms = std::fs::metadata(&scratch.script)
-            .expect("stat")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&scratch.script, perms).expect("chmod");
+        );
         scratch
     }
 
