@@ -454,6 +454,24 @@ mod tests {
     }
 
     #[test]
+    fn every_file_is_requested_at_the_revision_the_entry_pins() {
+        let dir = scratch("pinned");
+        let (base, server) = serve(all_three("200 OK"));
+        let entry = entry();
+        fetch_into(&base, &entry, &dir, &mut Silent).expect("must succeed");
+
+        let mut asked = server.finish();
+        asked.sort();
+        let mut expected: Vec<String> = entry
+            .files
+            .iter()
+            .map(|file| format!("/{}/resolve/{}/{}", entry.repo, entry.revision, file.name))
+            .collect();
+        expected.sort();
+        assert_eq!(asked, expected);
+    }
+
+    #[test]
     fn a_short_transfer_names_the_size_and_leaves_nothing_behind() {
         let dir = scratch("short");
         let mut files = all_three("200 OK");
@@ -519,18 +537,10 @@ mod tests {
     #[test]
     fn an_unreachable_address_says_so_rather_than_hanging() {
         let dir = scratch("closed");
-        // Bound and immediately dropped: the port is not listening.
-        let port = {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-        let error = fetch_into(
-            &format!("http://127.0.0.1:{port}"),
-            &entry(),
-            &dir,
-            &mut Silent,
-        )
-        .expect_err("must refuse");
+        // Nothing can listen on port 0, so no sibling test can have been handed
+        // it, and the connection attempt fails at once.
+        let error =
+            fetch_into("http://127.0.0.1:0", &entry(), &dir, &mut Silent).expect_err("must refuse");
         assert!(matches!(error, FetchError::Http { .. }), "got {error:?}");
         assert!(
             error.to_string().contains("again"),
