@@ -167,3 +167,14 @@ Reviewer note, recorded as returned: the `Hold` literal is at `src/daemon.rs:442
 Implementation order, stated plainly: the tests of task 1 were written first and failed to compile for want of `Recorder::cancel` before any code existed. For tasks 2, 3 and 4 the code was written before the tests, against the plan's test list; the tests were then written and the whole suite run. The mutation test below is what checks that those tests fail when the code is wrong.
 
 Baseline: `eae0135`, rustc 1.99.0, `cargo test` 750 passed, 1 ignored. After the four tasks: 772 passed, 1 ignored. `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` and `python3 scripts/check_manifest.py` are clean; the Windows dead-code check on a scratch copy is clean.
+
+### S4 code review (round 1)
+
+Reviewer: a fresh general-purpose subagent, over `eae0135..94661c5`. No Critical findings. Verdict: ready to open a pull request, with fixes. Findings and how each was settled:
+
+1. Important — `dictate` publishes `Recording` after `recorder.start` returns, holding no lock between the two; a `cancel` in that gap discards the take, finds `Idle`, and `dictate` then publishes `Recording` for a take that is gone. **Accepted, not fixed.** Closing it needs `dictate` to hold the hold guard across the device open, which blocks every `ptt` repeat for the hundreds of milliseconds a device takes to open. `Activity` is display state only, and the window is the time between two statements. The label is corrected by the next stage that publishes. Stated in the pull request description.
+2. Minor — the same window exists for a same-pane `ptt` between the guard being released and `publish_idle_if_recording`; the conditional `Idle` can erase that hold's `Recording` until the watcher publishes at the end of the hold. **Accepted**, for the reason in 1.
+3. Minor — `cancel` waits on the recorder thread while holding the hold guard, so a slow device open started by `dictate` delays `ptt` repeats and the reply may pass the client's two-second bound. **Accepted**; bounded by the device-open time.
+4. Minor — weak tests. `cancel_leaves_no_file_in_the_takes_directory` and `cancel_leaves_no_wav_behind` cannot exercise `discard` removing a file, because no file exists while a take runs; they guard against `cancel_one` writing one. **Kept as they are, and said so.** Added: an assertion that a refused cancel leaves the indicator on `Recording`, and a daemon-level test for the `Opening` state.
+5. Minor — "nothing to cancel" is also the answer while a take is being transcribed. Already decision 4 of `DESIGN_18.md`; not changed.
+6. Minor — comments: none became untrue.

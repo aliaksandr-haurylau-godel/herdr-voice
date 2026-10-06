@@ -3304,7 +3304,29 @@ mod tests {
             &*hold_of(&runtime),
             crate::ptt::HoldState::Live(_)
         ));
+        assert!(
+            matches!(activity_of(&runtime), Activity::Recording { ref target, .. } if target == "w1:p1"),
+            "a refused cancel must leave the indicator alone, got {:?}",
+            activity_of(&runtime)
+        );
         let take = recorder.stop().expect("the hold's take is still running");
+        std::fs::remove_file(&take.path).ok();
+    }
+
+    #[test]
+    fn cancel_while_a_hold_is_opening_is_refused_and_does_not_reach_the_recorder() {
+        let (runtime, recorder, _clock) = started_hold();
+        {
+            let mut state = hold_of(&runtime);
+            let hold = state.hold().expect("a hold").clone();
+            *state = crate::ptt::HoldState::Opening(hold);
+        }
+        let (reply, _) = answer(&request("cancel", b""), &recorder, &runtime);
+        assert!(
+            matches!(&reply, Reply::Error(why) if why.starts_with("holding for w1:p1: a key is being held")),
+            "got {reply:?}"
+        );
+        let take = recorder.stop().expect("the take is still running");
         std::fs::remove_file(&take.path).ok();
     }
 
