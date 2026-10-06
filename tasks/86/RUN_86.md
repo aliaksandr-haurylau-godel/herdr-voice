@@ -138,3 +138,26 @@ Minor findings and what was done:
 - A sentence in `DESIGN_86.md` section 2 was hard to parse. Reworded.
 - The reviewer noted the commit trailer names Sonnet 5.5; that is the model that wrote
   the code.
+
+Mutation test (a second fresh subagent, after the review, in a scratch copy, one cargo
+process at a time): 23 mutations of the lines the diff adds or changes, 18 killed, 5
+survived.
+- Survived 2i, the phrase "so nothing was changed" removed from the message: killed now
+  by `no_answer_is_not_a_decline_and_changes_nothing`, which asserts the phrase.
+- Survived 2j, the leading newline removed: killed now by the same test, which asserts
+  that the message starts on a line of its own after the unanswered prompt.
+- Survived 2k, the legacy report printed before the message: killed now by
+  `no_answer_still_prints_the_legacy_report`, which asserts the order.
+  Each of the three was re-applied by hand after the new assertions; each made exactly
+  one test fail, and the restored file passes.
+- Survived 4a and 4b, the closure in `main` replaced by `|| Some(String::new())` and by
+  the old `read_line(...).ok()?` shape: not reachable by a unit test. `read_answer` is
+  fully covered by its own tests (1a to 1f killed), and the process tests in
+  `tests/setup_process.rs` start the binary with a pipe, so `is_terminal` is false and
+  the question is never asked. What remains unchecked is that `main` calls `read_answer`
+  on standard input, and that is what S5 runs.
+
+The last S4 commit changes only assertions inside `#[cfg(test)]` code, no `cfg` attribute
+and no item, so the Windows dead-code check run at the first commit stands.
+
+S4 is closed. Next is S5 Verify.

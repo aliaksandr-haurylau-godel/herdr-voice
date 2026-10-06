@@ -1343,6 +1343,14 @@ mod tests {
             "{said}"
         );
         assert!(
+            said.contains("so nothing was changed"),
+            "it is the only place that says the configuration is untouched: {said}"
+        );
+        assert!(
+            said.contains("Enter: \nthe question could not be answered"),
+            "the message starts on a line of its own, after the unanswered prompt: {said:?}"
+        );
+        assert!(
             said.lines().all(|line| line != "nothing was changed."),
             "a decline prints that sentence as a line of its own; this must not: {said}"
         );
@@ -1383,7 +1391,12 @@ mod tests {
         );
         let said = String::from_utf8(said).unwrap();
         assert_eq!(code, 1);
-        assert!(said.contains("/tmp/c/haurylau.voice/config.toml"), "{said}");
+        let legacy_at = said.find("/tmp/c/haurylau.voice/config.toml").expect(&said);
+        let message_at = said.find(UNANSWERED).expect(&said);
+        assert!(
+            message_at < legacy_at,
+            "the message comes first, the report after it: {said}"
+        );
     }
 
     #[test]
