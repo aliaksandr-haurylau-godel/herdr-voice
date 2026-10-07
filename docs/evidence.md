@@ -182,19 +182,21 @@ The crate's own source settles why, and settles two related worries as well
 
 ## Linux, in a container
 
-Run twice on 2026-08-25 by `scripts/linux-check.sh`, which performs the whole
-check in one non-interactive pass and prints the table below itself. The two runs
-agreed step for step; the second exists to show the script is re-runnable on a
-machine it has already touched. The plugin was built from revision `68fbe89`, the
-tip of `main`, which is the first revision that records anything — capture landed
-there. The script itself carries the changes described below, which are not in
-`68fbe89`.
+`scripts/linux-check.sh` ran on 2026-08-25 against two revisions of the plugin. On
+`e32a9b7` it could not touch capture, because capture did not exist: its `no-device`
+step was recorded as pending. On `68fbe89`, the tip of `main` and the first revision
+that records anything, it ran with capture and produced the table below. The record
+does not settle whether the `68fbe89` table comes from one run or two; this section
+claims one run on each revision and no agreement between runs. What the run on
+`e32a9b7` established about installation, the socket path and the `[[startup]]` entry
+was re-observed on `68fbe89` and is stated below as one result. The script itself
+carries the changes described below, which are not in `68fbe89`.
 
-This is the second run of this check. The first, on revision `e32a9b7`, could not
-touch capture at all, because capture did not exist: its `no-device` step was
-recorded as pending. Everything that run established about installation, the
-socket path and the `[[startup]]` entry was re-observed here and is stated below
-as one result.
+A re-run on a machine an earlier run had touched could have been graded against that
+run's herdr log records: the script remembered one earlier `dictate` record and no
+earlier `cancel` record (`tasks/23/AC_23.md`). If the `68fbe89` table comes from a
+second run, its `no-device`, `named-device` and `herdr-log` rows are not independent
+evidence of that run.
 
 The machine: a throwaway Debian GNU/Linux 12 (bookworm) container, `aarch64`,
 kernel 6.18.15, no sound hardware of any kind — no `/dev/snd`, no PipeWire, no
