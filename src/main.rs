@@ -25,6 +25,7 @@ mod doctor;
 mod gate;
 mod http_failure;
 mod indicator;
+mod mic;
 mod outward;
 mod proto;
 mod ptt;
