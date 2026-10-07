@@ -142,6 +142,136 @@ fn set_one(existing: &str, edit: &Edit, eol: &str) -> String {
     text
 }
 
+use std::path::{Path, PathBuf};
+
+use crate::config::{self, Config};
+
+/// Why a write did not happen, each with what to do next. In every case but `Io`
+/// the file on disk is exactly what it was.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WriteError {
+    /// No configuration directory can be worked out from the environment.
+    NoDirectory,
+    /// The file exists and cannot be read as text.
+    Unreadable { path: String, why: String },
+    /// The file as it stands does not load as the configuration, so the daemon is
+    /// already running on defaults and an edit would be blamed for it.
+    AlreadyInvalid { path: String, why: String },
+    /// The edit would have made the file unloadable.
+    Refused { path: String, why: String },
+    /// A step of creating or replacing the file failed.
+    Io { path: String, why: String },
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteError::NoDirectory => write!(
+                f,
+                "there is no configuration directory to write to: none of \
+                 HERDR_PLUGIN_CONFIG_DIR, XDG_CONFIG_HOME and HOME is set. Set one and try again"
+            ),
+            WriteError::Unreadable { path, why } => write!(
+                f,
+                "cannot read {path} as text ({why}), so nothing was written. \
+                 Fix the file's permissions or contents and try again"
+            ),
+            WriteError::AlreadyInvalid { path, why } => write!(
+                f,
+                "{path} does not load as a configuration ({why}), so nothing was written. \
+                 Fix the file and try again"
+            ),
+            WriteError::Refused { path, why } => write!(
+                f,
+                "the edit would have made {path} unloadable ({why}), so nothing was written"
+            ),
+            WriteError::Io { path, why } => write!(f, "cannot write {path}: {why}"),
+        }
+    }
+}
+
+/// Write the file with `edits` applied, and return its path.
+///
+/// Never leaves a file that does not load: `config::load` treats an unparsable
+/// file as absent and falls back to every default, so a bad edit would silently
+/// discard every other setting the person has. The edited text is therefore parsed
+/// as `Config`, the type `config::load` parses, before anything is written.
+///
+/// The file is replaced whole, by writing a candidate beside it and renaming it
+/// over the target: a write in place that fails halfway leaves an empty file,
+/// which loads as "every default". A symbolic link is followed, so the link
+/// survives and the file it points at changes; the file's permissions carry over,
+/// because it may hold a token.
+pub fn write_keys(directory: Option<&Path>, edits: &[Edit]) -> Result<PathBuf, WriteError> {
+    let directory = directory.ok_or(WriteError::NoDirectory)?;
+    let io = |path: &Path, e: std::io::Error| WriteError::Io {
+        path: path.display().to_string(),
+        why: e.to_string(),
+    };
+    std::fs::create_dir_all(directory).map_err(|e| io(directory, e))?;
+    let path = directory.join(config::FILE_NAME);
+    let shown = path.display().to_string();
+    let target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+
+    // An absent file is a valid state, so that is a create. Any other failure to
+    // read is not "empty": treating it so would replace the person's file with one
+    // holding a single key.
+    let original = match std::fs::read_to_string(&target) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(WriteError::Unreadable {
+                path: shown,
+                why: e.to_string(),
+            })
+        }
+    };
+    if let Err(e) = toml::from_str::<Config>(&original) {
+        return Err(WriteError::AlreadyInvalid {
+            path: shown,
+            why: e.message().to_string(),
+        });
+    }
+
+    let edited = set_keys(&original, edits);
+    if let Err(e) = toml::from_str::<Config>(&edited) {
+        return Err(WriteError::Refused {
+            path: shown,
+            why: e.message().to_string(),
+        });
+    }
+
+    let candidate = target.with_extension("toml.herdr-voice-candidate");
+    write_candidate(&candidate, &edited).map_err(|e| {
+        let _ = std::fs::remove_file(&candidate);
+        io(&candidate, e)
+    })?;
+    // The target exists when it was read: carry its mode onto the candidate, so
+    // the rename does not change who may read it.
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(&candidate, meta.permissions());
+    }
+    std::fs::rename(&candidate, &target).map_err(|e| {
+        let _ = std::fs::remove_file(&candidate);
+        io(&path, e)
+    })?;
+    Ok(path)
+}
+
+/// Writes `text` to a new file that only its owner can read until the target's
+/// mode replaces that: the text may contain a token.
+fn write_candidate(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(text.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +524,189 @@ toasts = false
             }],
         );
         assert_eq!(out, before.replace("input = \"Old\"", "input = \"New\""));
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("herdr-voice-edit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn input(name: &str) -> Edit<'static> {
+        Edit {
+            table: "audio",
+            key: "input",
+            value: quote(name),
+        }
+    }
+
+    const ORIGINAL: &str =
+        "# mine\n[audio]\ninput = \"Old\"\nsilence_db = -50.0\n\n[ui]\ntoasts = false\n";
+
+    #[test]
+    fn a_good_edit_is_written_and_every_other_byte_is_unchanged() {
+        let dir = scratch("good");
+        std::fs::write(dir.join("config.toml"), ORIGINAL).unwrap();
+        let path = write_keys(Some(&dir), &[input("New")]).expect("written");
+        assert_eq!(path, dir.join("config.toml"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            ORIGINAL.replace("input = \"Old\"", "input = \"New\"")
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(leftovers, vec!["config.toml".to_string()], "no candidate left");
+    }
+
+    #[test]
+    fn a_value_of_the_wrong_type_is_refused_and_the_file_is_untouched() {
+        // `toml::Value` accepts this and `config::load` does not, which makes
+        // `config::load` fall back to every default.
+        let dir = scratch("wrong-type");
+        let before = "[ui]\nblink_ms = 250\n[audio]\ninput = \"Old\"\n";
+        std::fs::write(dir.join("config.toml"), before).unwrap();
+        let wrong = Edit {
+            table: "ui",
+            key: "blink_ms",
+            value: quote("fast"),
+        };
+        let error = write_keys(Some(&dir), &[wrong]).expect_err("must be refused");
+        assert!(matches!(error, WriteError::Refused { .. }), "got {error:?}");
+        let said = error.to_string();
+        assert!(said.contains("config.toml"), "names the file: {said}");
+        assert!(said.contains("nothing was written"), "{said}");
+        assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), before);
+    }
+
+    #[test]
+    fn a_file_that_already_does_not_load_is_not_edited() {
+        let dir = scratch("already-invalid");
+        let before = "[audio\ninput = ";
+        std::fs::write(dir.join("config.toml"), before).unwrap();
+        let error = write_keys(Some(&dir), &[input("New")]).expect_err("refused");
+        assert!(matches!(error, WriteError::AlreadyInvalid { .. }), "got {error:?}");
+        assert!(error.to_string().contains("nothing was written"));
+        assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), before);
+    }
+
+    #[test]
+    fn a_file_that_is_not_text_is_not_replaced_by_one_holding_the_new_key() {
+        let dir = scratch("not-text");
+        let bytes = [0xffu8, 0xfe, 0x00, 0x41];
+        std::fs::write(dir.join("config.toml"), bytes).unwrap();
+        let error = write_keys(Some(&dir), &[input("New")]).expect_err("refused");
+        assert!(matches!(error, WriteError::Unreadable { .. }), "got {error:?}");
+        assert_eq!(std::fs::read(dir.join("config.toml")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn no_file_and_no_directory_gives_both_and_only_the_edited_key() {
+        let dir = scratch("absent").join("nested").join("deeper");
+        let path = write_keys(Some(&dir), &[input("New")]).expect("created");
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "[audio]\ninput = \"New\"\n"
+        );
+    }
+
+    #[test]
+    fn no_known_directory_says_so() {
+        let error = write_keys(None, &[input("New")]).expect_err("nowhere to write");
+        assert_eq!(error, WriteError::NoDirectory);
+        assert!(error.to_string().contains("HERDR_PLUGIN_CONFIG_DIR"));
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_created_is_an_io_error_naming_it() {
+        let dir = scratch("blocked");
+        let in_the_way = dir.join("occupied");
+        std::fs::write(&in_the_way, "a file, not a directory").unwrap();
+        let error = write_keys(Some(&in_the_way.join("config")), &[input("New")])
+            .expect_err("cannot create");
+        assert!(matches!(error, WriteError::Io { .. }), "got {error:?}");
+        assert!(error.to_string().contains("occupied"), "{error}");
+    }
+
+    #[test]
+    fn one_refused_edit_among_two_changes_neither() {
+        let dir = scratch("all-or-nothing");
+        std::fs::write(dir.join("config.toml"), ORIGINAL).unwrap();
+        let edits = [
+            input("New"),
+            Edit {
+                table: "ui",
+                key: "blink_ms",
+                value: quote("fast"),
+            },
+        ];
+        write_keys(Some(&dir), &edits).expect_err("refused as a whole");
+        assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), ORIGINAL);
+        let both = [
+            input("New"),
+            Edit {
+                table: "ui",
+                key: "toasts",
+                value: "true".to_string(),
+            },
+        ];
+        write_keys(Some(&dir), &both).expect("both written");
+        let after = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(
+            after.contains("input = \"New\"") && after.contains("toasts = true"),
+            "{after}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_directory_is_an_io_error_and_leaves_the_file_and_no_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("read-only");
+        std::fs::write(dir.join("config.toml"), ORIGINAL).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = write_keys(Some(&dir), &[input("New")]);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = result.expect_err("cannot write");
+        assert!(matches!(error, WriteError::Io { .. }), "got {error:?}");
+        assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), ORIGINAL);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no candidate left");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_mode_of_the_file_survives_because_it_may_hold_a_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("mode");
+        let file = dir.join("config.toml");
+        std::fs::write(&file, ORIGINAL).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_keys(Some(&dir), &[input("New")]).expect("written");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        // The candidate is created with 0600, so only copying the original's mode gives 0640.
+        assert_eq!(mode, 0o640);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_stays_a_link_and_the_file_it_points_at_changes() {
+        let dir = scratch("link");
+        let real_dir = scratch("link-real");
+        let real = real_dir.join("dotfiles-config.toml");
+        std::fs::write(&real, ORIGINAL).unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("config.toml")).unwrap();
+        write_keys(Some(&dir), &[input("New")]).expect("written");
+        assert!(
+            std::fs::symlink_metadata(dir.join("config.toml"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link must still be a link"
+        );
+        assert!(std::fs::read_to_string(&real)
+            .unwrap()
+            .contains("input = \"New\""));
     }
 }
