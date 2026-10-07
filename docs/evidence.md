@@ -2540,7 +2540,7 @@ process was left. Every case runs under a 60-second limit.
 ```
 $ sh scripts/test-linux-check.sh                                  # /bin/bash 3.2.57
 75 ok, all cases passed, 69 s
-$ HERDR_VOICE_TEST_BASH=/opt/homebrew/bin/bash sh scripts/test-linux-check.sh   # bash 5.3.20
+$ HERDR_VOICE_TEST_BASH=<path of bash 5.3.20> sh scripts/test-linux-check.sh
 75 ok, all cases passed
 $ shellcheck scripts/linux-check.sh scripts/test-linux-check.sh   # shellcheck 0.11.0
 (no output)
