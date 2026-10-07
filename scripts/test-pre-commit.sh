@@ -155,6 +155,50 @@ printf 'zzz-no-such-word\nordinary\n' > "${repo}/.leakwords"
 run_hook
 expect_exit "second entry" 1
 
+# 11. The last entry is checked when the file does not end in a newline, here
+# after another entry. `read` returns non-zero on such a line, so a loop that
+# tests only its status never runs the body for it.
+printf 'zzz-no-such-word\nordinary' > "${repo}/.leakwords"
+run_hook
+expect_exit "unterminated last entry" 1
+expect_stdout_empty "unterminated last entry"
+expect_stderr_equals "unterminated last entry" 'leak gate: staged changes match a private word-list entry
+the matching pattern is in .leakwords; nothing is printed here on purpose'
+
+# 12. The same, with the entry as the only line of the file.
+printf 'ordinary' > "${repo}/.leakwords"
+run_hook
+expect_exit "unterminated only entry" 1
+expect_stdout_empty "unterminated only entry"
+expect_stderr_contains "unterminated only entry" "match a private word-list entry"
+
+# 13. An unterminated last line that matches nothing passes without a word.
+printf 'zzz-no-such-word' > "${repo}/.leakwords"
+run_hook
+expect_exit "unterminated, no match" 0
+expect_silent "unterminated, no match"
+
+# 14. An unterminated comment is still a comment: read as an entry, `#ordinary`
+# would match the staged line.
+printf 'zzz-no-such-word\n#ordinary' > "${repo}/.leakwords"
+run_hook
+expect_exit "unterminated comment" 0
+expect_silent "unterminated comment"
+
+# 15. A one-character unterminated last entry is still an entry. The staged diff
+# names `file.txt`, so `x` matches it.
+printf 'zzz-no-such-word\nx' > "${repo}/.leakwords"
+run_hook
+expect_exit "unterminated one-character entry" 1
+
+# 16. A backslash in an entry reaches grep as written: `read` without `-r` would
+# drop it, turn `ordin\(a\)ry` into the group `ordin(a)ry`, and match the staged
+# line `an ordinary line`. Written, it asks for literal parentheses and matches nothing.
+printf 'ordin\\(a\\)ry\n' > "${repo}/.leakwords"
+run_hook
+expect_exit "backslash kept" 0
+expect_silent "backslash kept"
+
 if [ "${failures}" -ne 0 ]; then
     printf '%s check(s) failed\n' "${failures}"
     exit 1
