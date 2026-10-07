@@ -14,6 +14,7 @@ mod capture;
 mod chooser;
 mod client;
 mod config;
+mod config_edit;
 mod context;
 mod daemon;
 mod delivery;
