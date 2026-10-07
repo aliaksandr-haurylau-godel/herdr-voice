@@ -96,7 +96,6 @@ CONFIG_MARKER=""
 # it back. When a backup and a marker are both there the backup is the original
 # and wins.
 restore_config() {
-    [ -n "${CONFIG_BACKUP}" ] || return 0
     if [ -f "${CONFIG_BACKUP}" ]; then
         mv -f "${CONFIG_BACKUP}" "${CONFIG_FILE}" || return 1
         rm -f "${CONFIG_MARKER}"

@@ -182,3 +182,25 @@ Reviewer: a fresh general-purpose subagent, over `e92f0b2..7e3ab85`. No Critical
 9. Minor — `invoke_dictate` fails only on 124; another non-zero return from `herdr plugin action invoke` in `named-device` is reported as "never finished" after the wait, as before. **Out of scope** (the issue lists 124 only), and goes into the same list.
 
 After these: `sh scripts/test-linux-check.sh` prints 47 `ok` lines and `all cases passed`; `shellcheck` is clean on both scripts.
+
+### S4 mutation testing
+
+Tester: a fresh general-purpose subagent, in a scratch copy, one run at a time (`sh scripts/test-linux-check.sh`, about 70 seconds each). First run, over `477bd28`: 54 mutations, 38 killed, 16 survived. How each survivor was settled:
+
+- Killed by new cases (re-checked by a second tester run on `9149779`, 14 of 14 killed, and by me for the last two below):
+  - tab in the exit-code field: case `tab-in-exit-code`;
+  - backup and marker both present, and a restore that cannot write the directory: `leftover-backup-and-marker`, `leftover-unwritable`;
+  - the `TERM` and `HUP` traps: `interrupt-term`, `interrupt-hup`;
+  - a failing `log list` at the no-device and named-device snapshots: `unreadable-log-before-no-device`, `unreadable-log-before-named-device`;
+  - `HERDR_VOICE_STOP_TIMEOUT`'s name and default: `daemon-will-not-stop` asserts "2s", `default-stop-timeout` asserts "10s".
+- Two survived the second run and were real gaps, and are now killed, re-checked by me one at a time in the foreground:
+  - marker branch checked before the backup branch: the case only compared the end state, and the mutant reaches the same end state. The stub now records the first line of the configuration at every `dictate` (or `absent`), and `leftover-backup`, `leftover-marker` and `leftover-backup-and-marker` assert the sequence (`ORIGINAL`, then `[audio]`; `absent`, then `[audio]`). Mutant now fails `leftover-backup-and-marker`.
+  - `trap '' INT TERM HUP` removed from `cleanup`: the second signal was sent after a fixed second and the first run could not tell. It is now sent once the stub `pkill` that cleanup runs says it has started (a marker file). Mutant now fails `interrupt-twice` (two assertions) under bash 5. **Under bash 3.2 this mutant cannot be killed**: bash 3.2 does not run a trap again while it is running the `EXIT` trap, which I confirmed with a two-line experiment outside the repository (`with.sh` and `without.sh`, both reached `cleanup-end` under 3.2; only `with.sh` did under 5). So the case tells the two apart under bash 4 and later (the ubuntu job, or `HERDR_VOICE_TEST_BASH` naming a newer bash) and says so in a comment.
+- Equivalent or unreachable, left as they are:
+  - tab replacement for the first field (the step name): step names are literals in the script;
+  - `[ ! -f "${CONFIG_BACKUP}" ] &&` in the borrow guard: the link step restores or fails first, so a backup cannot be present there; it is kept because AC requirement 2 says an existing backup is never overwritten and the guard is what states it at the place it would happen;
+  - `-lt` to `-le` in `wait_daemon_gone`: one extra second of waiting, nothing observable;
+  - `&& [ -n "${CONFIG_DIR}" ]` in the link step: an empty directory gives names rooted at `/`, which do not exist;
+  - `[ -n "${CONFIG_BACKUP}" ] || return 0` at the top of `restore_config`: with empty names both tests are false and the function returns 0 anyway. **The line was deleted.**
+
+After these: `sh scripts/test-linux-check.sh` prints 75 `ok` lines and `all cases passed` under `/bin/bash` 3.2.57 and under bash 5.3.20; `shellcheck` is clean on both scripts.

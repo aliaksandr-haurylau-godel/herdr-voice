@@ -142,13 +142,14 @@ case "$2" in
             fi
         fi
         if [ "${action}" = "dictate" ]; then
-            if grep -q 'No Such Microphone' "${CFG}" 2>/dev/null; then
-                echo bogus >>"${S}/dictate-config.log"
-                # Makes the configuration directory read-only, so the script cannot put
-                # the configuration back.
-                if [ -n "${STUB_LOCK_CFG:-}" ]; then chmod a-w "${STUB_CONFIG_DIR}"; fi
-            else
-                echo clean >>"${S}/dictate-config.log"
+            # What the configuration was when this take began: its first line, or
+            # `absent`.
+            head -n 1 "${CFG}" 2>/dev/null >>"${S}/dictate-config.log" \
+                || echo absent >>"${S}/dictate-config.log"
+            # Makes the configuration directory read-only, so the script cannot put
+            # the configuration back.
+            if [ -n "${STUB_LOCK_CFG:-}" ] && grep -q 'No Such Microphone' "${CFG}" 2>/dev/null; then
+                chmod a-w "${STUB_CONFIG_DIR}"
             fi
         fi
         n="$(cat "${S}/counter" 2>/dev/null || echo "${STUB_ID_START:-100}")"
@@ -239,6 +240,7 @@ echo "pkill $*" >>"${STUB_STATE:?}/pkill.log"
 # signal can arrive while the script is cleaning up.
 if [ -n "${STUB_SLOW_PKILL:-}" ] && [ -f "${STUB_STATE}/named_started" ]; then
     trap '' INT
+    : >"${STUB_STATE}/pkill_started"
     sleep 3
 fi
 if [ -z "${STUB_DAEMON_IMMORTAL:-}" ]; then rm -f "${STUB_STATE}/daemon_up"; fi
@@ -332,6 +334,7 @@ run_case_interrupted() {
 import os, signal, subprocess, sys, time
 marker, out, err, name, again = sys.argv[1:6]
 command = sys.argv[6:]
+started = os.path.join(os.path.dirname(marker), "pkill_started")
 sig = getattr(signal, "SIG" + name)
 child = subprocess.Popen(command, stdout=open(out, "w"), stderr=open(err, "w"),
                          start_new_session=True)
@@ -341,7 +344,11 @@ while time.time() < deadline and not os.path.exists(marker) and child.poll() is 
 if child.poll() is None and os.path.exists(marker):
     os.killpg(child.pid, sig)
     if again == "twice":
-        time.sleep(1)
+        # The second signal goes in while the stub pkill, which cleanup runs, is
+        # sleeping: wait for it to say it has started.
+        deadline = time.time() + 10
+        while time.time() < deadline and not os.path.exists(started) and child.poll() is None:
+            time.sleep(0.05)
         if child.poll() is None:
             os.killpg(child.pid, sig)
 try:
@@ -494,7 +501,11 @@ expect_true interrupt-hup "config.toml is the original" content_is "${CASE}/cfg/
 expect_text interrupt-hup "the run says it was interrupted" "INTERRUPTED by HUP" "${CASE}/err"
 
 # A second signal while the first is being cleaned up after must not cut the cleanup
-# short: the stub pkill, which cleanup runs, takes three seconds and ignores SIGINT.
+# short: the stub pkill, which cleanup runs, takes three seconds and ignores SIGINT,
+# and the second signal is sent once it has started. bash 3.2 does not run a trap
+# again while it is running the EXIT trap, so there this case passes with or without
+# the `trap ''` in cleanup; it tells them apart under bash 4 and later (the ubuntu job,
+# or HERDR_VOICE_TEST_BASH=<a newer bash>).
 new_case interrupt-twice
 printf 'ORIGINAL\n' >"${CASE}/cfg/config.toml"
 run_case_interrupted INT twice STUB_NAMED_BLOCK=1 STUB_SLOW_PKILL=1
@@ -510,8 +521,8 @@ expect_code leftover-backup 0
 expect_true leftover-backup "config.toml is the backup's content" content_is "${CASE}/cfg/config.toml" ORIGINAL
 expect_true leftover-backup "no backup is left" absent "${CASE}/cfg/herdr-voice-config-backup"
 expect_text leftover-backup "the script says it restored" "restored" "${CASE}/out"
-expect_true leftover-backup "the first take ran against the original, not the borrowed file" \
-    content_is "${CASE}/state/dictate-config.log" "$(printf 'clean\nbogus')"
+expect_true leftover-backup "the first take ran against the original, the second against the borrowed file" \
+    content_is "${CASE}/state/dictate-config.log" "$(printf 'ORIGINAL\n[audio]')"
 
 new_case leftover-marker
 : >"${CASE}/cfg/herdr-voice-config-was-absent"
@@ -520,8 +531,8 @@ run_case
 expect_code leftover-marker 0
 expect_true leftover-marker "there is no config.toml" absent "${CASE}/cfg/config.toml"
 expect_true leftover-marker "no marker is left" absent "${CASE}/cfg/herdr-voice-config-was-absent"
-expect_true leftover-marker "the first take ran with no borrowed file" \
-    content_is "${CASE}/state/dictate-config.log" "$(printf 'clean\nbogus')"
+expect_true leftover-marker "the first take ran with no configuration, the second against the borrowed file" \
+    content_is "${CASE}/state/dictate-config.log" "$(printf 'absent\n[audio]')"
 
 # Both files, as a run killed between creating one and removing the other could
 # leave them: the backup is the original and wins, and the marker must not survive
@@ -535,6 +546,8 @@ expect_code leftover-backup-and-marker 0
 expect_true leftover-backup-and-marker "config.toml is the backup's content" content_is "${CASE}/cfg/config.toml" ORIGINAL
 expect_true leftover-backup-and-marker "no marker is left" absent "${CASE}/cfg/herdr-voice-config-was-absent"
 expect_true leftover-backup-and-marker "no backup is left" absent "${CASE}/cfg/herdr-voice-config-backup"
+expect_true leftover-backup-and-marker "the first take ran against the original, the second against the borrowed file" \
+    content_is "${CASE}/state/dictate-config.log" "$(printf 'ORIGINAL\n[audio]')"
 
 # An earlier run's leftovers that cannot be put back: the run says so at once and
 # loses nothing. As root a read-only directory stops nothing.
