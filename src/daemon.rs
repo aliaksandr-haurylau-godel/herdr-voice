@@ -922,6 +922,10 @@ fn transcribe_take(
             )
         }
     };
+    // The raw transcript, before the rewrite step can change it: a transcriber
+    // filling silence repeats one phrase, and that is a property of what it said,
+    // not of the take's level (`tasks/30/DESIGN_30.md`, decision 1).
+    let repetition = crate::repeat::one_phrase_repeated(&text);
 
     // Between recognition producing `text` and delivery: `off` (never
     // represented here — see `Resolution::Off`) and a working engine both
@@ -973,7 +977,10 @@ fn transcribe_take(
             // half of the rule `capture::discard` states. Only here: every other
             // ending names this path to somebody, in a reply or in the journal,
             // and deleting there would turn a promise into a pointer at nothing.
-            if runtime.records.is_none() {
+            // A take flagged as one phrase repeated is kept for the same reason
+            // the warning below names it: it is the only evidence of what the
+            // microphone heard.
+            if runtime.records.is_none() && repetition.is_none() {
                 // A recording that is already gone is the outcome this wanted,
                 // not a failure: somebody cleared the directory, or a second
                 // pipeline's bound reached it first. Saying "recording kept"
@@ -987,11 +994,29 @@ fn transcribe_take(
                     }
                 }
             }
+            // Raised after delivery and only then: a failed delivery already
+            // keeps and names the take and prints the text, in which the
+            // repetition is plain. A hold has no reply, so the journal and the
+            // toast are what reach the person.
+            let warning = repetition.as_ref().map(|repetition| {
+                let path = take.path.display().to_string();
+                let sentence = repetition_sentence(repetition.times, &path);
+                runtime
+                    .journal
+                    .write(&probably_not_speech_line(&take.target, repetition, &path));
+                toast(
+                    runtime,
+                    "Probably not speech",
+                    &format!("{}: {sentence}", take.target),
+                );
+                sentence
+            });
+            let delivered = format!("delivered to {} [{:.1} dB]", take.target, take.level_dbfs);
             (
-                Reply::Ok(format!(
-                    "delivered to {} [{:.1} dB]",
-                    take.target, take.level_dbfs
-                )),
+                Reply::Ok(match warning {
+                    Some(sentence) => format!("{delivered}; probably not speech: {sentence}"),
+                    None => delivered,
+                }),
                 Reported::No,
             )
         }
@@ -1106,6 +1131,31 @@ impl Journal for StderrJournal {
 /// memory while the outward call to herdr runs.
 pub fn delivering_line(text: &str) -> String {
     format!("delivering: {text}")
+}
+
+/// What a flagged take is told with, in the reply and in the toast. The path is
+/// one line: a reply is one line, and a path is not known never to hold a newline.
+fn repetition_sentence(times: usize, path: &str) -> String {
+    format!(
+        "the text is one phrase repeated {times} times, the way a transcriber fills \
+         silence. It was delivered; check it before sending. The take is kept at {}",
+        path.replace('\n', " ")
+    )
+}
+
+/// Written when a transcript was one phrase repeated. The text itself is in the
+/// `delivering:` line written before it.
+fn probably_not_speech_line(
+    target: &str,
+    repetition: &crate::repeat::Repetition,
+    path: &str,
+) -> String {
+    format!(
+        "probably not speech: pane={target} repeats={} block_words={} take={}",
+        repetition.times,
+        repetition.words,
+        path.replace('\n', " ")
+    )
 }
 
 /// Written when a delivery attempt is rejected.
@@ -1887,6 +1937,231 @@ mod tests {
             take.path.with_extension("json").exists(),
             "and the record is there"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const REPEATED: &str = "Продолжение следует... Продолжение следует... \
+                            Продолжение следует... Продолжение следует...";
+
+    const FLAGGED_SENTENCE_TAIL: &str = "the text is one phrase repeated 4 times, the way a \
+        transcriber fills silence. It was delivered; check it before sending. The take is kept at";
+
+    /// A runtime that recognises `transcript`, with the given deliverer, a journal
+    /// the test can read back, `[ui] toasts` as given, no records, and a takes
+    /// directory of its own that already holds the take's file.
+    fn runtime_flagging(
+        transcript: &str,
+        tag: &str,
+        toasts: bool,
+        fake: crate::delivery::tests_support::FakeDeliverer,
+    ) -> (
+        Runtime,
+        crate::capture::Take,
+        std::sync::Arc<RecordingJournal>,
+        std::path::PathBuf,
+    ) {
+        let dir = records_dir(tag);
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let (mut runtime, journal) = runtime_reading_back(fake, toasts);
+        runtime.recognition = Ok(Box::new(crate::stt::tests_support::Fake(Ok(
+            transcript.to_string()
+        ))));
+        runtime.takes = dir.clone();
+        let take = take_for_recording(tag);
+        std::fs::write(&take.path, b"audio").expect("write the recording");
+        (runtime, take, journal, dir)
+    }
+
+    #[test]
+    fn a_flagged_transcript_is_delivered_unchanged_and_its_take_is_kept() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, take, _journal, dir) =
+            runtime_flagging(REPEATED, "flag-kept", false, fake.clone());
+        transcribe(&runtime, &take, "");
+        assert!(
+            fake.calls()
+                .contains(&crate::delivery::tests_support::Call::Insert(
+                    "wJ:pE".to_string(),
+                    REPEATED.to_string()
+                )),
+            "{:?}",
+            fake.calls()
+        );
+        assert!(take.path.exists(), "a flagged take is kept");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unflagged_transcript_still_removes_its_take() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, take, _journal, dir) =
+            runtime_flagging("fix the worklog entry", "flag-unflagged", false, fake);
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert_eq!(
+            reply,
+            Reply::Ok("delivered to wJ:pE [-20.0 dB]".to_string())
+        );
+        assert!(!take.path.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_flagged_reply_is_the_delivery_reply_plus_the_warning() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, take, _journal, dir) = runtime_flagging(REPEATED, "flag-reply", false, fake);
+        let (reply, _) = transcribe(&runtime, &take, "");
+        assert_eq!(
+            reply,
+            Reply::Ok(format!(
+                "delivered to wJ:pE [-20.0 dB]; probably not speech: {FLAGGED_SENTENCE_TAIL} {}",
+                take.path.display()
+            ))
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_warning_in_the_reply_is_one_line_and_carries_no_transcript_text() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, take, _journal, dir) =
+            runtime_flagging(REPEATED, "flag-one-line", false, fake);
+        let (reply, _) = transcribe(&runtime, &take, "");
+        let Reply::Ok(text) = reply else {
+            panic!("expected a confirmation");
+        };
+        assert!(!text.contains('\n'), "{text:?}");
+        assert!(!text.contains("Продолжение"), "{text:?}");
+        let sentence = repetition_sentence(4, "a\nb.wav");
+        assert!(!sentence.contains('\n'), "{sentence:?}");
+        assert!(sentence.contains("a b.wav"), "{sentence:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_flagged_take_is_journalled() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, take, journal, dir) = runtime_flagging(REPEATED, "flag-journal", false, fake);
+        transcribe(&runtime, &take, "");
+        let lines = journalled(&journal);
+        let warning = format!(
+            "probably not speech: pane=wJ:pE repeats=4 block_words=2 take={}",
+            take.path.display()
+        );
+        assert_eq!(
+            lines.iter().filter(|line| **line == warning).count(),
+            1,
+            "{lines:?}"
+        );
+        let delivering = lines
+            .iter()
+            .position(|line| line.starts_with("delivering:"))
+            .expect("a delivering line");
+        let flagged = lines.iter().position(|line| *line == warning).unwrap();
+        assert!(delivering < flagged, "{lines:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_flagged_take_raises_a_toast_when_toasts_are_on() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, take, _journal, dir) =
+            runtime_flagging(REPEATED, "flag-toast", true, fake.clone());
+        transcribe(&runtime, &take, "");
+        let calls = fake.calls();
+        assert_eq!(
+            calls.last(),
+            Some(&crate::delivery::tests_support::Call::Notify(
+                "Probably not speech".to_string(),
+                format!("wJ:pE: {FLAGGED_SENTENCE_TAIL} {}", take.path.display())
+            )),
+            "{calls:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn with_toasts_off_the_warning_is_journalled_and_not_toasted() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, take, journal, dir) =
+            runtime_flagging(REPEATED, "flag-no-toast", false, fake.clone());
+        transcribe(&runtime, &take, "");
+        assert!(
+            !fake
+                .calls()
+                .iter()
+                .any(|call| matches!(call, crate::delivery::tests_support::Call::Notify(..))),
+            "{:?}",
+            fake.calls()
+        );
+        assert!(
+            journalled(&journal)
+                .iter()
+                .any(|line| line.starts_with("probably not speech:")),
+            "{:?}",
+            journalled(&journal)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unflagged_take_raises_nothing() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, take, journal, dir) =
+            runtime_flagging("fix the worklog entry", "flag-nothing", true, fake.clone());
+        transcribe(&runtime, &take, "");
+        assert!(
+            !fake
+                .calls()
+                .iter()
+                .any(|call| matches!(call, crate::delivery::tests_support::Call::Notify(..))),
+            "{:?}",
+            fake.calls()
+        );
+        assert!(
+            !journalled(&journal)
+                .iter()
+                .any(|line| line.starts_with("probably not speech")),
+            "{:?}",
+            journalled(&journal)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_flagged_take_whose_delivery_fails_gets_no_warning() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::failing(
+            crate::delivery::DeliveryError::Rejected("pane_not_found".into()),
+        );
+        let (runtime, take, journal, dir) = runtime_flagging(REPEATED, "flag-failed", false, fake);
+        let (reply, _) = transcribe(&runtime, &take, "");
+        let Reply::Error(text) = reply else {
+            panic!("expected a failed delivery, got {reply:?}");
+        };
+        assert!(!text.contains("probably not speech"), "{text:?}");
+        assert!(
+            !journalled(&journal)
+                .iter()
+                .any(|line| line.starts_with("probably not speech")),
+            "{:?}",
+            journalled(&journal)
+        );
+        assert!(take.path.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_flagged_take_with_records_on_is_kept_and_warned() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (mut runtime, take, _journal, dir) =
+            runtime_flagging(REPEATED, "flag-records", false, fake);
+        runtime.records = Some(crate::record::Records::new(dir.clone()));
+        let (reply, _) = transcribe(&runtime, &take, "");
+        let Reply::Ok(text) = reply else {
+            panic!("expected a confirmation");
+        };
+        assert!(text.contains("probably not speech"), "{text:?}");
+        assert!(take.path.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
