@@ -37,6 +37,12 @@ pub enum Outcome {
 /// Commands that deliver into a pane, and therefore need herdr to have named one.
 /// `cancel` is not one of them: it stops whatever is running and clears what a
 /// dead run left behind, neither of which needs a target.
+/// Whether a request that arrives without a pane's context is worth a journal line.
+/// `ping` (from `doctor`) and `reload` (from a popup) are not run from a keybinding.
+pub fn wants_context_note(command: &str) -> bool {
+    !matches!(command, "ping" | "reload")
+}
+
 pub fn needs_target_pane(command: &str) -> bool {
     matches!(command, "dictate" | "ptt")
 }
@@ -1586,9 +1592,9 @@ fn serve_one(
         other => other?,
     };
     runtime.journal.write(&request_line(&request));
-    // A `ping` carries no context by design, so the note would read as a fault
-    // on every run of `doctor`.
-    if request.command != "ping" {
+    // A `ping` and a `reload` carry no context by design, so the note would read
+    // as a fault on every run of `doctor` and on every choice made in a popup.
+    if wants_context_note(&request.command) {
         if let Some(note) = context_note(&request) {
             runtime.journal.write(&note);
         }
@@ -5426,5 +5432,16 @@ mod tests {
         assert!(said.contains("recorder thread is gone"), "{said}");
         assert!(said.contains("Restart herdr"), "{said}");
         assert_eq!(runtime.running.lock().unwrap().audio.input, "");
+    }
+
+    #[test]
+    fn a_request_that_carries_no_context_by_design_is_not_noted_as_lacking_one() {
+        // `doctor` sends `ping` and a popup sends `reload`; neither is run from a
+        // keybinding, so a note about a missing pane would read as a fault.
+        assert!(!wants_context_note("ping"));
+        assert!(!wants_context_note("reload"));
+        for command in ["dictate", "ptt", "cancel"] {
+            assert!(wants_context_note(command), "{command}");
+        }
     }
 }
