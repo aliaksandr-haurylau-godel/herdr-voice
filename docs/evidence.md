@@ -2515,3 +2515,156 @@ What it does not show: the Ubuntu runner (the same script runs there in the `scr
 job of `check.yml`; the loop was also run under `dash`, `bash`, `ksh` and
 `zsh --emulate sh` by the code review of this change), and a `.leakwords` with CRLF line
 endings, which is out of bounds and behaves as before.
+
+
+## A transcript that is one phrase repeated, for issue #30
+
+Run on 2026-10-07 on macOS 27.0.1 (Darwin 27.0.0, arm64), debug builds of `0.1.0-beta.5`:
+the baseline from `main` at `e92f0b2` (built from `git archive` into a scratch directory)
+and the branch `fix/30-repeated-phrase` at `ec3bf3a`. Each binary was built into a target
+directory of its own.
+
+**Method.** A Python script kept outside the repository (below) starts `herdr-voice daemon`
+with `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_CONFIG_DIR` and `HOME` pointing into a scratch
+directory, `PATH` reduced to `/usr/bin:/bin`, and `HERDR_BIN_PATH` naming a script that
+appends its arguments to a log and exits 0. Nothing it did could reach a running herdr or
+the installed plugin. Takes are recorded from the real default microphone
+(`[audio] silence_db = -120`, so the quiet room is not refused as silent) and transcribed
+by `sh -c "cat <file>"`, a file the script rewrites between takes, which stands in for the
+transcriber: the issue's own text, `Продолжение следует...` four times, and an ordinary
+sentence. The rewrite step is off and `[ui] toasts` is at its default, on. The daemon's
+standard error, where the journal goes, is read back. A take is two `dictate` presses three
+seconds apart; a hold is two `ptt` presses half a second apart.
+
+**The instrument, checked first: the baseline.** On `e92f0b2` the repeated text is delivered
+with nothing said about it, and the take's file is gone:
+
+```
+-- a take of one phrase repeated, by dictate
+  dictate  exit 0   'delivered to w1:p1 [-92.0 dB]'
+  wav files in the takes directory: []
+  herdr was asked: ['pane send-text w1:p1 Продолжение следует... Продолжение следует... Продолжение следует... Продолжение следует...']
+  journal: ['delivering: Продолжение следует... ×4']
+```
+
+**The branch, the same script:**
+
+```
+-- a take of one phrase repeated, by dictate
+  dictate  exit 0   'delivered to w1:p1 [-84.6 dB]; probably not speech: the text is one phrase repeated 4 times, the way a transcriber fills silence. It was delivered; check what reached the pane. The take is kept at <scratch>/state/takes/1791367876793-97552-1.wav'
+  wav files in the takes directory: ['1791367876793-97552-1.wav']
+  herdr was asked: ['pane send-text w1:p1 Продолжение следует... ×4',
+                    'notification show Probably not speech --body w1:p1: the text is one phrase repeated 4 times, the way a transcriber fills silence. It was delivered; check what reached the pane. The take is kept at <scratch>/state/takes/1791367876793-97552-1.wav']
+  journal: ['delivering: Продолжение следует... ×4',
+            'probably not speech: pane=w1:p1 repeats=4 block_words=2 take=<scratch>/state/takes/1791367876793-97552-1.wav']
+-- a take of ordinary speech, by dictate
+  dictate  exit 0   'delivered to w1:p1 [-100.0 dB]'
+  wav files in the takes directory: []
+  herdr was asked: ['pane send-text w1:p1 fix the worklog entry']
+  journal: ['delivering: fix the worklog entry']
+-- a take of one phrase repeated, by a ptt hold (no reply reaches anybody)
+  wav files in the takes directory: ['1791367884223-97552-3.wav']
+  herdr was asked: ['pane send-text w1:p1 Продолжение следует... ×4', 'notification show Probably not speech --body w1:p1: ...  The take is kept at <scratch>/state/takes/1791367884223-97552-3.wav']
+  journal: ['delivering: Продолжение следует... ×4', 'probably not speech: pane=w1:p1 repeats=4 block_words=2 take=<scratch>/state/takes/1791367884223-97552-3.wav']
+```
+
+(`×4` stands for the four copies of the phrase in the output, which was printed in full.)
+The text was delivered whole in all three cases. The repeated text kept its take and said
+so in the reply, the journal and the toast; the hold, which has no reply, said so in the
+journal and the toast. The ordinary sentence kept nothing and said nothing.
+
+What this run does not show: the sentence on a real silent microphone through a real
+transcriber (the transcriber here is a stand-in, so the claim "a transcriber returns this
+for silence" rests on the measurement recorded earlier in this file); `[delivery] submit`
+(the delivery call is the same one with another verb); Linux and Windows.
+
+The script, invoked as `python3 -I s5_30.py <binary> <label>`:
+
+```python
+import os, subprocess, sys, time, tempfile, glob, json
+
+binary, label = sys.argv[1], sys.argv[2]
+D = tempfile.mkdtemp(prefix="hv30-")
+os.makedirs(f"{D}/config"); os.makedirs(f"{D}/state")
+calls = f"{D}/herdr-calls.log"
+said = f"{D}/said.txt"
+fake = f"{D}/herdr"
+open(fake, "w").write(f'#!/bin/sh\necho "$@" >> "{calls}"\nexit 0\n')
+os.chmod(fake, 0o755)
+open(f"{D}/herdr-config.toml", "w").write("")
+open(f"{D}/config/config.toml", "w").write(
+    '[audio]\nsilence_db = -120\n\n'
+    f'[stt]\nengine = "command"\ncommand = ["sh", "-c", "cat {said}"]\n\n'
+    '[rewrite]\nengine = "off"\n'
+)
+env = {
+    "PATH": "/usr/bin:/bin", "HOME": D,
+    "HERDR_BIN_PATH": fake, "HERDR_CONFIG_PATH": f"{D}/herdr-config.toml",
+    "HERDR_PLUGIN_CONFIG_DIR": f"{D}/config", "HERDR_PLUGIN_STATE_DIR": f"{D}/state",
+}
+ctx = json.dumps({"focused_pane_id": "w1:p1"})
+REPEATED = "Продолжение следует... Продолжение следует... Продолжение следует... Продолжение следует..."
+ORDINARY = "fix the worklog entry"
+
+def press(cmd):
+    e = dict(env)
+    e["HERDR_PLUGIN_CONTEXT_JSON"] = ctx
+    e["HERDR_PLUGIN_ENTRYPOINT_ID"] = cmd
+    t = time.time()
+    r = subprocess.run([binary, cmd], env=e, capture_output=True, text=True, timeout=60)
+    print(f"  {cmd:8} exit {r.returncode} after {time.time()-t:4.1f}s  stdout={r.stdout.strip()!r} stderr={r.stderr.strip()!r}")
+
+def wavs():
+    return sorted(os.path.basename(p) for p in glob.glob(f"{D}/state/takes/*.wav"))
+
+def herdr_calls(*words):
+    if not os.path.exists(calls):
+        return []
+    return [l for l in open(calls).read().splitlines() if any(l.startswith(w) for w in words)]
+
+def journal():
+    return [l for l in open(f"{D}/daemon.err", errors="replace").read().splitlines()
+            if "probably not speech" in l or l.startswith("delivering")]
+
+def show(title):
+    print(f"  wav files in the takes directory: {wavs()}")
+    print(f"  herdr was asked: {herdr_calls('pane send-text', 'notification')}")
+    print(f"  journal: {journal()}")
+
+print(f"== {label}  (binary {binary})")
+err = open(f"{D}/daemon.err", "w")
+daemon = subprocess.Popen([binary, "daemon"], env=env, stdout=subprocess.DEVNULL, stderr=err)
+time.sleep(1.5)
+try:
+    for name, text in (("a take of one phrase repeated, by dictate", REPEATED),
+                       ("a take of ordinary speech, by dictate", ORDINARY)):
+        print(f"-- {name}")
+        open(said, "w").write(text)
+        open(calls, "w").write("")
+        for f in glob.glob(f"{D}/state/takes/*.wav"):
+            os.remove(f)
+        open(f"{D}/daemon.err", "w").close()
+        press("dictate")
+        time.sleep(3)
+        press("dictate")
+        time.sleep(0.5)
+        show(name)
+    print("-- a take of one phrase repeated, by a ptt hold (no reply reaches anybody)")
+    open(said, "w").write(REPEATED)
+    open(calls, "w").write("")
+    for f in glob.glob(f"{D}/state/takes/*.wav"):
+        os.remove(f)
+    open(f"{D}/daemon.err", "w").close()
+    press("ptt")
+    time.sleep(0.5)
+    press("ptt")
+    time.sleep(5)
+    show("ptt")
+finally:
+    daemon.terminate()
+    try:
+        daemon.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        daemon.kill()
+    print(f"-- scratch directory: {D}")
+```

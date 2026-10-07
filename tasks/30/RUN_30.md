@@ -101,3 +101,23 @@ Not run by the tester: swapping the order of the journal write and the toast (no
 The tester reported that two mutations of the keep condition made the suite hang after the failure. With `repetition.is_none()` dropped, I ran the full suite in the foreground: it finished in 5 seconds with one failure and did not hang. The hang was not reproduced.
 
 After the new tests: `cargo test` 804 passed, 1 ignored; clippy, `cargo fmt --check`, the manifest check clean (clippy and the Windows dead-code check are re-run before the pull request).
+
+### S4 verdict
+The code review (round 1) found nothing Critical; every finding is settled above. Mutation testing: 3 survivors out of 47, each killed by a new test. S4 closed on 2026-10-07 before a pull request existed.
+
+### S5 Verify
+- artifact: a section in `docs/evidence.md`, "A transcript that is one phrase repeated, for issue #30"
+- platform: macOS 27.0.1, arm64, this machine
+- run: a daemon from this worktree with its own state, configuration and herdr stand-in, never the owner's session. The baseline `e92f0b2` delivered the repeated text with no warning and deleted the take. The branch delivered it whole, kept the take, and said so in the reply, the journal and a toast; a `ptt` hold said so in the journal and the toast; ordinary text kept nothing and said nothing.
+- not shown, and said in the evidence: a real silent room through a real transcriber, `[delivery] submit`, Linux, Windows.
+
+```yaml
+verdict:
+  stage: S5
+  artifact: docs/evidence.md
+  result: pass
+  date: 2026-10-07
+```
+
+### Open: the owner
+The wording and the single-word threshold (three repeats of one word) are not final: the owner has not answered. Per the orchestrator, the pull request is not opened until the answer arrives; a change touches only the strings and the threshold and their tests, and the mutation test is re-run on those lines alone.
