@@ -975,4 +975,48 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(wavs, 0);
     }
+
+    /// A source whose construction panics, so the recorder thread dies before it
+    /// reads a command.
+    #[test]
+    fn cancel_on_a_recorder_whose_thread_is_gone_finds_nothing_running() {
+        let recorder = Recorder::spawn(
+            || -> Box<dyn Source> { panic!("no device to build") },
+            Audio::default(),
+            takes_dir("cancel-dead-thread"),
+        );
+        // The thread may still be unwinding; either way no take can exist.
+        for _ in 0..3 {
+            assert_eq!(recorder.cancel(), Cancelled::NothingRunning);
+        }
+    }
+
+    /// A source that panics when told to stop: the recorder thread dies after it
+    /// has received the command and before it can reply.
+    struct PanickingStop;
+
+    impl Source for PanickingStop {
+        fn start(&mut self, _device: Option<&str>, sink: Sink) -> Result<Format, String> {
+            sink.push(Event::Samples(tone(0.3, 0.1)));
+            Ok(Format {
+                rate: 48_000,
+                channels: 1,
+            })
+        }
+
+        fn stop(&mut self) {
+            panic!("the device would not stop");
+        }
+    }
+
+    #[test]
+    fn cancel_answers_nothing_running_when_the_thread_dies_before_replying() {
+        let recorder = Recorder::spawn(
+            || Box::new(PanickingStop),
+            Audio::default(),
+            takes_dir("cancel-dies-midway"),
+        );
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        assert_eq!(recorder.cancel(), Cancelled::NothingRunning);
+    }
 }

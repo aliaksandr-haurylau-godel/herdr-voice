@@ -3351,6 +3351,80 @@ mod tests {
         std::fs::remove_file(&take.path).ok();
     }
 
+    /// A source whose `stop` reports that it has been reached and then waits to
+    /// be released, so a test can look at the world while `cancel` is inside the
+    /// recorder.
+    struct StopsWhenReleased {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl crate::capture::Source for StopsWhenReleased {
+        fn start(
+            &mut self,
+            _device: Option<&str>,
+            sink: crate::capture::Sink,
+        ) -> Result<crate::capture::Format, String> {
+            sink.push(crate::capture::Event::Samples(vec![0.0; 4_800]));
+            Ok(crate::capture::Format {
+                rate: 48_000,
+                channels: 1,
+            })
+        }
+
+        fn stop(&mut self) {
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
+        }
+    }
+
+    #[test]
+    fn cancel_keeps_the_hold_guard_while_the_recorder_discards() {
+        let (entered, reached) = std::sync::mpsc::channel();
+        let (let_go, release) = std::sync::mpsc::channel();
+        let recorder = Recorder::spawn(
+            move || Box::new(StopsWhenReleased { entered, release }),
+            crate::config::Audio::default(),
+            takes_dir("cancel-guard-held"),
+        );
+        let runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        answer(&dictate_request(), &recorder, &runtime);
+        std::thread::scope(|scope| {
+            let cancelling = scope.spawn(|| answer(&request("cancel", b""), &recorder, &runtime).0);
+            reached
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the recorder reached the source's stop");
+            assert!(
+                matches!(
+                    runtime.hold.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ),
+                "the hold guard must be held while the recorder discards the take"
+            );
+            let_go.send(()).unwrap();
+            assert_eq!(
+                cancelling.join().expect("cancel finished"),
+                Reply::Ok(CANCELLED_P2.to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn a_discard_leaves_a_working_indicator_for_another_pane_alone() {
+        let recorder = tone_recorder("cancel-discard-working");
+        let runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        answer(&dictate_request(), &recorder, &runtime);
+        let working = Activity::Working {
+            target: "w1:p9".to_string(),
+            tab: None,
+            stage: Stage::Transcribing,
+        };
+        publish(&runtime, working.clone());
+        let (reply, _) = answer(&request("cancel", b""), &recorder, &runtime);
+        assert_eq!(reply, Reply::Ok(CANCELLED_P2.to_string()));
+        assert_eq!(activity_of(&runtime), working);
+    }
+
     #[test]
     fn cancel_waits_for_the_hold_guard() {
         let recorder = tone_recorder("cancel-waits");

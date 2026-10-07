@@ -178,3 +178,15 @@ Reviewer: a fresh general-purpose subagent, over `eae0135..94661c5`. No Critical
 4. Minor — weak tests. `cancel_leaves_no_file_in_the_takes_directory` and `cancel_leaves_no_wav_behind` cannot exercise `discard` removing a file, because no file exists while a take runs; they guard against `cancel_one` writing one. **Kept as they are, and said so.** Added: an assertion that a refused cancel leaves the indicator on `Recording`, and a daemon-level test for the `Opening` state.
 5. Minor — "nothing to cancel" is also the answer while a take is being transcribed. Already decision 4 of `DESIGN_18.md`; not changed.
 6. Minor — comments: none became untrue.
+
+### S4 mutation testing (round 1)
+
+Tester: a fresh general-purpose subagent, in a scratch copy, 41 mutations of the lines the diff adds. 36 were killed. Five survived:
+
+- c2 — `discard(Some(take))` in `cancel_one` replaced with `drop(take)`. **Equivalent today:** the take's file is written only in `stop_one`, so while a take runs there is no file for `discard` to remove. Kept as written; the call is there so a later change that writes the file earlier does not leave one behind. No test can fail on it without a source that creates the file, which the recorder cannot ask for.
+- c5 — the send-failure fallback in `Recorder::cancel` returning `Discarded` instead of `NothingRunning`. **Killed by a new test:** `cancel_on_a_recorder_whose_thread_is_gone_finds_nothing_running`.
+- c6 — the reply-lost fallback. **Killed by a new test:** `cancel_answers_nothing_running_when_the_thread_dies_before_replying`.
+- d3 — the hold guard released before `recorder.cancel()`. **Killed by a new test:** `cancel_keeps_the_hold_guard_while_the_recorder_discards`.
+- d8 — an unconditional `publish(runtime, Activity::Idle)` in the `Discarded` arm. **Killed by a new test:** `a_discard_leaves_a_working_indicator_for_another_pane_alone`.
+
+The four new tests were written, and the suite ran green (25 tests with `cancel` in the name). A re-check that each of c5, c6, d3 and d8 now fails the suite was started in the background and did not finish: the machine's session ended. Before it was re-run, `git diff` on the worktree showed 118 added lines and no removed ones, and none of the mutated fragments; the uncommitted changes are the four new tests, not a mutation. The background command mutated a scratch copy only.
