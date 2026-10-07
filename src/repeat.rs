@@ -96,6 +96,27 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_block_after_the_copies_is_not_flagged() {
+        // Seven words: three copies of "a b" and the start of a fourth. The
+        // whole text is not one block repeated.
+        assert_eq!(one_phrase_repeated("a b a b a b a"), None);
+        assert_eq!(
+            one_phrase_repeated("thank you thank you thank you thank"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_smallest_block_wins_when_two_sizes_fit() {
+        // Twelve words fit blocks of 2, 4 and 6 words. The smallest is two
+        // words six times, not four words three times.
+        assert_eq!(
+            one_phrase_repeated("a b a b a b a b a b a b"),
+            Some(Repetition { times: 6, words: 2 })
+        );
+    }
+
+    #[test]
     fn three_copies_with_another_word_are_not_flagged() {
         for text in [
             "so thank you thank you thank you",

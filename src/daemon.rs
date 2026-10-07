@@ -2128,6 +2128,16 @@ mod tests {
     }
 
     #[test]
+    fn the_journal_line_is_one_line_when_the_take_path_holds_a_newline() {
+        let repetition = crate::repeat::Repetition { times: 4, words: 2 };
+        let line = probably_not_speech_line("w1:p1", &repetition, "a\nb.wav");
+        assert_eq!(
+            line,
+            "probably not speech: pane=w1:p1 repeats=4 block_words=2 take=a b.wav"
+        );
+    }
+
+    #[test]
     fn an_unflagged_take_raises_nothing() {
         let fake = crate::delivery::tests_support::FakeDeliverer::ok();
         let (runtime, take, journal, dir) =

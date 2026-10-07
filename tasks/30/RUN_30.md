@@ -85,3 +85,19 @@ Reviewer: a fresh general-purpose subagent, over `e92f0b2..b4f3467`. No Critical
 6. Minor — a script written without spaces (Chinese, Japanese) is one "word" and is never flagged; the AC say "split into words". **Accepted as a known gap,** stated in the pull request. No test pins it.
 7. Minor — no daemon test drives a hold to show the journal line and the toast reach a person when the reply is dropped. **Covered by hand in S5** (a `ptt` hold through a flagged transcriber).
 8. Minor — with toasts on, a keypress `dictate` shows both the toast and the reply. **Intended** (`DESIGN_30.md`, decision 4).
+
+### S4 mutation testing (round 1)
+
+Tester: a fresh general-purpose subagent, in a scratch copy, every mutation checked with the full `cargo test`. 47 mutations of the lines the diff adds (and one no-op control); 44 were killed, 3 survived. Each survivor was a real gap and is killed by a new test, re-checked by me in the foreground one mutation at a time:
+
+| mutation | test that now fails | result |
+|---|---|---|
+| R4 — `n % m == 0 &&` removed (a block repeated plus a partial copy was flagged) | `repeat::tests::a_partial_block_after_the_copies_is_not_flagged` | killed |
+| R16 — `.rev()` on the block sizes (largest block reported instead of smallest) | `repeat::tests::the_smallest_block_wins_when_two_sizes_fit` | killed |
+| D11 — `path.replace('\n', " ")` removed in `probably_not_speech_line` | `daemon::tests::the_journal_line_is_one_line_when_the_take_path_holds_a_newline` | killed |
+
+Not run by the tester: swapping the order of the journal write and the toast (no test is meant to notice, the design fixes the order only to say what is written first), and running the check on the rewritten text instead of the raw transcript (needs an engine that changes the transcript). Both stay open and are not claimed.
+
+The tester reported that two mutations of the keep condition made the suite hang after the failure. With `repetition.is_none()` dropped, I ran the full suite in the foreground: it finished in 5 seconds with one failure and did not hang. The hang was not reproduced.
+
+After the new tests: `cargo test` 804 passed, 1 ignored; clippy, `cargo fmt --check`, the manifest check clean (clippy and the Windows dead-code check are re-run before the pull request).
