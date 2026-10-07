@@ -138,6 +138,7 @@ pub fn choose(
         }
         Ok(_) => {}
     }
+    let picked;
     let name = match parse_answer(&line, names.len()) {
         Answer::Leave => {
             let _ = writeln!(out, "Nothing was changed.");
@@ -152,22 +153,37 @@ pub fn choose(
             );
             return 1;
         }
-        Answer::Pick(at) => names[at].as_str(),
+        Answer::Pick(at) => {
+            picked = at;
+            names[at].as_str()
+        }
     };
 
     let path = match save(name) {
         Ok(path) => path,
         Err(why) => {
             let _ = writeln!(out, "{why}");
-            let _ = writeln!(
-                out,
-                "Add this under [audio] in your configuration file by hand:"
-            );
-            let _ = writeln!(out, "  input = {}", config_edit::quote(name));
+            if why.needs_hand_edit() {
+                let _ = writeln!(
+                    out,
+                    "Add this under [audio] in your configuration file by hand:"
+                );
+                let _ = writeln!(out, "  input = {}", config_edit::quote(name));
+            }
             return 1;
         }
     };
     let _ = writeln!(out, "[audio] input is now {name:?} in {}.", path.display());
+    // A take selects by name and uses the first input that has it.
+    if let Some(first) = names.iter().position(|n| n == name) {
+        if first + 1 != picked + 1 {
+            let _ = writeln!(
+                out,
+                "Two inputs are called {name:?}: the plugin uses the first of them, input {}.",
+                first + 1
+            );
+        }
+    }
     match tell() {
         Reached::Applied(done) => {
             if done.applied.iter().any(|s| s == "audio") {
@@ -202,9 +218,53 @@ pub fn choose(
     }
 }
 
+/// A line to print before the list when the configuration cannot be taken at its
+/// word: `config::load` returns every default for a file that does not parse or
+/// cannot be read, and the list would then call the input unset while the file may
+/// set one.
+pub fn config_note(source: &crate::config::Source) -> Option<String> {
+    match source {
+        crate::config::Source::Invalid { path, why } => Some(format!(
+            "{} does not parse ({why}): the settings shown are the defaults, and saving a \
+             choice is refused until the file is fixed.\n",
+            path.display()
+        )),
+        crate::config::Source::Defaults(Some(path))
+            if std::fs::read_to_string(path)
+                .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound) =>
+        {
+            Some(format!(
+                "{} cannot be read: the settings shown are the defaults, and saving a \
+                 choice is refused until it can be.\n",
+                path.display()
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// `herdr-voice mic`, and `--choose`. Returns the process's exit code.
 pub fn run(choosing: bool) -> u8 {
-    let names = match crate::capture::cpal_source::input_names() {
+    run_with(choosing, crate::capture::cpal_source::input_names, pause)
+}
+
+/// `run` with the two things a test replaces: how the inputs are listed, and the
+/// wait for Enter. The popup waits on every path, a failure to list the inputs
+/// included, so that its last message is on screen when it closes.
+pub fn run_with(
+    choosing: bool,
+    names: impl FnOnce() -> Result<Vec<String>, String>,
+    pause: impl FnOnce(),
+) -> u8 {
+    let code = run_inner(choosing, names);
+    if choosing {
+        pause();
+    }
+    code
+}
+
+fn run_inner(choosing: bool, names: impl FnOnce() -> Result<Vec<String>, String>) -> u8 {
+    let names = match names() {
         Ok(names) => names,
         Err(why) => {
             eprintln!(
@@ -215,7 +275,11 @@ pub fn run(choosing: bool) -> u8 {
     };
     let vars = crate::config::Vars::from_env();
     let directory = crate::config::directory(&vars);
-    let configured = crate::config::load(directory.as_deref()).config.audio.input;
+    let loaded = crate::config::load(directory.as_deref());
+    let configured = loaded.config.audio.input.clone();
+    if let Some(note) = config_note(&loaded.source) {
+        println!("{note}");
+    }
     if !choosing {
         print!("{}", render(&names, &configured));
         return 0;
@@ -239,20 +303,16 @@ pub fn run(choosing: bool) -> u8 {
     // The lock on standard input is released before `pause` reads from it again: the
     // lock is not re-entrant, and a second one taken on the same thread waits for the
     // first for ever, which in a popup is a pane that never closes.
-    let code = {
-        let stdin = std::io::stdin();
-        let mut input = stdin.lock();
-        choose(
-            &names,
-            &configured,
-            &mut input,
-            &mut out,
-            &mut save,
-            &mut tell,
-        )
-    };
-    pause();
-    code
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    choose(
+        &names,
+        &configured,
+        &mut input,
+        &mut out,
+        &mut save,
+        &mut tell,
+    )
 }
 
 /// Waits for Enter when there is a person at a terminal, so a result printed just
@@ -636,5 +696,81 @@ mod tests {
                 "mic"
             ]
         );
+    }
+
+    #[test]
+    fn a_refusal_does_not_tell_the_person_to_add_the_line_the_editor_just_refused() {
+        let (code, said, _) = run_choose(
+            &["A", "B"],
+            "A",
+            "2\n",
+            Some(WriteError::Refused {
+                path: "config.toml".to_string(),
+                edit: "[audio] input = \"B\"".to_string(),
+                why: "duplicate key".to_string(),
+            }),
+            Reached::NoDaemon,
+        );
+        assert_eq!(code, 1, "{said}");
+        assert!(said.contains("nothing was written"), "{said}");
+        assert!(!said.contains("by hand"), "{said}");
+    }
+
+    #[test]
+    fn choosing_the_second_of_two_inputs_with_one_name_says_the_first_is_used() {
+        let (code, said, saved) = run_choose(
+            &["USB Mic", "Built-in", "USB Mic"],
+            "Built-in",
+            "3\n",
+            None,
+            applied(&["audio"], &[]),
+        );
+        assert_eq!(code, 0, "{said}");
+        assert_eq!(saved, vec!["USB Mic".to_string()]);
+        let after = said
+            .split("[audio] input is now")
+            .nth(1)
+            .expect("the confirmation");
+        assert!(after.contains("input 1"), "{after}");
+        assert!(after.contains("uses the first"), "{after}");
+    }
+
+    #[test]
+    fn a_broken_configuration_is_said_before_the_list_calls_the_input_unset() {
+        let invalid = crate::config::Source::Invalid {
+            path: PathBuf::from("config.toml"),
+            why: "expected a table".to_string(),
+        };
+        let note = config_note(&invalid).expect("a note");
+        assert!(
+            note.contains("config.toml") && note.contains("does not parse"),
+            "{note}"
+        );
+        assert!(note.contains("defaults"), "{note}");
+        assert_eq!(
+            config_note(&crate::config::Source::Defaults(None)),
+            None,
+            "an absent file is a valid state and needs no note"
+        );
+    }
+
+    #[test]
+    fn a_failure_to_list_the_inputs_still_waits_for_enter_so_the_message_can_be_read() {
+        let paused = std::cell::Cell::new(0);
+        let code = run_with(
+            true,
+            || Err("cannot list input devices: denied".to_string()),
+            || paused.set(paused.get() + 1),
+        );
+        assert_eq!(code, 1);
+        assert_eq!(paused.get(), 1, "the popup must wait once before it closes");
+        let paused_plain = std::cell::Cell::new(0);
+        let code = run_with(
+            false,
+            || Err("cannot list input devices: denied".to_string()),
+            || paused_plain.set(paused_plain.get() + 1),
+        );
+        assert_eq!(code, 1);
+        assert_eq!(paused_plain.get(), 0, "plain `mic` is not a popup");
     }
 }

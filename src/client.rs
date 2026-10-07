@@ -22,6 +22,12 @@ pub const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 /// landing squarely on the successful case.
 pub const WORKING_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long a popup waits for the answer to a reload. The daemon answers it after
+/// the order already in the recorder's queue, and opening a Bluetooth headset can
+/// take longer than `REPLY_TIMEOUT`; a late answer would otherwise be reported as a
+/// daemon that did not take the change, and then be applied anyway.
+pub const RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The bound for a command, chosen by its name.
 ///
 /// By name and not by what the command turns out to do: the client picks its bound
@@ -32,6 +38,7 @@ pub const WORKING_TIMEOUT: Duration = Duration::from_secs(120);
 pub fn timeout_for(command: &str) -> Duration {
     match command {
         "dictate" => WORKING_TIMEOUT,
+        "reload" => RELOAD_TIMEOUT,
         _ => REPLY_TIMEOUT,
     }
 }
@@ -327,5 +334,13 @@ mod tests {
                 message: Some(TEXT.to_string()),
             }
         );
+    }
+
+    #[test]
+    fn a_reload_may_wait_behind_a_device_that_is_still_opening() {
+        // The daemon answers it after the order already in the recorder's queue, and
+        // opening a Bluetooth headset can take longer than the short bound.
+        assert!(timeout_for("reload") > REPLY_TIMEOUT);
+        assert!(timeout_for("reload") <= Duration::from_secs(30));
     }
 }

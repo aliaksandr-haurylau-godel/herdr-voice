@@ -26,7 +26,7 @@ impl Binding {
 /// could hold a `&'static Binding`. `decide` returns exactly that.
 ///
 /// The keys are the owner's decision, recorded in `tasks/41/RUN_41.md`. They are
-/// direct `ctrl+...` chords and one prefix chord: herdr's own default
+/// direct `ctrl+...` chords and prefix chords: herdr's own default
 /// configuration says `alt+...` depends on the terminal, and on the machine this
 /// was chosen on `alt+v` did nothing and `alt+g` typed a copyright sign.
 pub static BINDINGS: [Binding; 4] = [
@@ -2649,7 +2649,7 @@ mod tests {
         }
         assert!(
             said.contains("nothing was added"),
-            "three refusals must not close on a line that reads like success: {said}"
+            "four refusals must not close on a line that reads like success: {said}"
         );
     }
 

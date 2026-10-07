@@ -316,7 +316,10 @@ pub fn reload_from(
         }
         // `load` reports an unreadable file the same way as an absent one. Applying
         // the defaults for a file that exists would reset the person's settings.
-        config::Source::Defaults(Some(path)) if path.exists() => {
+        config::Source::Defaults(Some(path))
+            if std::fs::read_to_string(path)
+                .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound) =>
+        {
             return Reply::Error(format!(
                 "cannot read {}; nothing was changed. Check its permissions and try again",
                 path.display()
@@ -5361,5 +5364,20 @@ mod tests {
         );
         assert!(accepted, "the next press is not refused");
         assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_configuration_directory_that_cannot_be_entered_is_not_taken_for_an_absent_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (recorder, _) = recording_recorder();
+        let runtime = fake_runtime("x");
+        runtime.running.lock().unwrap().audio.input = "Kept".to_string();
+        let dir = config_dir("no-entry", Some("[audio]\ninput = \"Other\"\n"));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let reply = reload_from(Some(&dir), &recorder, &runtime);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(reply, Reply::Error(_)), "{reply:?}");
+        assert_eq!(runtime.running.lock().unwrap().audio.input, "Kept");
     }
 }

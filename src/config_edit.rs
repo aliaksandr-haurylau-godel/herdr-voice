@@ -43,7 +43,11 @@ pub fn quote(text: &str) -> String {
 /// that does not parse — which `config::load` then discards whole, losing every
 /// other setting in it. Found by an S4 review.
 fn table_name(line: &str) -> Option<&str> {
-    let line = line.trim_start();
+    // A byte order mark some Windows editors put first is not part of the header.
+    let line = line
+        .trim_start()
+        .trim_start_matches('\u{feff}')
+        .trim_start();
     let mut rest = line.strip_prefix('[')?;
     // Scan to the closing bracket, ignoring one inside a quoted key.
     let mut quoted = false;
@@ -137,8 +141,14 @@ fn set_one(existing: &str, edit: &Edit, eol: &str) -> String {
         out.push(line);
     }
 
+    // A file that did not end with a newline keeps ending without one, unless the
+    // last line is the one that was written.
+    let unchanged_last = out.last().map(String::as_str) == existing.lines().last();
+    let had_no_final_newline = !existing.is_empty() && !existing.ends_with('\n');
     let mut text = out.join(eol);
-    text.push_str(eol);
+    if !(had_no_final_newline && unchanged_last) {
+        text.push_str(eol);
+    }
     text
 }
 
@@ -158,7 +168,11 @@ pub enum WriteError {
     /// already running on defaults and an edit would be blamed for it.
     AlreadyInvalid { path: String, why: String },
     /// The edit would have made the file unloadable.
-    Refused { path: String, why: String },
+    Refused {
+        path: String,
+        edit: String,
+        why: String,
+    },
     /// A step of creating or replacing the file failed.
     Io { path: String, why: String },
 }
@@ -181,12 +195,23 @@ impl std::fmt::Display for WriteError {
                 "{path} does not load as a configuration ({why}), so nothing was written. \
                  Fix the file and try again"
             ),
-            WriteError::Refused { path, why } => write!(
+            WriteError::Refused { path, edit, why } => write!(
                 f,
-                "the edit would have made {path} unloadable ({why}), so nothing was written"
+                "the edit ({edit}) would have made {path} unloadable ({why}), so nothing was \
+                 written. If the key is written in a form this editor does not read, such as \
+                 an inline table or a dotted key, change it in the file yourself"
             ),
             WriteError::Io { path, why } => write!(f, "cannot write {path}: {why}"),
         }
+    }
+}
+
+impl WriteError {
+    /// Whether the file could not be written at all, so the person has to put the
+    /// line in by hand. A refusal is different: the same line, added by hand, would
+    /// make the same file unloadable.
+    pub fn needs_hand_edit(&self) -> bool {
+        matches!(self, WriteError::NoDirectory | WriteError::Io { .. })
     }
 }
 
@@ -235,8 +260,16 @@ pub fn write_keys(directory: Option<&Path>, edits: &[Edit]) -> Result<PathBuf, W
 
     let edited = set_keys(&original, edits);
     if let Err(e) = toml::from_str::<Config>(&edited) {
+        // The value is shown: the edits this writer is given are never secrets (a
+        // key that holds one must not be passed here without redacting it).
+        let edit = edits
+            .iter()
+            .map(|e| format!("[{}] {} = {}", e.table, e.key, e.value))
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(WriteError::Refused {
             path: shown,
+            edit,
             why: e.message().to_string(),
         });
     }
@@ -244,7 +277,7 @@ pub fn write_keys(directory: Option<&Path>, edits: &[Edit]) -> Result<PathBuf, W
     let candidate = target.with_extension("toml.herdr-voice-candidate");
     write_candidate(&candidate, &edited).map_err(|e| {
         let _ = std::fs::remove_file(&candidate);
-        io(&candidate, e)
+        io(&path, e)
     })?;
     // The target exists when it was read: carry its mode onto the candidate, so
     // the rename does not change who may read it.
@@ -743,5 +776,121 @@ toasts = false
         assert!(std::fs::read_to_string(&real)
             .unwrap()
             .contains("input = \"New\""));
+    }
+
+    #[test]
+    fn a_refusal_names_the_key_and_the_value_it_would_have_written() {
+        let dir = scratch("names-the-edit");
+        std::fs::write(dir.join("config.toml"), "[ui]\nblink_ms = 250\n").unwrap();
+        let wrong = Edit {
+            table: "ui",
+            key: "blink_ms",
+            value: quote("fast"),
+        };
+        let said = write_keys(Some(&dir), &[wrong]).unwrap_err().to_string();
+        assert!(said.contains("[ui] blink_ms = \"fast\""), "{said}");
+    }
+
+    #[test]
+    fn only_a_failure_to_write_asks_for_a_hand_edit() {
+        let path = || "config.toml".to_string();
+        let why = || "x".to_string();
+        assert!(WriteError::NoDirectory.needs_hand_edit());
+        assert!(WriteError::Io {
+            path: path(),
+            why: why()
+        }
+        .needs_hand_edit());
+        assert!(!WriteError::Refused {
+            path: path(),
+            edit: why(),
+            why: why()
+        }
+        .needs_hand_edit());
+        assert!(!WriteError::AlreadyInvalid {
+            path: path(),
+            why: why()
+        }
+        .needs_hand_edit());
+        assert!(!WriteError::Unreadable {
+            path: path(),
+            why: why()
+        }
+        .needs_hand_edit());
+    }
+
+    #[test]
+    fn a_byte_order_mark_before_the_first_table_does_not_hide_it() {
+        let dir = scratch("bom");
+        let before = "\u{feff}[audio]\r\ninput = \"Old\"\r\n";
+        std::fs::write(dir.join("config.toml"), before).unwrap();
+        write_keys(Some(&dir), &[input("New")]).expect("written");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            before.replace("input = \"Old\"", "input = \"New\"")
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_final_newline_does_not_gain_one_on_a_line_that_was_not_edited() {
+        let before = "[audio]\ninput = \"Old\"\n[ui]\ntoasts = false";
+        let out = set_keys(
+            before,
+            &[Edit {
+                table: "audio",
+                key: "input",
+                value: quote("New"),
+            }],
+        );
+        assert_eq!(out, "[audio]\ninput = \"New\"\n[ui]\ntoasts = false");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_did_not_exist_is_created_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("new-file-mode");
+        write_keys(Some(&dir), &[input("New")]).expect("created");
+        let mode = std::fs::metadata(dir.join("config.toml"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the file may come to hold a token");
+    }
+
+    #[test]
+    fn a_candidate_left_by_a_run_that_died_does_not_stop_the_next_one() {
+        let dir = scratch("stale-candidate");
+        std::fs::write(dir.join("config.toml"), ORIGINAL).unwrap();
+        std::fs::write(
+            dir.join("config.toml.herdr-voice-candidate"),
+            "left behind, and longer than the text that replaces it ".repeat(20),
+        )
+        .unwrap();
+        write_keys(Some(&dir), &[input("New")]).expect("written");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            ORIGINAL.replace("input = \"Old\"", "input = \"New\"")
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no candidate left"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_while_writing_names_the_configuration_not_the_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("names-the-config");
+        std::fs::write(dir.join("config.toml"), ORIGINAL).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = write_keys(Some(&dir), &[input("New")]);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let said = result.unwrap_err().to_string();
+        assert!(said.contains("config.toml"), "{said}");
+        assert!(!said.contains("candidate"), "{said}");
     }
 }
