@@ -913,4 +913,26 @@ mod tests {
         );
         std::fs::remove_file(&take.path).ok();
     }
+
+    #[test]
+    fn a_recorder_whose_thread_is_gone_says_it_could_not_take_the_new_values() {
+        let recorder = Recorder::spawn(
+            || -> Box<dyn Source> { panic!("the source could not be made") },
+            Audio::default(),
+            takes_dir("gone"),
+        );
+        // The thread ends in the panic above; wait for its end to be seen.
+        let mut taken = true;
+        for _ in 0..200 {
+            taken = recorder.reconfigure(Audio::default());
+            if !taken {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            !taken,
+            "a recorder whose thread is gone must not claim it took the values"
+        );
+    }
 }

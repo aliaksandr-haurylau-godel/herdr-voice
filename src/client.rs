@@ -343,4 +343,21 @@ mod tests {
         assert!(timeout_for("reload") > REPLY_TIMEOUT);
         assert!(timeout_for("reload") <= Duration::from_secs(30));
     }
+
+    #[test]
+    fn a_daemon_that_closes_without_answering_is_a_protocol_failure_not_a_timeout() {
+        let address = crate::transport::tests_support::probe_address("client-closes");
+        let listener = crate::transport::listen(&address).expect("listen");
+        let server = std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(listener.accept().expect("accept"));
+            let _ = Request::read_from(&mut reader);
+            // The stream is dropped here, with nothing written.
+        });
+        let result = exchange(&address, "reload", None, Vec::new());
+        server.join().unwrap();
+        assert!(
+            matches!(result, Err(ClientError::Protocol(_))),
+            "{result:?}"
+        );
+    }
 }

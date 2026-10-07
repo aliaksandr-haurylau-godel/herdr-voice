@@ -2,13 +2,14 @@
 //! that opens it. See `tasks/103/DESIGN_103.md`, sections 2.2 and 2.5.
 
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::client::{self, ClientError};
 use crate::config_edit::{self, Edit, WriteError};
 use crate::proto::Reply;
 use crate::reload;
+use crate::transport::Address;
 
 /// The bound on asking herdr to open the popup, the same as every other call to
 /// herdr (`docs/decisions.md`).
@@ -218,6 +219,44 @@ pub fn choose(
     }
 }
 
+/// Writes `[audio] input = "<name>"` into the configuration in `directory`.
+pub fn save_input(directory: Option<&Path>, name: &str) -> Result<PathBuf, WriteError> {
+    config_edit::write_keys(
+        directory,
+        &[Edit {
+            table: "audio",
+            key: "input",
+            value: config_edit::quote(name),
+        }],
+    )
+}
+
+/// Asks the daemon at `address` to read the configuration again.
+pub fn tell_daemon(address: &Address) -> Reached {
+    reached(client::exchange(address, "reload", None, Vec::new()))
+}
+
+/// What `herdr-voice mic` was asked to do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// `--open`: ask herdr to open the popup.
+    Open,
+    /// `--choose`: be the popup.
+    Choose,
+    /// Neither: print the list.
+    List,
+}
+
+pub fn mode(args: &[String]) -> Mode {
+    if args.iter().any(|a| a == "--open") {
+        Mode::Open
+    } else if args.iter().any(|a| a == "--choose") {
+        Mode::Choose
+    } else {
+        Mode::List
+    }
+}
+
 /// A line to print before the list when the configuration cannot be taken at its
 /// word: `config::load` returns every default for a file that does not parse or
 /// cannot be read, and the list would then call the input unset while the file may
@@ -286,18 +325,9 @@ fn run_inner(choosing: bool, names: impl FnOnce() -> Result<Vec<String>, String>
     }
 
     let mut out = std::io::stdout();
-    let mut save = |name: &str| {
-        config_edit::write_keys(
-            directory.as_deref(),
-            &[Edit {
-                table: "audio",
-                key: "input",
-                value: config_edit::quote(name),
-            }],
-        )
-    };
+    let mut save = |name: &str| save_input(directory.as_deref(), name);
     let mut tell = || match crate::transport::address(&crate::transport::Vars::from_env()) {
-        Ok(address) => reached(client::exchange(&address, "reload", None, Vec::new())),
+        Ok(address) => tell_daemon(&address),
         Err(e) => Reached::Failed(e.to_string()),
     };
     // The lock on standard input is released before `pause` reads from it again: the
@@ -350,31 +380,36 @@ pub fn open() -> u8 {
     let herdr = crate::delivery::herdr_binary();
     let plugin = std::env::var("HERDR_PLUGIN_ID")
         .unwrap_or_else(|_| crate::transport::PLUGIN_ID.to_string());
-    let argv = open_command(&herdr, &plugin);
+    match open_with(&herdr, &plugin, OPEN_BOUND) {
+        Ok(()) => 0,
+        Err(why) => {
+            eprintln!("{why}");
+            1
+        }
+    }
+}
+
+/// Asks `herdr` to open the pane, waiting at most `bound`. The `Err` is the
+/// message for the person.
+pub fn open_with(herdr: &str, plugin: &str, bound: Duration) -> Result<(), String> {
+    let argv = open_command(herdr, plugin);
     let mut command = std::process::Command::new(&argv[0]);
     command.args(&argv[1..]);
-    match crate::outward::run(&mut command, OPEN_BOUND) {
-        Ok(output) if output.status.success() => 0,
-        Ok(output) => {
-            eprintln!(
-                "herdr could not open the microphone popup: {}. Check \
-                 `herdr plugin log list --plugin herdr-voice`",
-                crate::outward::shorten(String::from_utf8_lossy(&output.stderr).trim(), 300)
-            );
-            1
-        }
-        Err(crate::outward::RunError::TimedOut) => {
-            eprintln!(
-                "herdr did not answer within {} seconds when asked to open the popup. Check \
-                 that herdr is running, then try again",
-                OPEN_BOUND.as_secs()
-            );
-            1
-        }
-        Err(crate::outward::RunError::Start(e)) => {
-            eprintln!("cannot run {herdr:?}: {e}. Check that herdr is installed and on the PATH");
-            1
-        }
+    match crate::outward::run(&mut command, bound) {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(format!(
+            "herdr could not open the microphone popup: {}. Check \
+             `herdr plugin log list --plugin herdr-voice`",
+            crate::outward::shorten(String::from_utf8_lossy(&output.stderr).trim(), 300)
+        )),
+        Err(crate::outward::RunError::TimedOut) => Err(format!(
+            "herdr did not answer within {} seconds when asked to open the popup. Check \
+             that herdr is running, then try again",
+            bound.as_secs()
+        )),
+        Err(crate::outward::RunError::Start(e)) => Err(format!(
+            "cannot run {herdr:?}: {e}. Check that herdr is installed and on the PATH"
+        )),
     }
 }
 
@@ -772,5 +807,192 @@ mod tests {
         );
         assert_eq!(code, 1);
         assert_eq!(paused_plain.get(), 0, "plain `mic` is not a popup");
+    }
+
+    #[test]
+    fn a_timeout_and_a_transport_failure_are_told_in_the_clients_words() {
+        let Reached::Failed(said) = reached(Err(ClientError::Timeout(
+            std::time::Duration::from_secs(10),
+        ))) else {
+            panic!("a timeout is a failure");
+        };
+        assert!(said.contains("did not answer within 10 seconds"), "{said}");
+        assert_eq!(
+            reached(Err(ClientError::Transport("x".to_string()))),
+            Reached::Failed("x".to_string())
+        );
+    }
+
+    #[test]
+    fn an_empty_name_is_never_marked_as_the_configured_one() {
+        let text = render(&names(&[""]), "");
+        assert!(!text.contains("(current)"), "{text}");
+    }
+
+    #[test]
+    fn the_question_is_asked_after_the_list() {
+        let (_, said, _) = run_choose(&["A", "B"], "A", "\n", None, Reached::NoDaemon);
+        assert!(said.contains("Type the number of the input"), "{said}");
+        assert!(
+            said.find("2. B").unwrap() < said.find("Type the number").unwrap(),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn several_sections_that_need_a_restart_are_listed_with_commas() {
+        let (_, said, _) = run_choose(&["A", "B"], "A", "2\n", None, applied(&[], &["stt", "ui"]));
+        assert!(
+            said.contains("restart of herdr to apply: stt, ui."),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn the_confirmation_names_the_file_it_wrote() {
+        let list = names(&["A", "B"]);
+        let mut input = Cursor::new(b"2\n".to_vec());
+        let mut out: Vec<u8> = Vec::new();
+        let mut save = |_: &str| Ok(PathBuf::from("/some/dir/config.toml"));
+        let mut tell = || Reached::NoDaemon;
+        choose(&list, "A", &mut input, &mut out, &mut save, &mut tell);
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("in /some/dir/config.toml."), "{said}");
+    }
+
+    #[test]
+    fn the_mode_follows_the_flags() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        assert_eq!(mode(&args(&["mic", "--open"])), Mode::Open);
+        assert_eq!(mode(&args(&["mic", "--choose"])), Mode::Choose);
+        assert_eq!(mode(&args(&["mic"])), Mode::List);
+        assert_eq!(mode(&args(&["mic", "--open", "--choose"])), Mode::Open);
+    }
+
+    #[test]
+    fn plain_mic_prints_the_list_and_does_not_wait_for_enter() {
+        let code = run_with(
+            false,
+            || Ok(Vec::new()),
+            || panic!("plain mic is not a popup"),
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn saving_writes_the_audio_input_and_nothing_else_into_the_directory_it_is_given() {
+        let dir = std::env::temp_dir().join(format!("herdr-voice-mic-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = save_input(Some(&dir), "Headset").expect("written");
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "[audio]\ninput = \"Headset\"\n"
+        );
+    }
+
+    #[test]
+    fn telling_the_daemon_sends_a_reload_and_reads_the_answer() {
+        let address = crate::transport::tests_support::probe_address("mic-tell");
+        let listener = crate::transport::listen(&address).expect("listen");
+        let server = std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(listener.accept().expect("accept"));
+            let request = crate::proto::Request::read_from(&mut reader).expect("read");
+            Reply::Ok("applied: audio".to_string())
+                .write_to(reader.get_mut())
+                .expect("write");
+            request
+        });
+        assert_eq!(tell_daemon(&address), applied(&["audio"], &[]));
+        assert_eq!(server.join().unwrap().command, "reload");
+    }
+
+    #[cfg(unix)]
+    mod opening {
+        use super::super::*;
+
+        fn script(tag: &str, body: &str) -> String {
+            let dir =
+                std::env::temp_dir().join(format!("herdr-voice-open-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("herdr");
+            crate::script_fixture::write_executable(&path, body);
+            path.display().to_string()
+        }
+
+        #[test]
+        fn herdr_is_asked_to_open_the_mic_pane_of_this_plugin() {
+            let record = std::env::temp_dir().join(format!(
+                "herdr-voice-open-argv-record-{}",
+                std::process::id()
+            ));
+            let herdr = script(
+                "args",
+                &format!("#!/bin/sh\necho \"$@\" > {}\n", record.display()),
+            );
+            assert_eq!(
+                open_with(&herdr, "herdr-voice", Duration::from_secs(10)),
+                Ok(())
+            );
+            assert_eq!(
+                std::fs::read_to_string(&record).unwrap().trim(),
+                "plugin pane open --plugin herdr-voice --entrypoint mic"
+            );
+        }
+
+        #[test]
+        fn a_refusal_from_herdr_is_reported_with_what_it_said_and_where_to_look() {
+            let herdr = script("refuse", "#!/bin/sh\necho boom >&2\nexit 1\n");
+            let said = open_with(&herdr, "herdr-voice", Duration::from_secs(10)).unwrap_err();
+            assert!(said.contains("boom"), "{said}");
+            assert!(
+                said.contains("herdr plugin log list --plugin herdr-voice"),
+                "{said}"
+            );
+        }
+
+        #[test]
+        fn what_herdr_said_is_cut_to_a_length_a_person_can_read() {
+            let herdr = script("long", "#!/bin/sh\nyes x | head -c 5000 >&2\nexit 1\n");
+            let said = open_with(&herdr, "herdr-voice", Duration::from_secs(10)).unwrap_err();
+            assert!(said.len() < 600, "{} bytes", said.len());
+        }
+
+        #[test]
+        fn a_herdr_that_does_not_answer_is_given_up_on_and_the_bound_is_named() {
+            let herdr = script("slow", "#!/bin/sh\nsleep 5\n");
+            let said = open_with(&herdr, "herdr-voice", Duration::from_secs(1)).unwrap_err();
+            assert!(said.contains("did not answer within 1 seconds"), "{said}");
+        }
+
+        #[test]
+        fn a_herdr_that_is_not_there_says_how_to_find_it() {
+            let said = open_with(
+                "/definitely/not/a/real/herdr",
+                "herdr-voice",
+                Duration::from_secs(1),
+            )
+            .unwrap_err();
+            assert!(said.contains("cannot run"), "{said}");
+            assert!(said.contains("PATH"), "{said}");
+        }
+
+        #[test]
+        fn an_unreadable_configuration_is_noted_and_an_absent_one_is_not() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("herdr-voice-note-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("config.toml");
+            std::fs::write(&file, "[audio]\n").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let note = config_note(&crate::config::Source::Defaults(Some(file.clone())));
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(note.expect("a note").contains("cannot be read"));
+            assert_eq!(
+                config_note(&crate::config::Source::Defaults(Some(
+                    dir.join("absent.toml")
+                ))),
+                None
+            );
+        }
     }
 }

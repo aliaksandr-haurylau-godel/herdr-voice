@@ -5380,4 +5380,51 @@ mod tests {
         assert!(matches!(reply, Reply::Error(_)), "{reply:?}");
         assert_eq!(runtime.running.lock().unwrap().audio.input, "Kept");
     }
+
+    #[test]
+    fn each_section_that_differs_alone_is_the_one_named() {
+        let running = crate::config::Config::default();
+        type Change = fn(&mut crate::config::Config);
+        let cases: [(&str, Change); 7] = [
+            ("stt", |c| c.stt.language = "ru".to_string()),
+            ("rewrite", |c| c.rewrite.agent = "other".to_string()),
+            ("ui", |c| c.ui.toasts = !c.ui.toasts),
+            ("delivery", |c| c.delivery.submit = !c.delivery.submit),
+            ("context", |c| c.context.file_names += 1),
+            ("ptt", |c| c.ptt.release_ms += 1),
+            ("record", |c| c.record.transcripts = !c.record.transcripts),
+        ];
+        for (name, change) in cases {
+            let mut loaded = running.clone();
+            change(&mut loaded);
+            let plan = plan_reload(&running, &loaded);
+            assert_eq!(plan.audio, None, "{name}");
+            assert_eq!(plan.restart, vec![name], "only {name} differs");
+        }
+    }
+
+    #[test]
+    fn a_recorder_that_is_gone_is_an_error_and_the_running_configuration_is_unchanged() {
+        let recorder = Recorder::spawn(
+            || -> Box<dyn crate::capture::Source> { panic!("the source could not be made") },
+            crate::config::Audio::default(),
+            std::env::temp_dir().join(format!("daemon-gone-takes-{}", std::process::id())),
+        );
+        let runtime = fake_runtime("x");
+        let dir = config_dir("gone", Some("[audio]\ninput = \"New\"\n"));
+        let mut reply = Reply::Ok(String::new());
+        for _ in 0..200 {
+            reply = reload_from(Some(&dir), &recorder, &runtime);
+            if matches!(reply, Reply::Error(_)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let Reply::Error(said) = reply else {
+            panic!("a recorder that is gone must be an error");
+        };
+        assert!(said.contains("recorder thread is gone"), "{said}");
+        assert!(said.contains("Restart herdr"), "{said}");
+        assert_eq!(runtime.running.lock().unwrap().audio.input, "");
+    }
 }

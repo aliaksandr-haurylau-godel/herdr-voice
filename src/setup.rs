@@ -2651,6 +2651,10 @@ mod tests {
             said.contains("nothing was added"),
             "four refusals must not close on a line that reads like success: {said}"
         );
+        assert!(
+            said.contains("4 of the 4 bindings"),
+            "the count comes from the list: {said}"
+        );
     }
 
     const SAMPLE: &str = r#"
@@ -2772,5 +2776,15 @@ description = "ours, already here"
                 binding.action
             );
         }
+    }
+
+    #[test]
+    fn the_snippet_for_the_microphone_carries_its_action_and_description() {
+        let rendered = render(&[BINDINGS.last().unwrap()]);
+        assert!(rendered.contains("herdr-voice.mic"), "{rendered}");
+        assert!(
+            rendered.contains("description = \"dictation: choose a microphone\""),
+            "{rendered}"
+        );
     }
 }

@@ -188,13 +188,11 @@ fn main() -> ExitCode {
             ExitCode::from(chooser::run(choosing))
         }
         Command::Setup => ExitCode::from(setup::main()),
-        Command::Mic => {
-            if args.iter().any(|a| a == "--open") {
-                ExitCode::from(mic::open())
-            } else {
-                ExitCode::from(mic::run(args.iter().any(|a| a == "--choose")))
-            }
-        }
+        Command::Mic => match mic::mode(&args) {
+            mic::Mode::Open => ExitCode::from(mic::open()),
+            mic::Mode::Choose => ExitCode::from(mic::run(true)),
+            mic::Mode::List => ExitCode::from(mic::run(false)),
+        },
         other @ Command::Status => {
             eprintln!("{}: not implemented yet", other.name());
             ExitCode::from(NOT_IMPLEMENTED)

@@ -893,4 +893,72 @@ toasts = false
         assert!(said.contains("config.toml"), "{said}");
         assert!(!said.contains("candidate"), "{said}");
     }
+
+    #[test]
+    fn a_control_character_is_escaped_not_written_raw() {
+        let quoted = quote("a\u{1f}b");
+        assert_eq!(quoted, "\"a\\u001Fb\"");
+        let parsed: toml::Value = toml::from_str(&format!("k = {quoted}\n")).unwrap();
+        assert_eq!(parsed["k"].as_str(), Some("a\u{1f}b"));
+    }
+
+    #[test]
+    fn a_closing_bracket_inside_a_quoted_key_does_not_end_the_header() {
+        assert_eq!(table_name("[\"a]b\"]"), Some("\"a]b\""));
+        assert_eq!(table_name("[\"a]b\"] # note"), Some("\"a]b\""));
+    }
+
+    #[test]
+    fn a_key_after_the_written_one_in_the_same_table_is_left_alone() {
+        // The second `model` line is inside a multi-line string, and only the first
+        // `model` key is the one that changes.
+        let before = "[stt]\nmodel = \"tiny\"\nprompt = \"\"\"\nmodel = keep\n\"\"\"\n";
+        let out = model(before, "small");
+        assert!(out.contains("model = \"small\""), "{out}");
+        assert!(out.contains("\nmodel = keep\n"), "{out}");
+        assert_eq!(out.matches("model = ").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn a_key_that_only_begins_with_the_name_is_not_the_key() {
+        let out = set_keys(
+            "[audio]\ninput_gain = 2\n",
+            &[Edit {
+                table: "audio",
+                key: "input",
+                value: quote("X"),
+            }],
+        );
+        assert!(out.contains("input_gain = 2"), "{out}");
+        assert!(out.contains("input = \"X\""), "{out}");
+    }
+
+    #[test]
+    fn a_table_added_at_the_end_is_set_off_by_exactly_one_blank_line() {
+        let expected = "[audio]\ninput = \"\"\n\n[stt]\nmodel = \"tiny\"\n";
+        assert_eq!(model("[audio]\ninput = \"\"\n", "tiny"), expected);
+        assert_eq!(
+            model("[audio]\ninput = \"\"\n\n", "tiny"),
+            "[audio]\ninput = \"\"\n\n[stt]\nmodel = \"tiny\"\n"
+        );
+    }
+
+    #[test]
+    fn a_refusal_over_two_edits_names_both_in_order() {
+        let dir = scratch("names-both");
+        std::fs::write(dir.join("config.toml"), ORIGINAL).unwrap();
+        let edits = [
+            input("New"),
+            Edit {
+                table: "ui",
+                key: "blink_ms",
+                value: quote("fast"),
+            },
+        ];
+        let said = write_keys(Some(&dir), &edits).unwrap_err().to_string();
+        assert!(
+            said.contains("[audio] input = \"New\", [ui] blink_ms = \"fast\""),
+            "{said}"
+        );
+    }
 }
