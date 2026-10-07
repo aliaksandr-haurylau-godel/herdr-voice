@@ -72,3 +72,16 @@ Reviewer note, recorded as returned: every symbol and signature the plan relies 
 - The warning wording was sent to the orchestrator before S2 closed; no change had arrived when S4 started. The strings live in `repetition_sentence` and `probably_not_speech_line` and in the tests that name them, so a change is a few lines.
 
 Implementation order: the tests of tasks 1 and 2 were written first and failed to compile for want of `one_phrase_repeated` and `repetition_sentence`; the code was written after. Baseline `cargo test` was not run separately on `e92f0b2` for this branch; after the change: 800 passed, 1 ignored (11 new tests in `src/repeat.rs`, 10 new in `src/daemon.rs`). `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `scripts/check_manifest.py` and the Windows dead-code check on a scratch copy are clean.
+
+### S4 code review (round 1)
+
+Reviewer: a fresh general-purpose subagent, over `e92f0b2..b4f3467`. No Critical findings. Verdict: ready to open a pull request, with fixes. Findings and how each was settled:
+
+1. Important — "It was delivered; check it before sending" is wrong when `[delivery] submit` is on and the pane has an agent: `delivery::deliver` then submits, so the text has already been sent. **Fixed.** The sentence now reads "It was delivered; check what reached the pane." This changes the wording sent to the orchestrator on 2026-10-07 and was re-sent. `DESIGN_30.md` still carries the old words; it is a gated artifact and is not edited.
+2. Important — `docs/design.md` said a delivered take keeps neither its recording nor its text unless `[record] transcripts` is on, and that with it off "a take leaves nothing behind". **Fixed:** section 4 "Delivery" and section 7 now name the one exception, a flagged take.
+3. Minor — the kept take is still removed by `record::bound` after about 50 further takes; the message says "kept" without saying so. **Accepted;** the same holds for every kept take today, and `DESIGN_30.md` states it.
+4. Minor — the pane name in the journal line and the toast was not collapsed to one line. **Fixed,** with a test (`a_pane_name_with_a_newline_is_one_line_in_the_journal_and_the_toast`). The reply's `delivered to {target}` was already uncollapsed before this change and is left as it was.
+5. Minor — when `[rewrite]` is on and collapses the repetition, the warning is about the raw transcript while the delivered text differs. **Accepted;** the `delivering:` line before it shows what was delivered.
+6. Minor — a script written without spaces (Chinese, Japanese) is one "word" and is never flagged; the AC say "split into words". **Accepted as a known gap,** stated in the pull request. No test pins it.
+7. Minor — no daemon test drives a hold to show the journal line and the toast reach a person when the reply is dropped. **Covered by hand in S5** (a `ptt` hold through a flagged transcriber).
+8. Minor — with toasts on, a keypress `dictate` shows both the toast and the reply. **Intended** (`DESIGN_30.md`, decision 4).

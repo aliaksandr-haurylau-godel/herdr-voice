@@ -1007,7 +1007,7 @@ fn transcribe_take(
                 toast(
                     runtime,
                     "Probably not speech",
-                    &format!("{}: {sentence}", take.target),
+                    &format!("{}: {sentence}", take.target.replace('\n', " ")),
                 );
                 sentence
             });
@@ -1138,7 +1138,7 @@ pub fn delivering_line(text: &str) -> String {
 fn repetition_sentence(times: usize, path: &str) -> String {
     format!(
         "the text is one phrase repeated {times} times, the way a transcriber fills \
-         silence. It was delivered; check it before sending. The take is kept at {}",
+         silence. It was delivered; check what reached the pane. The take is kept at {}",
         path.replace('\n', " ")
     )
 }
@@ -1151,7 +1151,8 @@ fn probably_not_speech_line(
     path: &str,
 ) -> String {
     format!(
-        "probably not speech: pane={target} repeats={} block_words={} take={}",
+        "probably not speech: pane={} repeats={} block_words={} take={}",
+        target.replace('\n', " "),
         repetition.times,
         repetition.words,
         path.replace('\n', " ")
@@ -1944,7 +1945,7 @@ mod tests {
                             Продолжение следует... Продолжение следует...";
 
     const FLAGGED_SENTENCE_TAIL: &str = "the text is one phrase repeated 4 times, the way a \
-        transcriber fills silence. It was delivered; check it before sending. The take is kept at";
+        transcriber fills silence. It was delivered; check what reached the pane. The take is kept at";
 
     /// A runtime that recognises `transcript`, with the given deliverer, a journal
     /// the test can read back, `[ui] toasts` as given, no records, and a takes
@@ -2101,6 +2102,28 @@ mod tests {
             "{:?}",
             journalled(&journal)
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_pane_name_with_a_newline_is_one_line_in_the_journal_and_the_toast() {
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let (runtime, mut take, journal, dir) =
+            runtime_flagging(REPEATED, "flag-newline", true, fake.clone());
+        take.target = "w\nJ".to_string();
+        transcribe(&runtime, &take, "");
+        let lines = journalled(&journal);
+        let line = lines
+            .iter()
+            .find(|line| line.starts_with("probably not speech:"))
+            .expect("the warning line");
+        assert!(line.contains("pane=w J "), "{line:?}");
+        assert!(!line.contains('\n'), "{line:?}");
+        let Some(crate::delivery::tests_support::Call::Notify(_, body)) = fake.calls().pop() else {
+            panic!("expected a toast, got {:?}", fake.calls());
+        };
+        assert!(body.starts_with("w J: "), "{body:?}");
+        assert!(!body.contains('\n'), "{body:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
