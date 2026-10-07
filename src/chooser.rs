@@ -2,9 +2,8 @@
 //!
 //! Two entry points because two questions are asked: `herdr-voice model` says
 //! what exists, and `--choose` spends the gigabytes. The configuration edit is
-//! line-oriented so comments and every other key survive — the `toml` crate in
-//! the tree parses and does not preserve formatting, and `toml_edit` is a new
-//! dependency for one line of text. See `tasks/15/DESIGN_15.md`, section 5.
+//! `config_edit`'s: it changes one key and leaves everything else in the file.
+//! See `tasks/15/DESIGN_15.md`, section 5.
 
 use std::io::Write;
 use std::path::Path;
@@ -93,130 +92,11 @@ impl fetch::Progress for Line {
     }
 }
 
-/// The table a line opens, if it opens one: `[stt] # speech` is the `[stt]`
-/// table, and TOML says so.
-///
-/// A naive `starts_with('[') && ends_with(']')` misses exactly that line, and
-/// missing it made the editor append a second `[stt]` table and produce a file
-/// that does not parse — which `config::load` then discards whole, losing every
-/// other setting in it. Found by an S4 review.
-fn table_name(line: &str) -> Option<&str> {
-    let line = line.trim_start();
-    let mut rest = line.strip_prefix('[')?;
-    // Scan to the closing bracket, ignoring one inside a quoted key.
-    let mut quoted = false;
-    let mut end = None;
-    for (at, c) in rest.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            ']' if !quoted => {
-                end = Some(at);
-                break;
-            }
-            _ => {}
-        }
-    }
-    let end = end?;
-    let name = &rest[..end];
-    rest = &rest[end + 1..];
-    // Only whitespace or a comment may follow the header.
-    let tail = rest.trim_start();
-    if tail.is_empty() || tail.starts_with('#') {
-        Some(name.trim())
-    } else {
-        None
-    }
-}
-
-/// `[stt] model = "<identifier>"`, put into a configuration file's text without
-/// disturbing anything else in it.
-fn set_model_key(existing: &str, identifier: &str) -> String {
-    let line = format!("model = \"{identifier}\"");
-    let mut out: Vec<String> = Vec::new();
-    let mut in_stt = false;
-    let mut wrote = false;
-    let mut saw_stt = false;
-
-    for text in existing.lines() {
-        let trimmed = text.trim();
-        if let Some(name) = table_name(text) {
-            // Leaving [stt] without having found a model key: add one at its end.
-            if in_stt && !wrote {
-                out.push(line.clone());
-                wrote = true;
-            }
-            in_stt = name == "stt";
-            saw_stt |= in_stt;
-            out.push(text.to_string());
-            continue;
-        }
-        // Only a `model` key inside [stt]. [rewrite] has one too, and editing
-        // that one would silently repoint the rewrite engine.
-        if in_stt && !wrote {
-            if let Some(rest) = trimmed.strip_prefix("model") {
-                if rest.trim_start().starts_with('=') {
-                    out.push(line.clone());
-                    wrote = true;
-                    continue;
-                }
-            }
-        }
-        out.push(text.to_string());
-    }
-
-    if in_stt && !wrote {
-        out.push(line.clone());
-        wrote = true;
-    }
-    if !saw_stt {
-        if !out.is_empty() && !out.last().is_some_and(|l| l.trim().is_empty()) {
-            out.push(String::new());
-        }
-        out.push("[stt]".to_string());
-        out.push(line);
-    } else if !wrote {
-        out.push(line);
-    }
-
-    let mut text = out.join("\n");
-    text.push('\n');
-    text
-}
-
-/// Read the configuration file, put `[stt] model` in it, write it back. Returns
-/// the file written, for the message.
-fn write_model_key(
-    vars: &crate::config::Vars,
-    identifier: &str,
-) -> Result<std::path::PathBuf, String> {
-    let dir = crate::config::directory(vars)
-        .ok_or_else(|| "there is no configuration directory to write to".to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(crate::config::FILE_NAME);
-    // An absent configuration file is a valid state, so this is a create, not a
-    // failure (`CLAUDE.md`, "Rules for the code").
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let edited = set_model_key(&existing, identifier);
-    // Never write a file that does not parse. `config::load` treats an
-    // unparsable file as absent and falls back to every default, so a bad edit
-    // here would silently discard every other setting the person has — the
-    // "silent failure" `CLAUDE.md` weighs the same as a wrong transcript. The
-    // caller prints the one line to add by hand when this refuses.
-    if toml::from_str::<toml::Value>(&edited).is_err() {
-        return Err(format!(
-            "the edit would have made {} unparsable, so nothing was written",
-            path.display()
-        ));
-    }
-    std::fs::write(&path, edited).map_err(|e| e.to_string())?;
-    Ok(path)
-}
-
 /// `herdr-voice model`, and `--choose`. Returns the process's exit code.
 ///
 /// The models directory is resolved here rather than passed in, the same way
-/// `doctor::run` does it, because this is the outermost layer: `list`, `pick`
-/// and `set_model_key` all take what they need and are testable without an
+/// `doctor::run` does it, because this is the outermost layer: `list` and `pick`
+/// take what they need and are testable without an
 /// environment.
 pub fn run(choosing: bool) -> u8 {
     let models = match crate::transport::state_directory(&crate::transport::Vars::from_env()) {
@@ -282,7 +162,12 @@ pub fn run(choosing: bool) -> u8 {
         println!("{} is installed and already configured.", entry.identifier);
         return 0;
     }
-    match write_model_key(&vars, entry.identifier) {
+    let edit = [crate::config_edit::Edit {
+        table: "stt",
+        key: "model",
+        value: crate::config_edit::quote(entry.identifier),
+    }];
+    match crate::config_edit::write_keys(crate::config::directory(&vars).as_deref(), &edit) {
         Ok(path) => {
             println!(
                 "{} is installed, and {} now names it.",
@@ -356,136 +241,5 @@ mod tests {
         }
         assert_eq!(pick("1").map(|e| e.identifier), Some("tiny"));
         assert_eq!(pick(" 4 ").map(|e| e.identifier), Some("large-v3-turbo"));
-    }
-
-    #[test]
-    fn a_file_with_no_stt_table_gains_one() {
-        let out = set_model_key("[audio]\ninput = \"\"\n", "tiny");
-        assert!(out.contains("[stt]"), "got {out}");
-        assert!(out.contains("model = \"tiny\""), "got {out}");
-        assert!(
-            out.contains("[audio]"),
-            "it must not lose what was there: {out}"
-        );
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("tiny"));
-    }
-
-    #[test]
-    fn an_existing_model_line_is_replaced_and_the_comments_around_it_survive() {
-        let before = "\
-# my configuration
-[stt]
-# which model to use
-model = \"large-v3-turbo\"
-language = \"ru\"
-
-[ui]
-toasts = false
-";
-        let out = set_model_key(before, "small");
-        assert!(out.contains("model = \"small\""), "got {out}");
-        assert!(
-            !out.contains("large-v3-turbo"),
-            "the old value must go: {out}"
-        );
-        assert!(
-            out.contains("# which model to use"),
-            "comments must survive: {out}"
-        );
-        assert!(
-            out.contains("language = \"ru\""),
-            "other keys must survive: {out}"
-        );
-        assert!(
-            out.contains("toasts = false"),
-            "other tables must survive: {out}"
-        );
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("small"));
-        assert_eq!(parsed["ui"]["toasts"].as_bool(), Some(false));
-    }
-
-    #[test]
-    fn a_stt_table_with_no_model_key_gains_one_inside_itself() {
-        let out = set_model_key("[stt]\nlanguage = \"ru\"\n\n[ui]\ntoasts = true\n", "base");
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("base"));
-        assert_eq!(parsed["stt"]["language"].as_str(), Some("ru"));
-        assert_eq!(parsed["ui"]["toasts"].as_bool(), Some(true));
-    }
-
-    #[test]
-    fn a_model_key_in_another_table_is_not_the_one_that_changes() {
-        // [rewrite] has a model key too. Editing the wrong one would silently
-        // repoint the rewrite engine.
-        let before = "[rewrite]\nmodel = \"haiku\"\n\n[stt]\nmodel = \"tiny\"\n";
-        let out = set_model_key(before, "small");
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(
-            parsed["rewrite"]["model"].as_str(),
-            Some("haiku"),
-            "got {out}"
-        );
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("small"), "got {out}");
-    }
-
-    #[test]
-    fn a_table_header_with_a_comment_after_it_is_still_that_table() {
-        // Found by an S4 review: `[stt] # speech` matched neither the header test
-        // nor the name test, so a second [stt] table was appended and the file
-        // stopped parsing — which config::load turns into "every setting lost".
-        let before =
-            "[rewrite]\nmodel = \"haiku\"\n\n[stt] # speech\nmodel = \"tiny\"\nlanguage = \"ru\"\n";
-        let out = set_model_key(before, "small");
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("small"), "got {out}");
-        assert_eq!(parsed["stt"]["language"].as_str(), Some("ru"));
-        assert_eq!(parsed["rewrite"]["model"].as_str(), Some("haiku"));
-        assert_eq!(out.matches("[stt]").count(), 1, "one table, not two: {out}");
-        assert!(out.contains("# speech"), "the comment must survive: {out}");
-    }
-
-    #[test]
-    fn headers_are_recognised_whatever_surrounds_them() {
-        assert_eq!(table_name("[stt]"), Some("stt"));
-        assert_eq!(table_name("  [stt]  "), Some("stt"));
-        assert_eq!(table_name("[stt] # speech"), Some("stt"));
-        assert_eq!(table_name("[ stt ]"), Some("stt"));
-        assert_eq!(table_name("[a.b]"), Some("a.b"));
-        // Not headers.
-        assert_eq!(table_name("model = \"tiny\""), None);
-        assert_eq!(table_name("# [stt]"), None);
-        assert_eq!(table_name("[stt] model = 1"), None);
-        assert_eq!(table_name(""), None);
-    }
-
-    #[test]
-    fn spaces_inside_the_header_still_name_the_table() {
-        let out = set_model_key("[ stt ]\nlanguage = \"ru\"\n", "base");
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("base"), "got {out}");
-        assert_eq!(out.matches("stt").count(), 1, "one table, not two: {out}");
-    }
-
-    #[test]
-    fn an_empty_file_becomes_a_valid_one() {
-        let out = set_model_key("", "tiny");
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("tiny"));
-    }
-
-    #[test]
-    fn a_stt_table_that_is_the_last_one_still_gains_the_key_inside_itself() {
-        // The "leaving [stt]" branch never fires when [stt] is last, so the
-        // after-the-loop branch is the one that has to work.
-        let out = set_model_key(
-            "[audio]\ninput = \"\"\n\n[stt]\nlanguage = \"en\"\n",
-            "base",
-        );
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("base"));
-        assert_eq!(parsed["stt"]["language"].as_str(), Some("en"));
-        assert_eq!(parsed["audio"]["input"].as_str(), Some(""));
     }
 }
