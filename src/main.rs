@@ -129,7 +129,7 @@ pub const MIN_HERDR_VERSION: &str = "0.8.0";
 /// nowhere else would trip `dead_code`, and CI runs clippy with `-D warnings`.
 #[cfg(test)]
 const IMPLEMENTED: &[&str] = &[
-    "daemon", "doctor", "cancel", "dictate", "model", "ptt", "setup",
+    "daemon", "doctor", "cancel", "dictate", "model", "ptt", "setup", "mic",
 ];
 
 const USAGE: &str = "\
@@ -142,6 +142,7 @@ usage:
   herdr-voice dictate    start a recording, or finish the one running
   herdr-voice ptt        one keypress of hold-to-talk; bind it to a key
   herdr-voice model      list the speech models, or --choose to install one
+  herdr-voice mic        list the microphones, or --choose to switch the input
   herdr-voice setup      print the keybindings to add, and offer to add them
   herdr-voice --version  print the version
 ";
@@ -187,7 +188,14 @@ fn main() -> ExitCode {
             ExitCode::from(chooser::run(choosing))
         }
         Command::Setup => ExitCode::from(setup::main()),
-        other @ (Command::Status | Command::Mic) => {
+        Command::Mic => {
+            if args.iter().any(|a| a == "--open") {
+                ExitCode::from(mic::open())
+            } else {
+                ExitCode::from(mic::run(args.iter().any(|a| a == "--choose")))
+            }
+        }
+        other @ Command::Status => {
             eprintln!("{}: not implemented yet", other.name());
             ExitCode::from(NOT_IMPLEMENTED)
         }
@@ -237,19 +245,17 @@ mod tests {
     fn the_commands_this_issue_implements_are_not_in_the_unimplemented_arm() {
         // A guard against a later change quietly folding one back into the 69 arm.
         for name in [
-            "daemon", "doctor", "cancel", "dictate", "model", "ptt", "setup",
+            "daemon", "doctor", "cancel", "dictate", "model", "ptt", "setup", "mic",
         ] {
             assert!(
                 IMPLEMENTED.contains(&name),
                 "{name} is implemented and must not report 'not implemented yet'"
             );
         }
-        for name in ["status", "mic"] {
-            assert!(
-                !IMPLEMENTED.contains(&name),
-                "{name} is not implemented in this issue"
-            );
-        }
+        assert!(
+            !IMPLEMENTED.contains(&"status"),
+            "status is not implemented in this issue"
+        );
     }
 
     #[test]

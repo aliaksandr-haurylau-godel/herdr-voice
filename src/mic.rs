@@ -353,7 +353,9 @@ mod tests {
         };
         let mut told = Some(reached);
         let mut tell = || told.take().unwrap_or(Reached::NoDaemon);
-        let code = choose(&list, configured, &mut input, &mut out, &mut save, &mut tell);
+        let code = choose(
+            &list, configured, &mut input, &mut out, &mut save, &mut tell,
+        );
         (code, String::from_utf8(out).unwrap(), saved.into_inner())
     }
 
@@ -403,7 +405,11 @@ mod tests {
         let text = render(&names(&["USB Mic", "Built-in", "USB Mic"]), "USB Mic");
         assert!(text.contains("3. USB Mic"), "{text}");
         let marked: Vec<&str> = text.lines().filter(|l| l.contains("(current)")).collect();
-        assert_eq!(marked.len(), 1, "only the first is the one selected: {text}");
+        assert_eq!(
+            marked.len(),
+            1,
+            "only the first is the one selected: {text}"
+        );
         assert!(marked[0].contains("1. USB Mic"), "{text}");
         let third = text.lines().find(|l| l.contains("3. USB Mic")).unwrap();
         assert!(third.contains("same name as 1"), "{text}");
@@ -524,13 +530,8 @@ mod tests {
 
     #[test]
     fn other_changed_sections_are_named_as_needing_a_restart() {
-        let (code, said, _) = run_choose(
-            &["A", "B"],
-            "A",
-            "2\n",
-            None,
-            applied(&["audio"], &["stt"]),
-        );
+        let (code, said, _) =
+            run_choose(&["A", "B"], "A", "2\n", None, applied(&["audio"], &["stt"]));
         assert_eq!(code, 0, "{said}");
         assert!(said.contains("stt"), "{said}");
         assert!(said.contains("restart of herdr"), "{said}");

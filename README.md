@@ -56,7 +56,7 @@ instead of compiling. Every release is listed, with its
 own install line, at
 [github.com/aliaksandr-haurylau-godel/herdr-voice/releases](https://github.com/aliaksandr-haurylau-godel/herdr-voice/releases).
 
-herdr plugin manifests cannot declare keybindings, so three blocks go into your
+herdr plugin manifests cannot declare keybindings, so four blocks go into your
 herdr configuration. Invoke the plugin's `setup` action — from a terminal,
 `herdr plugin action invoke herdr-voice.setup` — and it opens a pane that
 shows the exact blocks, offers to append them, and says what it changed. Running

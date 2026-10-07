@@ -55,6 +55,13 @@ description = "Print the keybindings to add, and offer to add them"
 contexts = ["global"]
 command = ["target/release/herdr-voice", "setup"]
 
+[[actions]]
+id = "mic"
+title = "Dictation: choose a microphone"
+description = "Open the popup that lists the inputs and switches the one the next take records from"
+contexts = ["global"]
+command = ["target/release/herdr-voice", "mic", "--open"]
+
 [[panes]]
 id = "setup"
 title = "Dictation: setup"

@@ -262,8 +262,12 @@ pub fn write_keys(directory: Option<&Path>, edits: &[Edit]) -> Result<PathBuf, W
 /// mode replaces that: the text may contain a token.
 fn write_candidate(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
+    // A candidate left behind by an earlier run that died is removed, and the new one
+    // is created exclusively: it cannot be a stale longer file written over, or a
+    // link someone put there.
+    let _ = std::fs::remove_file(path);
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -470,7 +474,11 @@ toasts = false
         );
         let parsed: toml::Value = toml::from_str(&out).expect("must stay valid TOML");
         assert_eq!(parsed["stt"]["model"].as_str(), Some("tiny"), "got {out}");
-        assert_eq!(parsed["stt"]["engine"].as_str(), Some("candle"), "got {out}");
+        assert_eq!(
+            parsed["stt"]["engine"].as_str(),
+            Some("candle"),
+            "got {out}"
+        );
         assert_eq!(parsed["stt"]["language"].as_str(), Some("ru"), "got {out}");
     }
 
@@ -527,7 +535,8 @@ toasts = false
     }
 
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("herdr-voice-edit-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("herdr-voice-edit-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -558,7 +567,11 @@ toasts = false
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
-        assert_eq!(leftovers, vec!["config.toml".to_string()], "no candidate left");
+        assert_eq!(
+            leftovers,
+            vec!["config.toml".to_string()],
+            "no candidate left"
+        );
     }
 
     #[test]
@@ -578,7 +591,10 @@ toasts = false
         let said = error.to_string();
         assert!(said.contains("config.toml"), "names the file: {said}");
         assert!(said.contains("nothing was written"), "{said}");
-        assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            before
+        );
     }
 
     #[test]
@@ -587,9 +603,15 @@ toasts = false
         let before = "[audio\ninput = ";
         std::fs::write(dir.join("config.toml"), before).unwrap();
         let error = write_keys(Some(&dir), &[input("New")]).expect_err("refused");
-        assert!(matches!(error, WriteError::AlreadyInvalid { .. }), "got {error:?}");
+        assert!(
+            matches!(error, WriteError::AlreadyInvalid { .. }),
+            "got {error:?}"
+        );
         assert!(error.to_string().contains("nothing was written"));
-        assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            before
+        );
     }
 
     #[test]
@@ -598,7 +620,10 @@ toasts = false
         let bytes = [0xffu8, 0xfe, 0x00, 0x41];
         std::fs::write(dir.join("config.toml"), bytes).unwrap();
         let error = write_keys(Some(&dir), &[input("New")]).expect_err("refused");
-        assert!(matches!(error, WriteError::Unreadable { .. }), "got {error:?}");
+        assert!(
+            matches!(error, WriteError::Unreadable { .. }),
+            "got {error:?}"
+        );
         assert_eq!(std::fs::read(dir.join("config.toml")).unwrap(), bytes);
     }
 
@@ -643,7 +668,10 @@ toasts = false
             },
         ];
         write_keys(Some(&dir), &edits).expect_err("refused as a whole");
-        assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), ORIGINAL);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            ORIGINAL
+        );
         let both = [
             input("New"),
             Edit {
@@ -671,8 +699,15 @@ toasts = false
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let error = result.expect_err("cannot write");
         assert!(matches!(error, WriteError::Io { .. }), "got {error:?}");
-        assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), ORIGINAL);
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no candidate left");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            ORIGINAL
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no candidate left"
+        );
     }
 
     #[cfg(unix)]

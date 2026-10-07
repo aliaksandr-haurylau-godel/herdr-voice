@@ -1784,10 +1784,8 @@ mod tests {
     }
 
     fn config_dir(tag: &str, text: Option<&str>) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-voice-reload-{tag}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("herdr-voice-reload-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         if let Some(text) = text {

@@ -161,8 +161,7 @@ mod tests {
 
     #[test]
     fn exchange_with_nobody_listening_says_no_daemon_rather_than_a_code() {
-        let dir =
-            std::env::temp_dir().join(format!("herdr-voice-exchange-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("herdr-voice-exchange-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let address = transport::address(&transport::Vars {
             state_dir: Some(dir.display().to_string()),
