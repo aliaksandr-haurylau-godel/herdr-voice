@@ -25,7 +25,11 @@ fi
 # untracked on purpose, so the list itself is not published. See .leakwords.example.
 # The hook refuses to run without it.
 if [ -f "$root/.leakwords" ]; then
-  while IFS= read -r pattern; do
+  # `|| [ -n "$pattern" ]`: `read` returns non-zero on a last line with no newline
+  # and has already stored its text, so the status alone would end the loop before
+  # that entry is checked. After a clean end of file `pattern` is empty and the
+  # body does not run again.
+  while IFS= read -r pattern || [ -n "$pattern" ]; do
     case "$pattern" in ''|'#'*) continue ;; esac
     if printf '%s\n' "$staged" | grep -q -i -E "$pattern"; then
       echo "leak gate: staged changes match a private word-list entry" >&2
