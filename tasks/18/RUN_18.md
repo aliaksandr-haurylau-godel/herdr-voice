@@ -190,3 +190,16 @@ Tester: a fresh general-purpose subagent, in a scratch copy, 41 mutations of the
 - d8 — an unconditional `publish(runtime, Activity::Idle)` in the `Discarded` arm. **Killed by a new test:** `a_discard_leaves_a_working_indicator_for_another_pane_alone`.
 
 The four new tests were written, and the suite ran green (25 tests with `cancel` in the name). A re-check that each of c5, c6, d3 and d8 now fails the suite was started in the background and did not finish: the machine's session ended. Before it was re-run, `git diff` on the worktree showed 118 added lines and no removed ones, and none of the mutated fragments; the uncommitted changes are the four new tests, not a mutation. The background command mutated a scratch copy only.
+
+Re-check, run in the foreground on a scratch copy of the merged tree, one mutation at a time, each under a 300-second limit, `CARGO_BUILD_JOBS=6`:
+
+| mutation | test that fails | result |
+|---|---|---|
+| c5 — send-failure fallback returns `Discarded` | `cancel_on_a_recorder_whose_thread_is_gone_finds_nothing_running` | killed |
+| c6 — reply-lost fallback returns `Discarded` | `cancel_answers_nothing_running_when_the_thread_dies_before_replying` | killed |
+| d3 — hold guard released before `recorder.cancel()` | `cancel_keeps_the_hold_guard_while_the_recorder_discards` | killed |
+| d8 — unconditional `Idle` in the `Discarded` arm | `a_discard_leaves_a_working_indicator_for_another_pane_alone` | killed |
+
+Two corrections found while doing it. The first run of d3 hung instead of failing: the test asserted while the recorder was still waiting inside the source's `stop`, so the failed assertion left the scope waiting for the recorder. The test now records what it saw, releases the recorder, and asserts afterwards; with d3 applied it fails in 0.16 s. And the first run of d8 used the filter `cancel_`, which does not match that test's name, and reported a false survival; it was re-run by the test's full name.
+
+After the merge of `origin/main` (`b900db7`): `cargo test` 806 passed, 1 ignored; clippy, `cargo fmt --check` and `scripts/check_manifest.py` clean; the Windows dead-code check on a scratch copy clean.

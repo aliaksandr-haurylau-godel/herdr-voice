@@ -3391,21 +3391,25 @@ mod tests {
         answer(&dictate_request(), &recorder, &runtime);
         std::thread::scope(|scope| {
             let cancelling = scope.spawn(|| answer(&request("cancel", b""), &recorder, &runtime).0);
-            reached
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .expect("the recorder reached the source's stop");
+            let reached = reached.recv_timeout(std::time::Duration::from_secs(5));
+            // Looked at while the recorder is inside `stop`, and recorded before
+            // anything is asserted: a failed assertion that left the recorder
+            // waiting would leave the scope waiting for it, and the suite hung.
+            let guard_held = matches!(
+                runtime.hold.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
+            let_go.send(()).ok();
+            let reply = cancelling.join().expect("cancel finished");
             assert!(
-                matches!(
-                    runtime.hold.try_lock(),
-                    Err(std::sync::TryLockError::WouldBlock)
-                ),
+                reached.is_ok(),
+                "the recorder never reached the source's stop"
+            );
+            assert!(
+                guard_held,
                 "the hold guard must be held while the recorder discards the take"
             );
-            let_go.send(()).unwrap();
-            assert_eq!(
-                cancelling.join().expect("cancel finished"),
-                Reply::Ok(CANCELLED_P2.to_string())
-            );
+            assert_eq!(reply, Reply::Ok(CANCELLED_P2.to_string()));
         });
     }
 
