@@ -91,6 +91,19 @@ case "$2" in
             echo "stub: the plugin log cannot be read" >&2
             exit 1
         fi
+        # Fails only the Nth call to `log list`, to reach a snapshot that is not the
+        # first. With no delay a clean run lists: 1 the cancel snapshot, 2 the cancel
+        # wait, 3 the log printed, 4 the no-device snapshot, 5 its wait, 6 the
+        # named-device snapshot, 7 its wait.
+        if [ -n "${STUB_LOG_FAIL_ON:-}" ]; then
+            calls="$(cat "${S}/list.calls" 2>/dev/null || echo 0)"
+            calls=$((calls + 1))
+            echo "${calls}" >"${S}/list.calls"
+            if [ "${calls}" -eq "${STUB_LOG_FAIL_ON}" ]; then
+                echo "stub: the plugin log cannot be read on call ${calls}" >&2
+                exit 1
+            fi
+        fi
         limit=30
         while [ $# -gt 0 ]; do
             if [ "$1" = "--limit" ]; then limit="$2"; fi
@@ -162,9 +175,16 @@ case "$2" in
         if [ "${code}" != "0" ]; then final=failed; fi
         st="${final}"
         if [ "${STUB_DELAY:-0}" -gt 0 ]; then st=running; fi
-        jq -cn --arg id "log-${n}" --arg a "${action}" --arg st "${st}" \
-            --argjson code "${code}" --arg err "${err}" \
-            '{log_id: $id, action_id: $a, status: $st, exit_code: $code, stderr: $err, stdout: ""}' >>"${LOG}"
+        if [ -n "${STUB_CODE_TAB:-}" ] && [ "${action}" = "dictate" ]; then
+            # An exit code that is not a number, with a tab in it.
+            jq -cn --arg id "log-${n}" --arg a "${action}" --arg st "${st}" \
+                --arg code "1$(printf '\t')2" --arg err "${err}" \
+                '{log_id: $id, action_id: $a, status: $st, exit_code: $code, stderr: $err, stdout: ""}' >>"${LOG}"
+        else
+            jq -cn --arg id "log-${n}" --arg a "${action}" --arg st "${st}" \
+                --argjson code "${code}" --arg err "${err}" \
+                '{log_id: $id, action_id: $a, status: $st, exit_code: $code, stderr: $err, stdout: ""}' >>"${LOG}"
+        fi
         if [ "${st}" = "running" ]; then
             echo "${STUB_DELAY} ${final}" >"${S}/pending.log-${n}"
         fi
@@ -215,6 +235,12 @@ STUB
 cat >"${STUBS}/pkill" <<'STUB'
 #!/bin/sh
 echo "pkill $*" >>"${STUB_STATE:?}/pkill.log"
+# Slow once the named-device step has been reached, and deaf to SIGINT, so a second
+# signal can arrive while the script is cleaning up.
+if [ -n "${STUB_SLOW_PKILL:-}" ] && [ -f "${STUB_STATE}/named_started" ]; then
+    trap '' INT
+    sleep 3
+fi
 if [ -z "${STUB_DAEMON_IMMORTAL:-}" ]; then rm -f "${STUB_STATE}/daemon_up"; fi
 exit 0
 STUB
@@ -291,23 +317,33 @@ run_case() {
         "${BASH_UNDER_TEST}" "${SCRIPT}" >"${CASE}/out" 2>"${CASE}/err" || code=$?
 }
 
-# As run_case, but sends SIGINT to the script's process group once the stub says
-# the named-device step is blocked, and waits at most 30 seconds for it to end.
+# As run_case, but sends a signal (INT, TERM or HUP, the first argument) to the
+# script's process group once the stub says the named-device step is blocked, and
+# the same signal again a second later when the second argument is `twice`. Waits at
+# most 30 seconds for the script to end. The remaining arguments are KEY=VALUE.
 run_case_interrupted() {
+    sig="$1"
+    again="$2"
+    shift 2
     case_env
     code=0
     # shellcheck disable=SC2086
     python3 -c '
 import os, signal, subprocess, sys, time
-marker, out, err = sys.argv[1:4]
-command = sys.argv[4:]
+marker, out, err, name, again = sys.argv[1:6]
+command = sys.argv[6:]
+sig = getattr(signal, "SIG" + name)
 child = subprocess.Popen(command, stdout=open(out, "w"), stderr=open(err, "w"),
                          start_new_session=True)
 deadline = time.time() + 30
 while time.time() < deadline and not os.path.exists(marker) and child.poll() is None:
     time.sleep(0.2)
 if child.poll() is None and os.path.exists(marker):
-    os.killpg(child.pid, signal.SIGINT)
+    os.killpg(child.pid, sig)
+    if again == "twice":
+        time.sleep(1)
+        if child.poll() is None:
+            os.killpg(child.pid, sig)
 try:
     child.wait(timeout=30)
 except subprocess.TimeoutExpired:
@@ -315,7 +351,7 @@ except subprocess.TimeoutExpired:
     child.wait()
     sys.exit(142)
 sys.exit(child.returncode if child.returncode >= 0 else 128 - child.returncode)
-' "${CASE}/state/named_started" "${CASE}/out" "${CASE}/err" \
+' "${CASE}/state/named_started" "${CASE}/out" "${CASE}/err" "${sig}" "${again}" \
         env -i ${ENVV} "$@" "${BASH_UNDER_TEST}" "${SCRIPT}" || code=$?
 }
 
@@ -409,6 +445,18 @@ run_case STUB_LOG_FAIL=1
 expect_code unreadable-log 1
 expect_text unreadable-log "the failure says the log could not be read" "could not read herdr's plugin log" "${CASE}/err"
 
+new_case unreadable-log-before-no-device
+run_case STUB_LOG_FAIL_ON=4
+expect_code unreadable-log-before-no-device 1
+expect_text unreadable-log-before-no-device "the failure says so" "could not read herdr's plugin log before invoking dictate" "${CASE}/err"
+expect_text unreadable-log-before-no-device "at the no-device step" "FAILED at step no-device" "${CASE}/err"
+
+new_case unreadable-log-before-named-device
+run_case STUB_LOG_FAIL_ON=6
+expect_code unreadable-log-before-named-device 1
+expect_text unreadable-log-before-named-device "the failure says so" "could not read herdr's plugin log before invoking dictate" "${CASE}/err"
+expect_text unreadable-log-before-named-device "at the named-device step" "FAILED at step named-device" "${CASE}/err"
+
 new_case config-restored
 printf 'ORIGINAL\n' >"${CASE}/cfg/config.toml"
 run_case STUB_REFUSAL_OMITS_NAME=1
@@ -425,11 +473,34 @@ expect_true config-absent "no marker is left" absent "${CASE}/cfg/herdr-voice-co
 
 new_case interrupt
 printf 'ORIGINAL\n' >"${CASE}/cfg/config.toml"
-run_case_interrupted STUB_NAMED_BLOCK=1
+run_case_interrupted INT once STUB_NAMED_BLOCK=1
 expect_code interrupt 130
 expect_true interrupt "config.toml is the original" content_is "${CASE}/cfg/config.toml" ORIGINAL
 expect_true interrupt "no backup is left" absent "${CASE}/cfg/herdr-voice-config-backup"
 expect_text interrupt "the run says it was interrupted" "INTERRUPTED by INT" "${CASE}/err"
+
+new_case interrupt-term
+printf 'ORIGINAL\n' >"${CASE}/cfg/config.toml"
+run_case_interrupted TERM once STUB_NAMED_BLOCK=1
+expect_code interrupt-term 143
+expect_true interrupt-term "config.toml is the original" content_is "${CASE}/cfg/config.toml" ORIGINAL
+expect_text interrupt-term "the run says it was interrupted" "INTERRUPTED by TERM" "${CASE}/err"
+
+new_case interrupt-hup
+printf 'ORIGINAL\n' >"${CASE}/cfg/config.toml"
+run_case_interrupted HUP once STUB_NAMED_BLOCK=1
+expect_code interrupt-hup 129
+expect_true interrupt-hup "config.toml is the original" content_is "${CASE}/cfg/config.toml" ORIGINAL
+expect_text interrupt-hup "the run says it was interrupted" "INTERRUPTED by HUP" "${CASE}/err"
+
+# A second signal while the first is being cleaned up after must not cut the cleanup
+# short: the stub pkill, which cleanup runs, takes three seconds and ignores SIGINT.
+new_case interrupt-twice
+printf 'ORIGINAL\n' >"${CASE}/cfg/config.toml"
+run_case_interrupted INT twice STUB_NAMED_BLOCK=1 STUB_SLOW_PKILL=1
+expect_code interrupt-twice 130
+expect_true interrupt-twice "config.toml is the original" content_is "${CASE}/cfg/config.toml" ORIGINAL
+expect_true interrupt-twice "no backup is left" absent "${CASE}/cfg/herdr-voice-config-backup"
 
 new_case leftover-backup
 printf 'ORIGINAL\n' >"${CASE}/cfg/herdr-voice-config-backup"
@@ -452,14 +523,48 @@ expect_true leftover-marker "no marker is left" absent "${CASE}/cfg/herdr-voice-
 expect_true leftover-marker "the first take ran with no borrowed file" \
     content_is "${CASE}/state/dictate-config.log" "$(printf 'clean\nbogus')"
 
+# Both files, as a run killed between creating one and removing the other could
+# leave them: the backup is the original and wins, and the marker must not survive
+# to delete a real config.toml later.
+new_case leftover-backup-and-marker
+printf 'ORIGINAL\n' >"${CASE}/cfg/herdr-voice-config-backup"
+: >"${CASE}/cfg/herdr-voice-config-was-absent"
+borrowed_config
+run_case
+expect_code leftover-backup-and-marker 0
+expect_true leftover-backup-and-marker "config.toml is the backup's content" content_is "${CASE}/cfg/config.toml" ORIGINAL
+expect_true leftover-backup-and-marker "no marker is left" absent "${CASE}/cfg/herdr-voice-config-was-absent"
+expect_true leftover-backup-and-marker "no backup is left" absent "${CASE}/cfg/herdr-voice-config-backup"
+
+# An earlier run's leftovers that cannot be put back: the run says so at once and
+# loses nothing. As root a read-only directory stops nothing.
+if [ "$(id -u)" -ne 0 ]; then
+    new_case leftover-unwritable
+    printf 'ORIGINAL\n' >"${CASE}/cfg/herdr-voice-config-backup"
+    borrowed_config
+    chmod a-w "${CASE}/cfg"
+    run_case
+    expect_code leftover-unwritable 1
+    expect_text leftover-unwritable "the failure names what to do" "could not be put back" "${CASE}/err"
+    expect_true leftover-unwritable "the backup is still there" content_is "${CASE}/cfg/herdr-voice-config-backup" ORIGINAL
+    chmod u+w "${CASE}/cfg"
+fi
+
 new_case daemon-will-not-stop
 run_case STUB_DAEMON_IMMORTAL=1
 expect_code daemon-will-not-stop 1
 expect_text daemon-will-not-stop "the message names the daemon still answering" "still answering" "${CASE}/err"
+expect_text daemon-will-not-stop "and the wait that was set" "2s after it was told to stop" "${CASE}/err"
 expect_true daemon-will-not-stop "no daemon was started over it" absent "${CASE}/state/daemon.pids"
 if [ -f "${CASE}/work/report.tsv" ]; then
     expect_no_text daemon-will-not-stop "no step is recorded as skipped" "skipped" "${CASE}/work/report.tsv"
 fi
+
+# Without the variable the wait is ten seconds.
+new_case default-stop-timeout
+run_case STUB_DAEMON_IMMORTAL=1 HERDR_VOICE_STOP_TIMEOUT=
+expect_code default-stop-timeout 1
+expect_text default-stop-timeout "the default wait is ten seconds" "10s after it was told to stop" "${CASE}/err"
 
 new_case daemon-still-up-at-the-end
 run_case STUB_DAEMON_IGNORES_TERM=1
@@ -493,6 +598,14 @@ new_case tab
 run_case STUB_TAB=1
 expect_code tab 0
 expect_true tab "every report line has three fields" \
+    awk -F'\t' 'NF != 3 { bad = 1 } END { exit bad }' "${CASE}/work/report.tsv"
+
+# The exit code is a field too: herdr's record can hold one that is not a number, and
+# the failure that says so is written to the report with it.
+new_case tab-in-exit-code
+run_case STUB_CODE_TAB=1
+expect_code tab-in-exit-code 1
+expect_true tab-in-exit-code "every report line has three fields" \
     awk -F'\t' 'NF != 3 { bad = 1 } END { exit bad }' "${CASE}/work/report.tsv"
 
 if [ "${failures}" -ne 0 ]; then

@@ -92,7 +92,9 @@ CONFIG_MARKER=""
 # Puts the plugin's configuration directory back the way the script found it: the
 # original from the backup, or no config.toml when there was none. Does nothing
 # until the link step has learnt the directory, and nothing when there is nothing
-# to put back. Safe to call more than once.
+# to put back. Safe to call more than once. Returns non-zero when it could not put
+# it back. When a backup and a marker are both there the backup is the original
+# and wins.
 restore_config() {
     [ -n "${CONFIG_BACKUP}" ] || return 0
     if [ -f "${CONFIG_BACKUP}" ]; then
@@ -100,7 +102,6 @@ restore_config() {
         rm -f "${CONFIG_MARKER}"
     elif [ -f "${CONFIG_MARKER}" ]; then
         rm -f "${CONFIG_FILE}" "${CONFIG_MARKER}"
-        [ ! -e "${CONFIG_MARKER}" ] || return 1
     fi
 }
 
@@ -396,7 +397,9 @@ if [ "${CONFIG_DIR}" != "not printed" ] && [ -n "${CONFIG_DIR}" ]; then
     # A run that was killed before it could clean up leaves the configuration
     # borrowed. Put it back before anything uses it.
     if [ -f "${CONFIG_BACKUP}" ] || [ -f "${CONFIG_MARKER}" ]; then
-        restore_config
+        restore_config || fail "link" "-" \
+            "an earlier run left the configuration borrowed and it could not be put back" \
+            "the original is in ${CONFIG_BACKUP} (or, when there was none, delete ${CONFIG_FILE} and ${CONFIG_MARKER}); fix the permissions on ${CONFIG_DIR} and re-run"
         printf 'an earlier run left the configuration borrowed; restored it before this run uses it\n'
     fi
 fi
