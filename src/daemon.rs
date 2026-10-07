@@ -145,6 +145,11 @@ pub struct Runtime {
     /// because the bound on what accumulates there runs whether or not
     /// `[record] transcripts` is on.
     pub takes: std::path::PathBuf,
+    /// The configuration this daemon is running on: what was read at start, with
+    /// `[audio]` replaced each time a reload applies it. A section whose value in
+    /// the file differs from this one and that a reload cannot apply is reported
+    /// as needing a restart every time, because this still holds the old value.
+    pub running: std::sync::Mutex<crate::config::Config>,
 }
 
 /// The two context fields `Runtime` holds, resolved from the loaded
@@ -172,6 +177,14 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
         "stop" => (Reply::Ok("stopping".to_string()), Control::Stop),
         "cancel" => (
             Reply::Ok("nothing to cancel".to_string()),
+            Control::Continue,
+        ),
+        "reload" => (
+            reload_from(
+                config::directory(&config::Vars::from_env()).as_deref(),
+                recorder,
+                runtime,
+            ),
             Control::Continue,
         ),
         command if needs_target_pane(command) => {
@@ -243,6 +256,90 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
             Control::Continue,
         ),
     }
+}
+
+/// What a reload would do, given what the daemon runs and what the file now says.
+pub struct ReloadPlan {
+    /// The new `[audio]`, when it differs.
+    pub audio: Option<crate::config::Audio>,
+    /// Every other section that differs: only a restart applies it.
+    pub restart: Vec<&'static str>,
+}
+
+pub fn plan_reload(running: &config::Config, loaded: &config::Config) -> ReloadPlan {
+    let mut restart = Vec::new();
+    if running.stt != loaded.stt {
+        restart.push("stt");
+    }
+    if running.rewrite != loaded.rewrite {
+        restart.push("rewrite");
+    }
+    if running.ui != loaded.ui {
+        restart.push("ui");
+    }
+    if running.delivery != loaded.delivery {
+        restart.push("delivery");
+    }
+    if running.context != loaded.context {
+        restart.push("context");
+    }
+    if running.ptt != loaded.ptt {
+        restart.push("ptt");
+    }
+    if running.record != loaded.record {
+        restart.push("record");
+    }
+    ReloadPlan {
+        audio: (running.audio != loaded.audio).then(|| loaded.audio.clone()),
+        restart,
+    }
+}
+
+/// `reload`: read the configuration file again, apply what can be applied
+/// between takes, and say what was and what needs a restart.
+///
+/// This runs on the connection's thread, not on the recorder's, and is asked for
+/// by a popup after it wrote the file, so reading the file here puts no file access
+/// on the path of a keypress (the reason the daemon reads once, at start).
+pub fn reload_from(
+    directory: Option<&std::path::Path>,
+    recorder: &Recorder,
+    runtime: &Runtime,
+) -> Reply {
+    let loaded = config::load(directory);
+    match &loaded.source {
+        config::Source::Invalid { path, why } => {
+            return Reply::Error(format!(
+                "{} does not parse: {why}; nothing was changed. Fix the file and try again",
+                path.display()
+            ))
+        }
+        // `load` reports an unreadable file the same way as an absent one. Applying
+        // the defaults for a file that exists would reset the person's settings.
+        config::Source::Defaults(Some(path)) if path.exists() => {
+            return Reply::Error(format!(
+                "cannot read {}; nothing was changed. Check its permissions and try again",
+                path.display()
+            ))
+        }
+        _ => {}
+    }
+    let mut running = match runtime.running.lock() {
+        Ok(running) => running,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let plan = plan_reload(&running, &loaded.config);
+    let mut applied = Vec::new();
+    if let Some(audio) = plan.audio {
+        if !recorder.reconfigure(audio.clone()) {
+            return Reply::Error(
+                "the recorder thread is gone; nothing was applied. Restart herdr".to_string(),
+            );
+        }
+        running.audio = audio;
+        applied.push("audio");
+    }
+    Reply::Ok(crate::reload::reply(&applied, &plan.restart))
 }
 
 /// One keypress of the dictation toggle, against the pane herdr named.
@@ -1304,6 +1401,7 @@ pub fn start() -> Result<Outcome, TransportError> {
     // while somebody is speaking.
     let vars = config::Vars::from_env();
     let loaded = config::load(config::directory(&vars).as_deref());
+    let started_with = loaded.config.clone();
     let takes = transport::takes_directory(&transport::Vars::from_env());
     let records = crate::record::records_for(&loaded.config.record, &takes);
     let models = transport::state_directory(&transport::Vars::from_env())
@@ -1370,6 +1468,7 @@ pub fn start() -> Result<Outcome, TransportError> {
         ui: loaded.config.ui.clone(),
         records,
         takes,
+        running: std::sync::Mutex::new(started_with),
     };
     // What the rename of issue #73 left in somebody's herdr configuration. Read
     // here, once, for the same reason the plugin's own configuration is read
@@ -1564,6 +1663,7 @@ pub mod tests_support {
             ui,
             records: None,
             takes: std::path::PathBuf::new(),
+            running: std::sync::Mutex::new(crate::config::Config::default()),
         }
     }
 }
@@ -1624,6 +1724,7 @@ mod tests {
             ui: crate::config::Ui::default(),
             records: None,
             takes: std::path::PathBuf::new(),
+            running: std::sync::Mutex::new(crate::config::Config::default()),
         };
         (runtime, clock)
     }
@@ -1680,6 +1781,166 @@ mod tests {
             entrypoint: Some(command.to_string()),
             context: context.to_vec(),
         }
+    }
+
+    fn config_dir(tag: &str, text: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-voice-reload-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(text) = text {
+            std::fs::write(dir.join("config.toml"), text).unwrap();
+        }
+        dir
+    }
+
+    /// A recorder whose source remembers every device it was asked to open.
+    fn recording_recorder() -> (
+        Recorder,
+        std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let source = std::sync::Arc::clone(&seen);
+        let recorder = Recorder::spawn(
+            move || Box::new(crate::capture::tests_support::RecordingSource(source)),
+            crate::config::Audio::default(),
+            std::env::temp_dir().join(format!("daemon-reload-takes-{}", std::process::id())),
+        );
+        (recorder, seen)
+    }
+
+    #[test]
+    fn a_configuration_equal_to_the_running_one_plans_nothing() {
+        let config = crate::config::Config::default();
+        let plan = plan_reload(&config, &config);
+        assert_eq!(plan.audio, None);
+        assert!(plan.restart.is_empty());
+    }
+
+    #[test]
+    fn a_changed_audio_section_is_applied_and_the_others_are_not_named() {
+        let running = crate::config::Config::default();
+        let mut loaded = running.clone();
+        loaded.audio.input = "Headset".to_string();
+        let plan = plan_reload(&running, &loaded);
+        assert_eq!(plan.audio.map(|a| a.input), Some("Headset".to_string()));
+        assert!(plan.restart.is_empty());
+    }
+
+    #[test]
+    fn every_other_changed_section_needs_a_restart_and_is_named_in_a_fixed_order() {
+        let running = crate::config::Config::default();
+        let mut loaded = running.clone();
+        loaded.stt.language = "ru".to_string();
+        loaded.rewrite.agent = "other".to_string();
+        loaded.ui.toasts = !running.ui.toasts;
+        loaded.delivery.submit = !running.delivery.submit;
+        loaded.context.file_names += 1;
+        loaded.ptt.release_ms += 1;
+        loaded.record.transcripts = !running.record.transcripts;
+        let plan = plan_reload(&running, &loaded);
+        assert_eq!(plan.audio, None);
+        assert_eq!(
+            plan.restart,
+            vec!["stt", "rewrite", "ui", "delivery", "context", "ptt", "record"]
+        );
+    }
+
+    #[test]
+    fn a_reload_applies_audio_and_the_next_take_opens_the_new_input() {
+        let (recorder, seen) = recording_recorder();
+        let runtime = fake_runtime("x");
+        let dir = config_dir("audio", Some("[audio]\ninput = \"New\"\n"));
+        let reply = reload_from(Some(&dir), &recorder, &runtime);
+        assert_eq!(reply, Reply::Ok("applied: audio".to_string()));
+        assert_eq!(runtime.running.lock().unwrap().audio.input, "New");
+        assert_eq!(
+            recorder.start("w1:p2", None, None, None),
+            crate::capture::Started::Began
+        );
+        assert_eq!(seen.lock().unwrap().as_slice(), [Some("New".to_string())]);
+    }
+
+    #[test]
+    fn a_reload_with_nothing_different_applies_nothing() {
+        let (recorder, _) = recording_recorder();
+        let runtime = fake_runtime("x");
+        let dir = config_dir("same", Some("[audio]\nsilence_db = -60.0\n"));
+        assert_eq!(
+            reload_from(Some(&dir), &recorder, &runtime),
+            Reply::Ok("applied: nothing".to_string())
+        );
+    }
+
+    #[test]
+    fn another_section_is_named_as_needing_a_restart_every_time_until_the_daemon_restarts() {
+        let (recorder, _) = recording_recorder();
+        let runtime = fake_runtime("x");
+        let dir = config_dir("stt", Some("[stt]\nlanguage = \"ru\"\n"));
+        let said = Reply::Ok("applied: nothing; needs a restart: stt".to_string());
+        assert_eq!(reload_from(Some(&dir), &recorder, &runtime), said);
+        assert_eq!(
+            reload_from(Some(&dir), &recorder, &runtime),
+            said,
+            "the running configuration still holds the old value"
+        );
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_changes_nothing_and_says_why() {
+        let (recorder, seen) = recording_recorder();
+        let runtime = fake_runtime("x");
+        runtime.running.lock().unwrap().audio.input = "Kept".to_string();
+        let dir = config_dir("invalid", Some("[audio\ninput = "));
+        let Reply::Error(said) = reload_from(Some(&dir), &recorder, &runtime) else {
+            panic!("an unparsable file must be an error");
+        };
+        assert!(said.contains("does not parse"), "{said}");
+        assert!(said.contains("nothing was changed"), "{said}");
+        assert_eq!(runtime.running.lock().unwrap().audio.input, "Kept");
+        assert_eq!(
+            recorder.start("w1:p2", None, None, None),
+            crate::capture::Started::Began
+        );
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [None],
+            "the recorder was not given the defaults"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_cannot_be_read_is_not_taken_for_an_absent_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let (recorder, _) = recording_recorder();
+        let runtime = fake_runtime("x");
+        runtime.running.lock().unwrap().audio.input = "Kept".to_string();
+        let dir = config_dir("unreadable", Some("[audio]\ninput = \"Other\"\n"));
+        let file = dir.join("config.toml");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let reply = reload_from(Some(&dir), &recorder, &runtime);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let Reply::Error(said) = reply else {
+            panic!("an unreadable file must be an error");
+        };
+        assert!(said.contains("cannot read"), "{said}");
+        assert_eq!(runtime.running.lock().unwrap().audio.input, "Kept");
+    }
+
+    #[test]
+    fn the_request_is_known_to_the_daemon() {
+        let (recorder, _) = recording_recorder();
+        let runtime = fake_runtime("x");
+        assert!(!needs_target_pane("reload"));
+        let (reply, control) = answer(&request("reload", b""), &recorder, &runtime);
+        assert!(matches!(control, Control::Continue));
+        assert!(
+            !matches!(&reply, Reply::Error(said) if said.starts_with("unknown command")),
+            "reload must not fall through to the unknown-command arm: {reply:?}"
+        );
     }
 
     /// Where a recorder built with `tag` writes its takes. A test that has to
@@ -1766,6 +2027,7 @@ mod tests {
             ui: crate::config::Ui::default(),
             records: None,
             takes: std::path::PathBuf::new(),
+            running: std::sync::Mutex::new(crate::config::Config::default()),
         };
         (runtime, clock)
     }
@@ -2414,6 +2676,7 @@ mod tests {
             ui: crate::config::Ui::default(),
             records: None,
             takes: std::path::PathBuf::new(),
+            running: std::sync::Mutex::new(crate::config::Config::default()),
         };
         let request = dictate_request();
         answer(&request, &recorder, &runtime);
