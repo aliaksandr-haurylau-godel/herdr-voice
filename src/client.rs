@@ -112,10 +112,22 @@ pub fn send_to(
     entrypoint: Option<String>,
     context: Vec<u8>,
 ) -> Outcome {
+    outcome(exchange(address, command, entrypoint, context))
+}
+
+/// One connection, one frame, one reply: what `send_to` does, before every result
+/// is turned into a code and a message. A caller that has to tell "no daemon" from
+/// "the daemon refused" reads this and not the message text.
+pub fn exchange(
+    address: &Address,
+    command: &str,
+    entrypoint: Option<String>,
+    context: Vec<u8>,
+) -> Result<Reply, ClientError> {
     let waited = timeout_for(command);
     let mut stream = match transport::connect(address) {
         Ok(stream) => stream,
-        Err(_) => return outcome(Err(ClientError::NoDaemon(address.display().to_string()))),
+        Err(_) => return Err(ClientError::NoDaemon(address.display().to_string())),
     };
 
     let request = Request {
@@ -124,7 +136,7 @@ pub fn send_to(
         context,
     };
     if let Err(e) = request.write_to(&mut stream) {
-        return outcome(Err(ClientError::Transport(e.to_string())));
+        return Err(ClientError::Transport(e.to_string()));
     }
 
     // The reply is read on another thread so a daemon that never answers costs a
@@ -137,15 +149,32 @@ pub fn send_to(
     });
 
     match receiver.recv_timeout(waited) {
-        Ok(Ok(reply)) => outcome(Ok(reply)),
-        Ok(Err(why)) => outcome(Err(ClientError::Protocol(why))),
-        Err(_) => outcome(Err(ClientError::Timeout(waited))),
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(why)) => Err(ClientError::Protocol(why)),
+        Err(_) => Err(ClientError::Timeout(waited)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exchange_with_nobody_listening_says_no_daemon_rather_than_a_code() {
+        let dir =
+            std::env::temp_dir().join(format!("herdr-voice-exchange-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let address = transport::address(&transport::Vars {
+            state_dir: Some(dir.display().to_string()),
+            xdg_state_home: None,
+            home: None,
+        })
+        .expect("an address");
+        assert!(matches!(
+            exchange(&address, "reload", None, Vec::new()),
+            Err(ClientError::NoDaemon(_))
+        ));
+    }
 
     #[test]
     fn an_ok_reply_succeeds_and_passes_on_what_the_daemon_said() {
