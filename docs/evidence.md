@@ -185,18 +185,23 @@ The crate's own source settles why, and settles two related worries as well
 `scripts/linux-check.sh` ran on 2026-08-25 against two revisions of the plugin. On
 `e32a9b7` it could not touch capture, because capture did not exist: its `no-device`
 step was recorded as pending. On `68fbe89`, the tip of `main` and the first revision
-that records anything, it ran with capture and produced the table below. The record
-does not settle whether the `68fbe89` table comes from one run or two; this section
-claims one run on each revision and no agreement between runs. What the run on
-`e32a9b7` established about installation, the socket path and the `[[startup]]` entry
-was re-observed on `68fbe89` and is stated below as one result. The script itself
-carries the changes described below, which are not in `68fbe89`.
+that records anything, it ran with capture. This section records more than one attempt
+on `68fbe89`: one after which a daemon outlived its server, which the next attempt
+found (below), and, after the check's cleanup was changed, two re-runs that were clean
+and agreed step for step. The second re-run was made to show that the script can be
+re-run on a machine it has already touched. The table is the result those re-runs
+agreed on; the record does not say which of the two it was copied from, nor how many
+attempts there were in all. What the run on `e32a9b7` established about installation,
+the socket path and the `[[startup]]` entry was re-observed on `68fbe89` and is stated
+below as one result. The script itself carries the changes described below, which are
+not in `68fbe89`.
 
-A re-run on a machine an earlier run had touched could have been graded against that
-run's herdr log records: the script remembered one earlier `dictate` record and no
-earlier `cancel` record (`tasks/23/AC_23.md`). If the `68fbe89` table comes from a
-second run, its `no-device`, `named-device` and `herdr-log` rows are not independent
-evidence of that run.
+Because the second re-run was on a machine the first had touched, its `no-device`,
+`named-device` and `herdr-log` rows could have been satisfied by the first re-run's
+herdr log records: the script excluded one earlier `dictate` record and no earlier
+`cancel` record (`tasks/23/AC_23.md`). Whether they were is not recorded. Their
+agreement with the first re-run on those three rows is therefore not independent
+evidence.
 
 The machine: a throwaway Debian GNU/Linux 12 (bookworm) container, `aarch64`,
 kernel 6.18.15, no sound hardware of any kind — no `/dev/snd`, no PipeWire, no

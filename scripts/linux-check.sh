@@ -96,15 +96,20 @@ CONFIG_MARKER=""
 restore_config() {
     [ -n "${CONFIG_BACKUP}" ] || return 0
     if [ -f "${CONFIG_BACKUP}" ]; then
-        mv -f "${CONFIG_BACKUP}" "${CONFIG_FILE}"
+        mv -f "${CONFIG_BACKUP}" "${CONFIG_FILE}" || return 1
         rm -f "${CONFIG_MARKER}"
     elif [ -f "${CONFIG_MARKER}" ]; then
         rm -f "${CONFIG_FILE}" "${CONFIG_MARKER}"
+        [ ! -e "${CONFIG_MARKER}" ] || return 1
     fi
 }
 
 cleanup() {
-    # Best effort, and quiet: this runs after the report has been printed.
+    # Best effort, and quiet. It runs after the report has been printed, or, when a
+    # signal ended the run, after on_signal printed what had been recorded. A second
+    # signal must not cut it short: restoring the configuration is the one thing here
+    # that is not optional.
+    trap '' INT TERM HUP
     if command -v herdr >/dev/null 2>&1; then
         herdr plugin unlink "${PLUGIN_ID}" >/dev/null 2>&1 || true
     fi
@@ -117,17 +122,27 @@ cleanup() {
     # it, and gets a closed connection instead of a reply.
     pkill -f 'herdr-voice daemon' >/dev/null 2>&1 || true
     # Whatever way the script ends, the configuration it borrowed goes back.
-    restore_config >/dev/null 2>&1 || true
+    if ! restore_config >/dev/null 2>&1; then
+        printf 'warning: could not put %s back; the original is in %s (or, when it was absent, delete %s); the next run restores it first\n' \
+            "${CONFIG_FILE}" "${CONFIG_BACKUP}" "${CONFIG_FILE}" >&2
+    fi
     if [ -n "${SERVER_PID:-}" ]; then
         herdr server stop >/dev/null 2>&1 || true
         kill "${SERVER_PID}" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT
-# A signal ends the script through cleanup, which an unhandled one would skip.
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+# A signal ends the script through cleanup, which an unhandled one would skip. The
+# table is printed first, so an interrupted run still says how far it got.
+on_signal() {
+    # signal name, exit code
+    printf '\nINTERRUPTED by %s: the steps recorded so far follow, and the run stops\n' "$1" >&2
+    print_report
+    exit "$2"
+}
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
 
 # ---------------------------------------------------------------------------
 # What herdr recorded about a plugin command
@@ -816,7 +831,9 @@ record "named-device" "$(field "${NAMED_RECORD}" '.exit_code')" \
     "refused and listed what exists: ${TAKE_SAID}"
 
 # Put the configuration back the way it was found, so a re-run starts clean.
-restore_config
+restore_config || fail "named-device" "-" \
+    "could not put the plugin's configuration back" \
+    "the original is in ${CONFIG_BACKUP} (or, when there was none, delete ${CONFIG_FILE}); fix the permissions on ${CONFIG_DIR} and re-run, which restores it first"
 
 # ---------------------------------------------------------------------------
 # Step 14: a client with no daemon

@@ -36,12 +36,19 @@ case "${SCRATCH}" in
 esac
 
 teardown() {
+    # A pid a stub recorded may have exited and been reused since. Only a process
+    # that is still running and whose command line names this test's scratch
+    # directory is the stub's own.
     for pids in "${SCRATCH}"/*/state/daemon.pids; do
         [ -f "${pids}" ] || continue
         while read -r pid; do
-            kill -9 "${pid}" 2>/dev/null || true
+            if kill -0 "${pid}" 2>/dev/null \
+                && ps -o command= -p "${pid}" 2>/dev/null | grep -F -q "${SCRATCH}"; then
+                kill -9 "${pid}" 2>/dev/null || true
+            fi
         done <"${pids}"
     done
+    chmod -R u+w "${SCRATCH}" 2>/dev/null || true
     rm -rf "${SCRATCH}"
 }
 trap teardown EXIT
@@ -119,6 +126,16 @@ case "$2" in
                 : >"${S}/named_started"
                 i=0
                 while [ "${i}" -lt 60 ]; do sleep 1; i=$((i + 1)); done
+            fi
+        fi
+        if [ "${action}" = "dictate" ]; then
+            if grep -q 'No Such Microphone' "${CFG}" 2>/dev/null; then
+                echo bogus >>"${S}/dictate-config.log"
+                # Makes the configuration directory read-only, so the script cannot put
+                # the configuration back.
+                if [ -n "${STUB_LOCK_CFG:-}" ]; then chmod a-w "${STUB_CONFIG_DIR}"; fi
+            else
+                echo clean >>"${S}/dictate-config.log"
             fi
         fi
         n="$(cat "${S}/counter" 2>/dev/null || echo "${STUB_ID_START:-100}")"
@@ -237,6 +254,9 @@ for tool in jq perl bash python3; do
         exit 1
     fi
 done
+# The script under test sees the stubs, /usr/bin and /bin, and the directory jq is
+# in (a runner may keep it elsewhere). The stub directory stays first.
+JQ_DIR="$(dirname "$(command -v jq)")"
 
 # ---------------------------------------------------------------------------
 # One case
@@ -255,7 +275,7 @@ new_case() {
 }
 
 case_env() {
-    ENVV="PATH=${STUBS}:/usr/bin:/bin HOME=${CASE}/home HERDR_VOICE_CHECKOUT=${CASE}/root"
+    ENVV="PATH=${STUBS}:/usr/bin:/bin:${JQ_DIR} HOME=${CASE}/home HERDR_VOICE_CHECKOUT=${CASE}/root"
     ENVV="${ENVV} HERDR_VOICE_WORK=${CASE}/work HERDR_VOICE_STOP_TIMEOUT=2 HERDR_VOICE_REVISION=stub"
     ENVV="${ENVV} STUB_STATE=${CASE}/state STUB_CONFIG_DIR=${CASE}/cfg"
 }
@@ -409,6 +429,7 @@ run_case_interrupted STUB_NAMED_BLOCK=1
 expect_code interrupt 130
 expect_true interrupt "config.toml is the original" content_is "${CASE}/cfg/config.toml" ORIGINAL
 expect_true interrupt "no backup is left" absent "${CASE}/cfg/herdr-voice-config-backup"
+expect_text interrupt "the run says it was interrupted" "INTERRUPTED by INT" "${CASE}/err"
 
 new_case leftover-backup
 printf 'ORIGINAL\n' >"${CASE}/cfg/herdr-voice-config-backup"
@@ -418,6 +439,8 @@ expect_code leftover-backup 0
 expect_true leftover-backup "config.toml is the backup's content" content_is "${CASE}/cfg/config.toml" ORIGINAL
 expect_true leftover-backup "no backup is left" absent "${CASE}/cfg/herdr-voice-config-backup"
 expect_text leftover-backup "the script says it restored" "restored" "${CASE}/out"
+expect_true leftover-backup "the first take ran against the original, not the borrowed file" \
+    content_is "${CASE}/state/dictate-config.log" "$(printf 'clean\nbogus')"
 
 new_case leftover-marker
 : >"${CASE}/cfg/herdr-voice-config-was-absent"
@@ -426,6 +449,8 @@ run_case
 expect_code leftover-marker 0
 expect_true leftover-marker "there is no config.toml" absent "${CASE}/cfg/config.toml"
 expect_true leftover-marker "no marker is left" absent "${CASE}/cfg/herdr-voice-config-was-absent"
+expect_true leftover-marker "the first take ran with no borrowed file" \
+    content_is "${CASE}/state/dictate-config.log" "$(printf 'clean\nbogus')"
 
 new_case daemon-will-not-stop
 run_case STUB_DAEMON_IMMORTAL=1
@@ -442,11 +467,27 @@ expect_code daemon-still-up-at-the-end 1
 expect_text daemon-still-up-at-the-end "the message names the daemon still answering" "still answering" "${CASE}/err"
 expect_no_text daemon-still-up-at-the-end "no step is recorded as skipped" "skipped" "${CASE}/work/report.tsv"
 
+# The stub makes `herdr plugin action invoke` return 124 at once; the `timeout`
+# stub does not wait. This shows the 124 branch of the script, not a real hang.
 new_case hung-invoke
 run_case STUB_NAMED_INVOKE_EXIT=124
 expect_code hung-invoke 1
 expect_text hung-invoke "the failure is herdr not returning" "herdr did not return from invoking dictate" "${CASE}/err"
 expect_no_text hung-invoke "the plugin is not blamed" "never finished" "${CASE}/err"
+
+# A configuration directory that cannot be written: the script cannot put the
+# configuration back and must say so. As root a read-only directory stops nothing.
+if [ "$(id -u)" -eq 0 ]; then
+    printf 'skip  restore-fails: running as root, where a read-only directory does not stop mv\n'
+else
+    new_case restore-fails
+    printf 'ORIGINAL\n' >"${CASE}/cfg/config.toml"
+    run_case STUB_LOCK_CFG=1
+    expect_code restore-fails 1
+    expect_text restore-fails "the failure names what to do" "could not put the plugin's configuration back" "${CASE}/err"
+    expect_text restore-fails "cleanup warns too" "warning: could not put" "${CASE}/err"
+    chmod u+w "${CASE}/cfg"
+fi
 
 new_case tab
 run_case STUB_TAB=1
