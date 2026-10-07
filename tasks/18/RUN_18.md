@@ -203,3 +203,20 @@ Re-check, run in the foreground on a scratch copy of the merged tree, one mutati
 Two corrections found while doing it. The first run of d3 hung instead of failing: the test asserted while the recorder was still waiting inside the source's `stop`, so the failed assertion left the scope waiting for the recorder. The test now records what it saw, releases the recorder, and asserts afterwards; with d3 applied it fails in 0.16 s. And the first run of d8 used the filter `cancel_`, which does not match that test's name, and reported a false survival; it was re-run by the test's full name.
 
 After the merge of `origin/main` (`b900db7`): `cargo test` 806 passed, 1 ignored; clippy, `cargo fmt --check` and `scripts/check_manifest.py` clean; the Windows dead-code check on a scratch copy clean.
+
+### S4 verdict
+The code review (round 1) found nothing Critical; every finding is settled above. Mutation testing killed 40 of 41 mutations, and the one left is equivalent today (c2). S4 closed on 2026-10-07 before a pull request existed.
+
+### S5 Verify
+- artifact: a section in `docs/evidence.md`, "`cancel` stops a running take, for issue #18"
+- platform: macOS 27.0.1, arm64, this machine
+- run: a daemon from this worktree with its own state, configuration and herdr stand-in, never the owner's session. The baseline `eae0135` reproduced the defect first (the instrument check): `cancel` answered `nothing to cancel` during a take and the next `dictate` delivered that take. The branch cancelled the take, left no file, delivered nothing, and the next `dictate` began a new take.
+- not shown, and said in the evidence: the tab label restored after a cancel (no `tab_id` in the context), Linux, Windows.
+
+```yaml
+verdict:
+  stage: S5
+  artifact: docs/evidence.md
+  result: pass
+  date: 2026-10-07
+```
