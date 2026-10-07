@@ -204,3 +204,20 @@ Tester: a fresh general-purpose subagent, in a scratch copy, one run at a time (
   - `[ -n "${CONFIG_BACKUP}" ] || return 0` at the top of `restore_config`: with empty names both tests are false and the function returns 0 anyway. **The line was deleted.**
 
 After these: `sh scripts/test-linux-check.sh` prints 75 `ok` lines and `all cases passed` under `/bin/bash` 3.2.57 and under bash 5.3.20; `shellcheck` is clean on both scripts.
+
+### S4 verdict
+The code review (round 1) found nothing Critical; every finding is settled above (item 1, the evidence section, is S5's). Mutation testing: 54 mutations in the first run; every survivor killed by a case added afterwards or explained as equivalent or unreachable, and the two real gaps of the second run killed and re-checked in the foreground. S4 closed on 2026-10-07 before a pull request existed.
+
+### S5 Verify
+- artifact: a section in `docs/evidence.md`, "The Linux check's decisions, with stubs, for issue #23", and the corrected "Linux, in a container" intro
+- platform: macOS 27.0.1, arm64, this machine. **No Linux run, no container, no real herdr.**
+- run: the final test against the unmodified `scripts/linux-check.sh` of `e92f0b2`: 27 `ok`, 48 `FAIL`; against the changed script at `cd2ac27`: 75 `ok`, all cases passed, under `/bin/bash` 3.2.57 and under bash 5.3.20; `shellcheck` clean. The owner's daemon was untouched and no stub process was left.
+- not shown, and said in the evidence: a real container with a real herdr, herdr's `log_id` and `--limit` behaviour, a real hang, `interrupt-twice` under bash 3.2, a `TERM` to the script alone, the two cases skipped as root, Linux.
+
+```yaml
+verdict:
+  stage: S5
+  artifact: docs/evidence.md
+  result: pass
+  date: 2026-10-07
+```
