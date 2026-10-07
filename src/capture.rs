@@ -170,6 +170,12 @@ enum Command {
     Stop {
         reply: mpsc::Sender<Result<Take, CaptureError>>,
     },
+    /// Replace the `[audio]` values the next take starts with. A take already
+    /// recording keeps the device it was started on.
+    Reconfigure {
+        audio: Audio,
+        reply: mpsc::Sender<()>,
+    },
 }
 
 /// The handle the daemon holds. The thread behind it lives as long as the daemon.
@@ -203,6 +209,7 @@ impl Recorder {
             let mut running: Option<Running> = None;
             let mut remembered: Option<String> = None;
             let mut counter: u64 = 0;
+            let mut audio = audio;
 
             while let Ok(order) = orders.recv() {
                 match order {
@@ -231,6 +238,10 @@ impl Recorder {
                         let answer =
                             stop_one(source.as_mut(), &audio, &mut running, &mut remembered);
                         let _ = reply.send(answer);
+                    }
+                    Command::Reconfigure { audio: next, reply } => {
+                        audio = next;
+                        let _ = reply.send(());
                     }
                 }
             }
@@ -281,6 +292,18 @@ impl Recorder {
         answer
             .recv()
             .unwrap_or_else(|_| Err(CaptureError::Unusable("the recorder thread is gone".into())))
+    }
+
+    /// Hand the recorder new `[audio]` values, and wait until it has them. The
+    /// order is handled between the orders already queued, so a take that is
+    /// recording is not touched. `false` means the recorder's thread is gone.
+    pub fn reconfigure(&self, audio: Audio) -> bool {
+        let (reply, answer) = mpsc::channel();
+        let sent = self
+            .commands
+            .lock()
+            .map(|commands| commands.send(Command::Reconfigure { audio, reply }));
+        matches!(sent, Ok(Ok(()))) && answer.recv().is_ok()
     }
 }
 
@@ -445,6 +468,25 @@ pub mod tests_support {
                 channels: 1,
             })
         }
+        fn stop(&mut self) {}
+    }
+
+    /// Remembers the device every `start` was asked for, in order. The daemon's
+    /// tests use it to see which input a take opened after a reload.
+    pub struct RecordingSource(pub std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>);
+
+    impl Source for RecordingSource {
+        fn start(&mut self, device: Option<&str>, sink: Sink) -> Result<Format, String> {
+            if let Ok(mut asked) = self.0.lock() {
+                asked.push(device.map(str::to_string));
+            }
+            sink.push(Event::Samples(vec![0.0; 4_800]));
+            Ok(Format {
+                rate: 48_000,
+                channels: 1,
+            })
+        }
+
         fn stop(&mut self) {}
     }
 
@@ -762,6 +804,64 @@ mod tests {
         );
         assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
         assert_eq!(asked_for.lock().unwrap().as_deref(), None);
+    }
+
+    #[test]
+    fn a_reconfigure_changes_the_input_the_next_take_opens() {
+        let asked_for = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&asked_for);
+        let recorder = Recorder::spawn(
+            move || {
+                let mut fake = Fake::new(vec![Event::Samples(tone(0.3, 0.1))]);
+                fake.asked_for = seen;
+                Box::new(fake)
+            },
+            Audio {
+                input: "Old".to_string(),
+                ..Audio::default()
+            },
+            takes_dir("reconfigure"),
+        );
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        assert_eq!(asked_for.lock().unwrap().as_deref(), Some("Old"));
+        let take = recorder.stop().expect("a take");
+        std::fs::remove_file(&take.path).ok();
+
+        assert!(recorder.reconfigure(Audio {
+            input: "New".to_string(),
+            ..Audio::default()
+        }));
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        assert_eq!(
+            asked_for.lock().unwrap().as_deref(),
+            Some("New"),
+            "the next take must open the new input"
+        );
+    }
+
+    #[test]
+    fn a_reconfigure_while_a_take_runs_does_not_move_that_take() {
+        // The take is quiet on purpose: its refusal names the device it was
+        // recorded from, which is how a test sees which input it ended on.
+        let (recorder, _) = recorder_named(
+            "reconfigure-mid-take",
+            vec![Event::Samples(tone(0.00002, 1.0))],
+            Audio {
+                input: "Headset".to_string(),
+                ..Audio::default()
+            },
+        );
+        assert_eq!(recorder.start("w1:p2", None, None, None), Started::Began);
+        assert!(recorder.reconfigure(Audio {
+            input: "Other".to_string(),
+            ..Audio::default()
+        }));
+        let message = recorder.stop().expect_err("too quiet").to_string();
+        assert!(
+            message.contains("Headset"),
+            "the take ended on its own input: {message}"
+        );
+        assert!(!message.contains("Other"), "{message}");
     }
 
     #[test]
