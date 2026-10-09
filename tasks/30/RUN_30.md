@@ -119,5 +119,7 @@ verdict:
   date: 2026-10-07
 ```
 
-### Open: the owner
-The wording and the single-word threshold (three repeats of one word) are not final: the owner has not answered. Per the orchestrator, the pull request is not opened until the answer arrives; a change touches only the strings and the threshold and their tests, and the mutation test is re-run on those lines alone.
+### Approved
+The wording of the warning (with "check what reached the pane") and the threshold of three repeats, one word included, were approved as they stand. Nothing in the code or the tests changes for it.
+
+After the approval: `origin/main` was still `e92f0b2`, so there was nothing to merge. `cargo test` 804 passed, 1 ignored; `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, `scripts/check_manifest.py` and the Windows dead-code check on a scratch copy are clean (`CARGO_BUILD_JOBS=6`).
