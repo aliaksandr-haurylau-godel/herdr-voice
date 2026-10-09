@@ -213,7 +213,11 @@ several takes to be stacked and edited before sending. Submitting is opt-in.
 
 A take that was delivered keeps neither its recording nor what the two text
 stages produced, unless `[record] transcripts` says so. A take that ended some
-other way keeps its recording either way — section 7.
+other way keeps its recording either way — section 7. So does a take whose
+transcript is one phrase repeated three or more times, the shape a transcriber
+gives silence: it is delivered as usual, its recording is kept, and the reply, the
+journal and, with `[ui] toasts` on, a toast say that it is probably not speech
+and where the recording is.
 
 ### Bounds on outward calls
 
@@ -421,9 +425,10 @@ than the twelve-a-second keypress path the plugin already sustains. It is a
 floor rather than a refusal: an out-of-range value is not a reason to stop the
 daemon starting.
 
-`[record] transcripts` is off, and with it off a take leaves nothing behind. Its
-recording is removed once the text has been delivered, and no transcript is
-written anywhere. Switched on, each finished take keeps its recording and writes
+`[record] transcripts` is off, and with it off a take leaves nothing behind, with
+one exception: a take whose transcript is one phrase repeated keeps its recording
+(section 4, "Delivery"). Otherwise its recording is removed once the text has been
+delivered, and no transcript is written anywhere. Switched on, each finished take keeps its recording and writes
 one file beside it — `<state>/takes/<the take's name>.json`, the same name the
 recording already has — holding the transcript recognition returned, the text the
 rewrite returned, and which of five things the rewrite did: ran, was switched off,
