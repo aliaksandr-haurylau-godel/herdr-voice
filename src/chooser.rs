@@ -274,7 +274,8 @@ mod tests {
             text.contains("not installed"),
             "it must say what is there: {text}"
         );
-        assert!(text.contains("/nowhere-at-all/candle"), "{text}");
+        let home = PathBuf::from("/nowhere-at-all").join("candle");
+        assert!(text.contains(&home.display().to_string()), "{text}");
     }
 
     #[test]
@@ -391,8 +392,9 @@ mod tests {
         assert!(world.installs.is_empty() && world.saved.is_empty());
         assert_eq!(world.file(), before);
         assert!(said.contains("ggml-tiny.bin"), "{said}");
+        let file = PathBuf::from("/models").join("ggml-tiny.bin");
         assert!(
-            said.contains("/models/ggml-tiny.bin"),
+            said.contains(&file.display().to_string()),
             "the models directory is named: {said}"
         );
         assert!(said.contains("set [stt] engine to \"candle\""), "{said}");
