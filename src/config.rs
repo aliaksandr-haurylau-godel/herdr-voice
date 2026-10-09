@@ -7,7 +7,7 @@
 //! prints it even for a plugin that is not installed. See `tasks/3/DESIGN_3.md`,
 //! section 4, and `docs/design.md`, section 7.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::transport::PLUGIN_ID;
@@ -16,7 +16,7 @@ pub const FILE_NAME: &str = "config.toml";
 
 // `Eq` is absent on purpose: `silence_db` is an `f32`, which has no total
 // ordering. Nothing here needs more than `PartialEq`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     pub audio: Audio,
@@ -29,7 +29,7 @@ pub struct Config {
     pub record: Record,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Audio {
     /// The input device's name. Empty means the system default. Never an index:
@@ -50,7 +50,7 @@ impl Default for Audio {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Stt {
     /// A model identifier, not a file name: the file is `ggml-<model>.bin`.
@@ -84,7 +84,7 @@ impl Stt {
     pub const MIN_COMMAND_TIMEOUT_SECONDS: u64 = 1;
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Rewrite {
     pub engine: String,
@@ -145,7 +145,7 @@ impl Default for Rewrite {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Ui {
     pub toasts: bool,
@@ -187,7 +187,7 @@ impl Default for Ui {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Ptt {
     /// How long after the last keypress a hold counts as released.
@@ -213,7 +213,7 @@ impl Default for Ptt {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Delivery {
     pub submit: bool,
@@ -226,13 +226,13 @@ pub struct Delivery {
 /// `transcripts` here and `[context] source = "transcript"` are different things:
 /// this is what the person said, and that is what the agent said. See
 /// `docs/design.md` section 7.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Record {
     pub transcripts: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Context {
     /// `auto`, `transcript` or `pane`. Kept as a plain string here, the same
@@ -751,5 +751,21 @@ mod tests {
         assert!(ui.sidebar_token);
         assert!(ui.tab_indicator);
         assert_eq!(ui.blink_ms, 600);
+    }
+
+    #[test]
+    fn the_defaults_serialise_with_every_section_and_a_value_for_every_key() {
+        let value = toml::Value::try_from(Config::default()).expect("the defaults serialise");
+        let table = value.as_table().expect("a table");
+        let mut names: Vec<&str> = table.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["audio", "context", "delivery", "ptt", "record", "rewrite", "stt", "ui"]
+        );
+        assert_eq!(table["audio"]["silence_db"].as_float(), Some(-60.0));
+        assert_eq!(table["stt"]["engine"].as_str(), Some("command"));
+        assert!(table["stt"]["command"].is_array());
+        assert_eq!(table["stt"]["token"].as_str(), Some(""));
     }
 }

@@ -4,7 +4,7 @@ use super::Source;
 
 /// The values `[context] source` accepts, named in that order in a refusal
 /// message.
-const VALUES: &[&str] = &["auto", "transcript", "pane"];
+pub(crate) const VALUES: &[&str] = &["auto", "transcript", "pane"];
 
 /// Resolves `[context] source`. `Err` names the value given and the three
 /// valid values, the same shape `EngineError::Unknown` already gives an
