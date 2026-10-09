@@ -121,6 +121,11 @@ pub fn choose_speech_model(world: &mut dyn World, io: &mut Io, catalogue: &'stat
 
     match stt.engine.as_str() {
         "candle" => install_and_write(world, io, entry, &stt.model),
+        "command" if stt.command.is_empty() => io.say(&format!(
+            "[stt] engine is \"command\" but [stt] command is empty, so no speech engine is set \
+             up yet, and nothing was changed. `herdr-voice doctor` says what is missing. \
+             {MOVE_TO_CANDLE}."
+        )),
         "command" if crate::stt::wants_our_model(&stt.command) => {
             let file = crate::stt::model::file_name(id);
             let place = match &models {
@@ -133,7 +138,7 @@ pub fn choose_speech_model(world: &mut dyn World, io: &mut Io, catalogue: &'stat
                  (\"candle\"), so installing {id} would not change what a take uses. Nothing was \
                  downloaded or written.\n\
                  To use {id}: {MOVE_TO_CANDLE}; or, to keep the command, put {file} into the \
-                 models directory."
+                 models directory, then set [stt] model to \"{id}\" in the configuration file."
             ));
         }
         "command" => io.say(&format!(
@@ -175,6 +180,14 @@ fn install_and_write(world: &mut dyn World, io: &mut Io, entry: &'static Entry, 
             return;
         }
         io.say(&format!("{id} is installed."));
+        if here {
+            // The daemon built its speech engine at start, when this model was not
+            // there, and nothing in the file changed for a reload to report.
+            io.say(
+                "The daemon loaded its speech engine before it was there, so restart herdr to \
+                 use it.",
+            );
+        }
     }
     if here {
         return;
@@ -387,17 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn with_a_command_that_brings_its_own_model_the_model_key_is_said_not_to_be_used() {
-        // The shipped default: engine "command" and an empty command.
-        let mut world = FakeWorld::new("choose-command-own", "");
-        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
-        assert!(world.installs.is_empty() && world.saved.is_empty());
-        assert!(said.contains("does not use {model}"), "{said}");
-        assert!(said.contains("[stt] model is not used"), "{said}");
-        assert!(said.contains("set [stt] engine to \"candle\""), "{said}");
-    }
-
-    #[test]
     fn with_the_http_engine_the_model_key_is_said_not_to_be_used() {
         let mut world = FakeWorld::new("choose-http", "[stt]\nengine = \"http\"\n");
         let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
@@ -456,7 +458,54 @@ mod tests {
     fn a_configuration_that_does_not_parse_is_said_before_the_list() {
         let mut world = FakeWorld::new("choose-invalid", "[stt\nengine = ");
         let (said, _) = drive(&mut world, "\n", &catalogue::MODELS);
-        assert!(said.contains("does not parse"), "{said}");
-        assert!(said.find("does not parse").unwrap() < said.find("1. tiny").unwrap());
+        assert!(said.contains("does not load"), "{said}");
+        assert!(said.find("does not load").unwrap() < said.find("1. tiny").unwrap());
+    }
+
+    #[test]
+    fn installing_the_configured_model_that_was_missing_says_to_restart_herdr() {
+        let mut world = FakeWorld::new(
+            "choose-restart-after-install",
+            "[stt]\nengine = \"candle\"\nmodel = \"tiny\"\n",
+        );
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert_eq!(world.installs, vec!["tiny".to_string()]);
+        assert!(said.contains("restart herdr"), "{said}");
+        assert!(said.contains("before it was there"), "{said}");
+    }
+
+    #[test]
+    fn the_shipped_default_is_said_to_have_no_command_at_all_and_not_to_bring_its_own_model() {
+        let mut world = FakeWorld::new("choose-default", "");
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert!(said.contains("[stt] command is empty"), "{said}");
+        assert!(said.contains("herdr-voice doctor"), "{said}");
+        assert!(!said.contains("brings its own model"), "{said}");
+        assert!(said.contains("set [stt] engine to \"candle\""), "{said}");
+    }
+
+    #[test]
+    fn a_command_without_the_model_placeholder_is_said_to_bring_its_own_model() {
+        let mut world = FakeWorld::new(
+            "choose-own-model",
+            "[stt]\nengine = \"command\"\ncommand = [\"my-transcriber\", \"{audio}\"]\n",
+        );
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert!(said.contains("brings its own model"), "{said}");
+    }
+
+    #[test]
+    fn the_advice_for_a_command_that_uses_the_model_includes_naming_it_in_the_configuration() {
+        let mut world = FakeWorld::new(
+            "choose-advice",
+            "[stt]\nengine = \"command\"\ncommand = [\"whisper-cli\", \"-m\", \"{model}\"]\n",
+        );
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(
+            said.contains("then set [stt] model to \"tiny\" in the configuration file"),
+            "{said}"
+        );
     }
 }

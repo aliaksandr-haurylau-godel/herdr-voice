@@ -307,6 +307,32 @@ pub struct Loaded {
     pub source: Source,
 }
 
+/// Why a file does not load, with its position and without the line it is about.
+///
+/// The parser's own text quotes the offending line, and a value written without its
+/// quotes (`token = some-plain-value`) is then printed back, on a screen or into a
+/// log. A line that sets a token is therefore named by its position only.
+pub fn parse_failure(error: &toml::de::Error, text: &str) -> String {
+    let Some(span) = error.span() else {
+        return "the parser gave no position; check the file's syntax".to_string();
+    };
+    let before = &text[..span.start.min(text.len())];
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count())
+        + 1;
+    let source_line = text.lines().nth(line - 1).unwrap_or("");
+    if source_line.to_ascii_lowercase().contains("token") {
+        return format!(
+            "line {line}: this line sets a token, so the parser's message is not shown; check \
+             that the value is in quotes"
+        );
+    }
+    format!("line {line}, column {column}: {}", error.message())
+}
+
 pub fn load(directory: Option<&Path>) -> Loaded {
     let Some(directory) = directory else {
         return Loaded {
@@ -340,7 +366,7 @@ pub fn load(directory: Option<&Path>) -> Loaded {
                 config: Config::default(),
                 source: Source::Invalid {
                     path,
-                    why: e.to_string(),
+                    why: parse_failure(&e, &text),
                 },
             },
         },
@@ -767,5 +793,45 @@ mod tests {
         assert_eq!(table["stt"]["engine"].as_str(), Some("command"));
         assert!(table["stt"]["command"].is_array());
         assert_eq!(table["stt"]["token"].as_str(), Some(""));
+    }
+
+    #[test]
+    fn a_file_that_does_not_load_never_has_its_token_printed_in_the_reason() {
+        for (tag, text) in [
+            ("unquoted", "[rewrite]\ntoken = some-plain-value\n"),
+            ("number", "[rewrite]\ntoken = 12345\n"),
+        ] {
+            let directory = scratch(&format!("token-in-reason-{tag}"));
+            std::fs::write(directory.join("config.toml"), text).unwrap();
+            let Source::Invalid { why, .. } = load(Some(&directory)).source else {
+                panic!("{tag}: the file must not load");
+            };
+            assert!(
+                !why.contains("some-plain-value") && !why.contains("12345"),
+                "{tag}: {why}"
+            );
+            assert!(why.contains("line 2"), "{tag}: {why}");
+            assert!(why.contains("token"), "{tag}: it says what to check: {why}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_does_not_load_for_another_reason_keeps_the_parsers_words_and_the_position() {
+        let directory = scratch("reason-position");
+        std::fs::write(directory.join("config.toml"), "[ui]\nblink_ms = \"fast\"\n").unwrap();
+        let Source::Invalid { why, .. } = load(Some(&directory)).source else {
+            panic!("the file must not load");
+        };
+        assert!(why.contains("line 2"), "{why}");
+        assert!(why.contains("invalid type"), "{why}");
+        let directory = scratch("reason-syntax");
+        std::fs::write(directory.join("config.toml"), "[audio\ninput = \"x\"\n").unwrap();
+        let Source::Invalid { why, .. } = load(Some(&directory)).source else {
+            panic!("the file must not load");
+        };
+        assert!(
+            why.contains("line 1") && why.contains("expected `]`"),
+            "{why}"
+        );
     }
 }

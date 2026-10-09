@@ -130,10 +130,13 @@ by the engine in the file:
   when it is installed and is not the configured one, it does not download; otherwise
   `world.install` downloads and verifies it. Then `[stt] model` is written, the daemon is told, and
   the change is reported (needs a restart of herdr).
+- `command` with an empty command: nothing is written; it says that no speech engine is set up
+  yet, that `herdr-voice doctor` says what is missing, and that `candle` is the way to use this list.
 - `command` with `{model}` in the command: nothing is downloaded or written. It says that this
   engine looks for `ggml-<model>.bin` in the models directory (named), that the catalogue installs
   weights for the built-in engine, and the two ways on: set `[stt] engine` to `candle` and choose
-  the model again, or put that file in the models directory.
+  the model again, or put that file in the models directory and set `[stt] model` to the model's
+  name in the file.
 - `command` without `{model}`: nothing is written; the command brings its own model and
   `[stt] model` is not used.
 - `http`: nothing is written; the server's model is `[stt] http_model` and `[stt] model` is not used.

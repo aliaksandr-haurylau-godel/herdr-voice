@@ -58,8 +58,8 @@ a short run of the same binary that writes to the daemon's socket and exits: a
 Unix domain socket on macOS and Linux, a named pipe on Windows.
 
 Manifest actions: `dictate` (toggle for long takes), `ptt` (one keypress of
-hold-to-talk), `cancel`, `setup`, `mic`, `model`. Manifest panes: `status`,
-`setup`, `download`. Each manifest entry carries a `platforms` list, so platform
+hold-to-talk), `cancel`, `setup`, `settings`. Manifest panes: `status`,
+`setup`, `model`, `settings`. Each manifest entry carries a `platforms` list, so platform
 differences are declared rather than branched in code.
 
 ### Why

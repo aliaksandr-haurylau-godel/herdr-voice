@@ -122,6 +122,12 @@ impl<'a> Io<'a> {
         self.failed = true;
     }
 
+    /// Whether the end of the input was reached, so a menu can stop instead of
+    /// drawing itself once more.
+    pub fn has_ended(&self) -> bool {
+        self.ended
+    }
+
     /// Asks `question` and returns the line read. `None` means there is nothing more
     /// to read; that is said once, the popup is marked failed, and every later
     /// question answers `None` at once, so every level of a menu unwinds.
@@ -156,6 +162,11 @@ pub struct Snapshot {
 impl Snapshot {
     /// The file as a table, when it parses; which keys are set is read from it.
     pub fn table(&self) -> Option<toml::Table> {
+        // A file that parses but does not load as the configuration is shown as
+        // defaults, as `config_note` says: the daemon cannot use what it holds.
+        if matches!(self.loaded.source, Source::Invalid { .. }) {
+            return None;
+        }
         toml::from_str(&self.text).ok()
     }
 }
@@ -269,7 +280,7 @@ pub fn save_and_tell(
 pub fn config_note(source: &Source) -> Option<String> {
     match source {
         Source::Invalid { path, why } => Some(format!(
-            "{} does not parse ({why}): the settings shown are the defaults, and saving a \
+            "{} does not load ({why}): the settings shown are the defaults, and saving a \
              change is refused until the file is fixed.\n",
             path.display()
         )),
@@ -793,7 +804,7 @@ mod tests {
         assert!(snapshot.table().is_none());
         let note = config_note(&snapshot.loaded.source).expect("a note");
         assert!(
-            note.contains("does not parse") && note.contains("defaults"),
+            note.contains("does not load") && note.contains("defaults"),
             "{note}"
         );
         let fine = tests_support::FakeWorld::new("popup-fine", "[audio]\ninput = \"X\"\n");
@@ -971,5 +982,17 @@ mod tests {
             "valid TOML: {said}"
         );
         assert_eq!(world.told, 0);
+    }
+
+    #[test]
+    fn a_file_that_parses_but_does_not_load_is_shown_as_defaults_like_the_note_says() {
+        let world = tests_support::FakeWorld::new("popup-wrong-type", "[ui]\nblink_ms = \"x\"\n");
+        let snapshot = world.snapshot();
+        assert!(
+            snapshot.table().is_none(),
+            "the list must not show values the daemon cannot use"
+        );
+        let note = config_note(&snapshot.loaded.source).expect("a note");
+        assert!(note.contains("defaults"), "{note}");
     }
 }

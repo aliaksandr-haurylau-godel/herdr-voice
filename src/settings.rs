@@ -196,6 +196,12 @@ pub fn render_devices(names: &[String], configured: &str) -> String {
              refused until you choose one of them.\n"
         ));
     }
+    if !configured.is_empty() {
+        out.push_str(
+            "To use the system default input again, delete the [audio] input line in the \
+             configuration file.\n",
+        );
+    }
     out
 }
 
@@ -221,6 +227,9 @@ pub fn run_menu(world: &mut dyn World, io: &mut Io) -> u8 {
             Answer::Invalid(text) => io.say(&not_in_list(&text, sections.len())),
             Answer::Pick(at) => keys_menu(world, io, &sections[at]),
         }
+        if io.has_ended() {
+            break;
+        }
     }
     u8::from(io.failed)
 }
@@ -238,6 +247,9 @@ fn keys_menu(world: &mut dyn World, io: &mut Io, section: &SectionInfo) {
             Answer::Leave => return,
             Answer::Invalid(text) => io.say(&not_in_list(&text, section.keys.len())),
             Answer::Pick(at) => edit_key(world, io, section.name, &section.keys[at]),
+        }
+        if io.has_ended() {
+            return;
         }
     }
 }
@@ -277,7 +289,7 @@ fn scalar(world: &mut dyn World, io: &mut Io, section: &str, key: &KeyInfo) {
         (Value::Integer(_), _) => "a whole number".to_string(),
         (Value::Float(_), _) => "a number".to_string(),
         (_, Some(values)) => values.join(", "),
-        _ => "text".to_string(),
+        _ => "text, or \"\" to empty it".to_string(),
     };
     io.say(&format!(
         "[{section}] {} is {}{}.",
@@ -293,14 +305,22 @@ fn scalar(world: &mut dyn World, io: &mut Io, section: &str, key: &KeyInfo) {
         io.say("Nothing was changed.");
         return;
     }
+    // Two double quotes mean the empty text: an empty line already means "leave".
+    let text = if typed == "\"\"" { "" } else { typed };
     let value = match &key.default {
         Value::Boolean(_) => match typed {
             "true" | "false" => Some(typed.to_string()),
             _ => None,
         },
         Value::Integer(_) => typed.parse::<i64>().ok().map(|n| n.to_string()),
-        Value::Float(_) => typed.parse::<f64>().ok().map(|n| format!("{n:?}")),
-        _ => Some(config_edit::quote(typed)),
+        // The number must be one TOML writes and the key holds: not `inf`, not `nan`,
+        // and not one that overflows the `f32` the key is read into.
+        Value::Float(_) => typed
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite() && (*n as f32).is_finite())
+            .map(|n| format!("{n:?}")),
+        _ => Some(config_edit::quote(text)),
     };
     let Some(value) = value else {
         io.say(&format!(
@@ -319,7 +339,7 @@ fn scalar(world: &mut dyn World, io: &mut Io, section: &str, key: &KeyInfo) {
         }
     }
     let shown = match &key.default {
-        Value::String(_) => format!("{typed:?}"),
+        Value::String(_) => format!("{text:?}"),
         _ => value.clone(),
     };
     save_and_tell(world, io, section, &key.name, value, &shown);
@@ -413,14 +433,16 @@ fn rewrite_model(world: &mut dyn World, io: &mut Io) {
                 Answer::Invalid(text) => io.say(&not_in_list(&text, names.len())),
                 Answer::Pick(at) => {
                     let name = &names[at];
-                    save_and_tell(
+                    if save_and_tell(
                         world,
                         io,
                         "rewrite",
                         "model",
                         config_edit::quote(name),
                         &format!("{name:?}"),
-                    );
+                    ) {
+                        engine_note(io, &rewrite.engine);
+                    }
                 }
             }
         }
@@ -441,15 +463,28 @@ fn rewrite_model(world: &mut dyn World, io: &mut Io) {
                 io.say("Nothing was changed.");
                 return;
             }
-            save_and_tell(
+            if save_and_tell(
                 world,
                 io,
                 "rewrite",
                 "model",
                 config_edit::quote(typed),
                 &format!("{typed:?}"),
-            );
+            ) {
+                engine_note(io, &rewrite.engine);
+            }
         }
+    }
+}
+
+/// The rewrite model is read only by the `http` engine; for another one the key was
+/// written and nothing will use it yet.
+fn engine_note(io: &mut Io, engine: &str) {
+    if engine != "http" {
+        io.say(&format!(
+            "[rewrite] engine is {engine:?}, so this model is not used until you set \
+             [rewrite] engine to \"http\"."
+        ));
     }
 }
 
@@ -721,7 +756,7 @@ mod tests {
     fn a_configuration_that_does_not_parse_is_said_and_the_defaults_are_shown() {
         let mut world = FakeWorld::new("menu-invalid-file", "[ui\ntoasts = ");
         let (_, said) = drive(&mut world, "\n");
-        assert!(said.contains("does not parse"), "{said}");
+        assert!(said.contains("does not load"), "{said}");
         assert!(said.contains("0 of 4 keys set"), "{said}");
     }
 
@@ -1209,6 +1244,96 @@ mod tests {
         assert_eq!(
             crate::popup::open_command("herdr", "herdr-voice", "settings")[7],
             "settings"
+        );
+    }
+
+    #[test]
+    fn a_number_that_is_not_finite_or_does_not_fit_the_key_is_refused() {
+        for value in ["inf", "-inf", "nan", "1e400", "1e39"] {
+            let mut world = FakeWorld::new("float-refused", "");
+            let typed = format!(
+                "{}\n{}\n{value}\n\n\n",
+                s("audio"),
+                k("audio", "silence_db")
+            );
+            let (code, said) = drive(&mut world, &typed);
+            assert_eq!(code, 0, "{value}: {said}");
+            assert!(said.contains("nothing was changed"), "{value}: {said}");
+            assert!(world.saved.is_empty(), "{value}");
+        }
+    }
+
+    #[test]
+    fn two_double_quotes_empty_a_text_key() {
+        let mut world = FakeWorld::new("empty-text", "[stt]\nlanguage = \"ru\"\n");
+        let typed = format!("{}\n{}\n\"\"\n\n\n", s("stt"), k("stt", "language"));
+        let (_, said) = drive(&mut world, &typed);
+        assert!(world.file().contains("language = \"\""), "{}", world.file());
+        assert!(said.contains("[stt] language is now \"\""), "{said}");
+        assert!(
+            said.contains("\"\" to empty it"),
+            "the prompt says how: {said}"
+        );
+    }
+
+    #[test]
+    fn the_microphone_list_says_how_to_go_back_to_the_system_default() {
+        let text = render_devices(&["Built-in".to_string()], "Built-in");
+        assert!(text.contains("delete the [audio] input line"), "{text}");
+        let unset = render_devices(&["Built-in".to_string()], "");
+        assert!(!unset.contains("delete the [audio] input line"), "{unset}");
+    }
+
+    #[test]
+    fn a_rewrite_model_for_an_engine_that_does_not_use_it_is_said_not_to_be_used_yet() {
+        let mut world = rewrite_world("rw-engine-agent", "http://h/v1/chat/completions");
+        world.list = Ok(vec!["m1".to_string()]);
+        let typed = format!("{}\n{}\n1\n\n\n", s("rewrite"), k("rewrite", "model"));
+        let (_, said) = drive(&mut world, &typed);
+        assert!(said.contains("[rewrite] engine is \"agent\""), "{said}");
+        assert!(said.contains("not used until"), "{said}");
+
+        let mut world = FakeWorld::new(
+            "rw-engine-http",
+            "[rewrite]\nengine = \"http\"\nurl = \"http://h/v1/chat/completions\"\n",
+        );
+        world.list = Ok(vec!["m1".to_string()]);
+        let (_, said) = drive(&mut world, &typed);
+        assert!(!said.contains("not used until"), "{said}");
+    }
+
+    #[test]
+    fn the_rewrite_engines_the_popup_accepts_are_the_ones_the_engine_resolves() {
+        for name in REWRITE_ENGINES {
+            let rewrite = crate::config::Rewrite {
+                engine: name.to_string(),
+                ..crate::config::Rewrite::default()
+            };
+            let resolved = crate::rewrite::resolve(&rewrite);
+            if let crate::rewrite::Resolution::Unavailable(why) = resolved {
+                assert!(!why.contains("unknown [rewrite] engine"), "{name}: {why}");
+            }
+        }
+        let bogus = crate::config::Rewrite {
+            engine: "whisperx".to_string(),
+            ..crate::config::Rewrite::default()
+        };
+        let crate::rewrite::Resolution::Unavailable(why) = crate::rewrite::resolve(&bogus) else {
+            panic!("an unknown engine is unavailable");
+        };
+        assert!(why.contains("unknown [rewrite] engine"), "{why}");
+    }
+
+    #[test]
+    fn the_end_of_the_input_inside_a_section_does_not_draw_the_sections_again() {
+        let mut world = FakeWorld::new("eof-in-section", "");
+        let (code, said) = drive(&mut world, "1\n");
+        assert_eq!(code, 1, "{said}");
+        assert_eq!(said.matches(". audio ").count(), 1, "{said}");
+        assert_eq!(
+            said.matches("nothing was read from the terminal").count(),
+            1,
+            "{said}"
         );
     }
 }

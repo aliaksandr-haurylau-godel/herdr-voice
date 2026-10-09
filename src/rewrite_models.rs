@@ -75,10 +75,13 @@ pub fn names_in(text: &str) -> Result<Vec<String>, ListFailure> {
             body_note(text)
         )));
     };
+    // A name is text from somebody else's server and goes to the terminal: control
+    // characters, an escape sequence among them, are not passed on.
     let names: Vec<String> = entries
         .iter()
         .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
-        .map(str::to_string)
+        .map(|id| id.chars().filter(|c| !c.is_control()).collect::<String>())
+        .filter(|id| !id.is_empty())
         .collect();
     if names.is_empty() {
         return Err(ListFailure::Empty);
@@ -90,24 +93,54 @@ pub fn names_in(text: &str) -> Result<Vec<String>, ListFailure> {
 /// bearer `token` when there is one.
 pub fn fetch(url: &str, token: &str, bound: Duration) -> Result<Vec<String>, ListFailure> {
     let list_url = models_url(url).ok_or_else(|| ListFailure::NoAddress(url.to_string()))?;
+    // No redirect is followed: one `GET` is all the popup sends, and a server that
+    // answers with another address is said to have done so.
     let agent = ureq::AgentBuilder::new()
         .timeout(bound)
+        .redirects(0)
         .max_idle_connections_per_host(0)
         .build();
     let mut request = agent.get(&list_url);
     if !token.is_empty() {
         request = request.set("Authorization", &format!("Bearer {token}"));
     }
+    // What a server says back is shown to the person, and a server or a proxy may
+    // echo the header it was sent: the token is taken out of whatever is shown.
+    let scrub = |text: String| {
+        if token.is_empty() {
+            text
+        } else {
+            text.replace(token, "***")
+        }
+    };
     let response = request
         .call()
-        .map_err(|e| ListFailure::Server(Cause::from_ureq(e, bound).describe(&list_url)))?;
+        .map_err(|e| ListFailure::Server(scrub(Cause::from_ureq(e, bound).describe(&list_url))))?;
+    // With redirects off, a 3xx answer is returned as a response and not as an error.
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        let explanation = response
+            .header("Location")
+            .map(|to| format!("it points to {to}"))
+            .unwrap_or_default();
+        return Err(ListFailure::Server(scrub(
+            Cause::Answered {
+                status,
+                explanation,
+            }
+            .describe(&list_url),
+        )));
+    }
     let mut text = String::new();
     response
         .into_reader()
         .take(READ_LIMIT)
         .read_to_string(&mut text)
-        .map_err(|e| ListFailure::BadBody(e.to_string()))?;
-    names_in(&text)
+        .map_err(|e| ListFailure::BadBody(scrub(e.to_string())))?;
+    names_in(&text).map_err(|failure| match failure {
+        ListFailure::BadBody(why) => ListFailure::BadBody(scrub(why)),
+        other => other,
+    })
 }
 
 #[cfg(test)]
@@ -301,5 +334,43 @@ mod tests {
                 "{said}"
             );
         }
+    }
+
+    #[test]
+    fn a_redirect_is_not_followed_so_one_get_is_all_that_is_ever_sent() {
+        let redirect = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/elsewhere\r\n\
+                        Content-Length: 0\r\nConnection: close\r\n\r\n";
+        let (url, server) = serve(redirect);
+        let failure = fetch(&url, "tok", Duration::from_secs(5)).unwrap_err();
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /v1/models"), "{request}");
+        let ListFailure::Server(said) = failure else {
+            panic!("a redirect is a server failure");
+        };
+        assert!(said.contains("302"), "{said}");
+    }
+
+    #[test]
+    fn a_server_that_echoes_the_token_does_not_put_it_on_the_screen() {
+        let body = r#"{"echo":"Authorization: Bearer s3cret-token"}"#;
+        let (url, server) = serve(&ok(body));
+        let failure = fetch(&url, "s3cret-token", Duration::from_secs(5)).unwrap_err();
+        server.join().unwrap();
+        assert!(!failure.to_string().contains("s3cret-token"), "{failure}");
+
+        let refusal = "HTTP/1.1 500 Oops\r\nContent-Length: 44\r\nConnection: close\r\n\r\n\
+                       {\"error\":\"bad header Bearer s3cret-token\"}";
+        let (url, server) = serve(refusal);
+        let failure = fetch(&url, "s3cret-token", Duration::from_secs(5)).unwrap_err();
+        server.join().unwrap();
+        assert!(!failure.to_string().contains("s3cret-token"), "{failure}");
+    }
+
+    #[test]
+    fn a_name_with_control_characters_reaches_the_screen_without_them() {
+        let names =
+            names_in("{\"data\":[{\"id\":\"a\\u001b[31mb\"},{\"id\":\"\\n\"},{\"id\":\"ok\"}]}")
+                .unwrap();
+        assert_eq!(names, vec!["a[31mb".to_string(), "ok".to_string()]);
     }
 }

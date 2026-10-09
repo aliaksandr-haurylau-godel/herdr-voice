@@ -198,8 +198,9 @@ impl std::fmt::Display for WriteError {
             WriteError::Refused { path, edit, why } => write!(
                 f,
                 "the edit ({edit}) would have made {path} unloadable ({why}), so nothing was \
-                 written. If the key is written in a form this editor does not read, such as \
-                 an inline table or a dotted key, change it in the file yourself"
+                 written. Check the value you typed; if it is right, the key may be written in \
+                 a form this editor does not read, such as an inline table or a dotted key: \
+                 change it in the file yourself"
             ),
             WriteError::Io { path, why } => write!(f, "cannot write {path}: {why}"),
         }
@@ -254,7 +255,7 @@ pub fn write_keys(directory: Option<&Path>, edits: &[Edit]) -> Result<PathBuf, W
     if let Err(e) = toml::from_str::<Config>(&original) {
         return Err(WriteError::AlreadyInvalid {
             path: shown,
-            why: e.message().to_string(),
+            why: config::parse_failure(&e, &original),
         });
     }
 
@@ -270,7 +271,7 @@ pub fn write_keys(directory: Option<&Path>, edits: &[Edit]) -> Result<PathBuf, W
         return Err(WriteError::Refused {
             path: shown,
             edit,
-            why: e.message().to_string(),
+            why: config::parse_failure(&e, &edited),
         });
     }
 
@@ -960,5 +961,30 @@ toasts = false
             said.contains("[audio] input = \"New\", [ui] blink_ms = \"fast\""),
             "{said}"
         );
+    }
+
+    #[test]
+    fn a_file_that_already_fails_to_load_does_not_have_its_token_printed_when_an_edit_is_refused() {
+        let dir = scratch("token-already-invalid");
+        std::fs::write(dir.join("config.toml"), "[stt]\ntoken = 12345\n").unwrap();
+        let said = write_keys(Some(&dir), &[input("New")])
+            .unwrap_err()
+            .to_string();
+        assert!(!said.contains("12345"), "{said}");
+        assert!(said.contains("line 2"), "{said}");
+    }
+
+    #[test]
+    fn a_refusal_says_to_check_the_value_first() {
+        let dir = scratch("refusal-advice");
+        std::fs::write(dir.join("config.toml"), "[ui]\nblink_ms = 250\n").unwrap();
+        let wrong = Edit {
+            table: "ui",
+            key: "blink_ms",
+            value: "-5".to_string(),
+        };
+        let said = write_keys(Some(&dir), &[wrong]).unwrap_err().to_string();
+        assert!(said.contains("Check the value you typed"), "{said}");
+        assert!(said.contains("inline table"), "{said}");
     }
 }
