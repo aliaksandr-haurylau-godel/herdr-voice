@@ -25,6 +25,17 @@ impl CpalSource {
     }
 }
 
+/// The names of the machine's input devices, the same strings `CpalSource::start`
+/// matches a configured name against, so the microphone popup and a take agree on
+/// what a device is called.
+pub fn input_names() -> Result<Vec<String>, String> {
+    let host = cpal::default_host();
+    let devices = host
+        .input_devices()
+        .map_err(|e| format!("cannot list input devices: {e}"))?;
+    Ok(devices.map(|d| d.to_string()).collect())
+}
+
 impl Source for CpalSource {
     fn start(&mut self, wanted: Option<&str>, sink: Sink) -> Result<Format, String> {
         let host = cpal::default_host();
