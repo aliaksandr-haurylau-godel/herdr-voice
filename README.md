@@ -56,11 +56,21 @@ instead of compiling. Every release is listed, with its
 own install line, at
 [github.com/aliaksandr-haurylau-godel/herdr-voice/releases](https://github.com/aliaksandr-haurylau-godel/herdr-voice/releases).
 
-herdr plugin manifests cannot declare keybindings, so three blocks go into your
+herdr plugin manifests cannot declare keybindings, so four blocks go into your
 herdr configuration. Invoke the plugin's `setup` action — from a terminal,
 `herdr plugin action invoke herdr-voice.setup` — and it opens a pane that
 shows the exact blocks, offers to append them, and says what it changed. Running
 it twice changes nothing the second time.
+
+The settings are one popup. Press the key `setup` offered for it (`prefix+shift+s`),
+or run `herdr plugin action invoke herdr-voice.settings`. It lists every section and
+key of `config.toml` with its value and marks the ones you have not set; you change a
+key by typing its number and the new value. The microphone is chosen there by name
+and the next take uses it at once. The speech model is chosen from the catalogue, and
+the rewrite model from the list your server serves. A change to anything but the
+microphone takes effect when herdr is restarted, and the popup says so. Tokens are
+never shown, only whether they are set, and the two `command` lists are changed in
+the file.
 
 If you used this plugin before its id became `herdr-voice`, your bindings name
 an id that no longer exists and the keys do nothing. The daemon says so once

@@ -7,7 +7,7 @@
 //! prints it even for a plugin that is not installed. See `tasks/3/DESIGN_3.md`,
 //! section 4, and `docs/design.md`, section 7.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::transport::PLUGIN_ID;
@@ -16,7 +16,7 @@ pub const FILE_NAME: &str = "config.toml";
 
 // `Eq` is absent on purpose: `silence_db` is an `f32`, which has no total
 // ordering. Nothing here needs more than `PartialEq`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     pub audio: Audio,
@@ -29,7 +29,7 @@ pub struct Config {
     pub record: Record,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Audio {
     /// The input device's name. Empty means the system default. Never an index:
@@ -50,7 +50,7 @@ impl Default for Audio {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Stt {
     /// A model identifier, not a file name: the file is `ggml-<model>.bin`.
@@ -84,7 +84,7 @@ impl Stt {
     pub const MIN_COMMAND_TIMEOUT_SECONDS: u64 = 1;
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Rewrite {
     pub engine: String,
@@ -145,7 +145,7 @@ impl Default for Rewrite {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Ui {
     pub toasts: bool,
@@ -187,7 +187,7 @@ impl Default for Ui {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Ptt {
     /// How long after the last keypress a hold counts as released.
@@ -213,7 +213,7 @@ impl Default for Ptt {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Delivery {
     pub submit: bool,
@@ -226,13 +226,13 @@ pub struct Delivery {
 /// `transcripts` here and `[context] source = "transcript"` are different things:
 /// this is what the person said, and that is what the agent said. See
 /// `docs/design.md` section 7.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Record {
     pub transcripts: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Context {
     /// `auto`, `transcript` or `pane`. Kept as a plain string here, the same
@@ -307,6 +307,32 @@ pub struct Loaded {
     pub source: Source,
 }
 
+/// Why a file does not load, with its position and without the line it is about.
+///
+/// The parser's own text quotes the offending line, and a value written without its
+/// quotes (`token = some-plain-value`) is then printed back, on a screen or into a
+/// log. A line that sets a token is therefore named by its position only.
+pub fn parse_failure(error: &toml::de::Error, text: &str) -> String {
+    let Some(span) = error.span() else {
+        return "the parser gave no position; check the file's syntax".to_string();
+    };
+    let before = &text[..span.start.min(text.len())];
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count())
+        + 1;
+    let source_line = text.lines().nth(line - 1).unwrap_or("");
+    if source_line.to_ascii_lowercase().contains("token") {
+        return format!(
+            "line {line}: this line sets a token, so the parser's message is not shown; check \
+             that the value is in quotes"
+        );
+    }
+    format!("line {line}, column {column}: {}", error.message())
+}
+
 pub fn load(directory: Option<&Path>) -> Loaded {
     let Some(directory) = directory else {
         return Loaded {
@@ -340,7 +366,7 @@ pub fn load(directory: Option<&Path>) -> Loaded {
                 config: Config::default(),
                 source: Source::Invalid {
                     path,
-                    why: e.to_string(),
+                    why: parse_failure(&e, &text),
                 },
             },
         },
@@ -751,5 +777,111 @@ mod tests {
         assert!(ui.sidebar_token);
         assert!(ui.tab_indicator);
         assert_eq!(ui.blink_ms, 600);
+    }
+
+    #[test]
+    fn the_defaults_serialise_with_every_section_and_a_value_for_every_key() {
+        let value = toml::Value::try_from(Config::default()).expect("the defaults serialise");
+        let table = value.as_table().expect("a table");
+        let mut names: Vec<&str> = table.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["audio", "context", "delivery", "ptt", "record", "rewrite", "stt", "ui"]
+        );
+        assert_eq!(table["audio"]["silence_db"].as_float(), Some(-60.0));
+        assert_eq!(table["stt"]["engine"].as_str(), Some("command"));
+        assert!(table["stt"]["command"].is_array());
+        assert_eq!(table["stt"]["token"].as_str(), Some(""));
+    }
+
+    #[test]
+    fn a_file_that_does_not_load_never_has_its_token_printed_in_the_reason() {
+        for (tag, text) in [
+            ("unquoted", "[rewrite]\ntoken = some-plain-value\n"),
+            ("number", "[rewrite]\ntoken = 12345\n"),
+        ] {
+            let directory = scratch(&format!("token-in-reason-{tag}"));
+            std::fs::write(directory.join("config.toml"), text).unwrap();
+            let Source::Invalid { why, .. } = load(Some(&directory)).source else {
+                panic!("{tag}: the file must not load");
+            };
+            assert!(
+                !why.contains("some-plain-value") && !why.contains("12345"),
+                "{tag}: {why}"
+            );
+            assert!(why.contains("line 2"), "{tag}: {why}");
+            assert!(why.contains("token"), "{tag}: it says what to check: {why}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_does_not_load_for_another_reason_keeps_the_parsers_words_and_the_position() {
+        let directory = scratch("reason-position");
+        std::fs::write(directory.join("config.toml"), "[ui]\nblink_ms = \"fast\"\n").unwrap();
+        let Source::Invalid { why, .. } = load(Some(&directory)).source else {
+            panic!("the file must not load");
+        };
+        assert!(why.contains("line 2"), "{why}");
+        assert!(why.contains("invalid type"), "{why}");
+        let directory = scratch("reason-syntax");
+        std::fs::write(directory.join("config.toml"), "[audio\ninput = \"x\"\n").unwrap();
+        let Source::Invalid { why, .. } = load(Some(&directory)).source else {
+            panic!("the file must not load");
+        };
+        assert!(
+            why.contains("line 1") && why.contains("expected `]`"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_failure_with_no_position_gives_no_message_of_the_parsers() {
+        use serde::de::Error as _;
+        let error = toml::de::Error::custom("token = 12345");
+        let said = parse_failure(&error, "");
+        assert!(!said.contains("12345"), "{said}");
+        assert!(said.contains("no position"), "{said}");
+    }
+
+    #[test]
+    fn the_position_is_the_line_and_the_column_of_the_value_and_never_the_line_itself() {
+        let text = "[ui]\nblink_ms = \"fast\"\n";
+        let error = toml::from_str::<Config>(text).unwrap_err();
+        let said = parse_failure(&error, text);
+        assert!(said.starts_with("line 2, column 12: "), "{said}");
+        assert!(!said.contains('\n'), "{said}");
+        assert!(!said.contains("blink_ms = "), "{said}");
+    }
+
+    #[test]
+    fn the_column_is_counted_in_characters_not_bytes() {
+        let text = "[audio]\ninput = \"ййй\" junk\n";
+        let error = toml::from_str::<Config>(text).unwrap_err();
+        let said = parse_failure(&error, text);
+        assert!(said.contains("line 2, column 15"), "{said}");
+    }
+
+    #[test]
+    fn only_the_line_that_sets_a_token_is_hidden() {
+        let text = "[rewrite]\ntoken = \"ok\"\n[ui]\nblink_ms = \"fast\"\n";
+        let error = toml::from_str::<Config>(text).unwrap_err();
+        let said = parse_failure(&error, text);
+        assert!(
+            said.contains("line 4") && said.contains("invalid type"),
+            "{said}"
+        );
+        assert!(!said.contains("sets a token"), "{said}");
+    }
+
+    #[test]
+    fn a_token_key_in_capitals_is_hidden_too() {
+        let text = "[rewrite]\nTOKEN = plain-value\n";
+        let error = toml::from_str::<Config>(text).unwrap_err();
+        let said = parse_failure(&error, text);
+        assert!(
+            said.contains("sets a token") && !said.contains("plain-value"),
+            "{said}"
+        );
     }
 }

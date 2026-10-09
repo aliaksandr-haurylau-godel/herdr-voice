@@ -26,10 +26,10 @@ impl Binding {
 /// could hold a `&'static Binding`. `decide` returns exactly that.
 ///
 /// The keys are the owner's decision, recorded in `tasks/41/RUN_41.md`. They are
-/// direct `ctrl+...` chords and one prefix chord: herdr's own default
+/// direct `ctrl+...` chords and prefix chords: herdr's own default
 /// configuration says `alt+...` depends on the terminal, and on the machine this
 /// was chosen on `alt+v` did nothing and `alt+g` typed a copyright sign.
-pub static BINDINGS: [Binding; 3] = [
+pub static BINDINGS: [Binding; 4] = [
     Binding {
         action: "ptt",
         key: "ctrl+g",
@@ -44,6 +44,11 @@ pub static BINDINGS: [Binding; 3] = [
         action: "cancel",
         key: "ctrl+shift+g",
         description: "dictation: cancel the recording",
+    },
+    Binding {
+        action: "settings",
+        key: "prefix+shift+s",
+        description: "herdr-voice: settings",
     },
 ];
 
@@ -875,11 +880,12 @@ pub fn run(
         } else {
             let _ = writeln!(
                 out,
-                "\nnothing was added to {}: {} of the three bindings are on keys \
+                "\nnothing was added to {}: {} of the {} bindings are on keys \
                  something else already holds, named above. Free those keys and run \
                  this again, or bind the actions to keys of your choosing by hand.",
                 path.display(),
-                decision.blocked.len()
+                decision.blocked.len(),
+                BINDINGS.len()
             );
         }
         report_legacy(legacy, out);
@@ -1168,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn the_three_bindings_are_the_ones_the_owner_chose() {
+    fn the_bindings_are_the_ones_the_owner_chose() {
         let pairs: Vec<(&str, &str)> = BINDINGS.iter().map(|b| (b.action, b.key)).collect();
         assert_eq!(
             pairs,
@@ -1176,6 +1182,7 @@ mod tests {
                 ("ptt", "ctrl+g"),
                 ("dictate", "prefix+i"),
                 ("cancel", "ctrl+shift+g"),
+                ("settings", "prefix+shift+s"),
             ]
         );
     }
@@ -1186,7 +1193,7 @@ mod tests {
         let parsed: toml::Value = toml::from_str(&render(&all))
             .expect("the snippet this action prints must itself be valid TOML");
         let commands = parsed["keys"]["command"].as_array().unwrap();
-        assert_eq!(commands.len(), 3);
+        assert_eq!(commands.len(), BINDINGS.len());
     }
 
     use tests_support::FakeHerdr;
@@ -1248,7 +1255,7 @@ mod tests {
              waiting for the answer; all that was flushed was: {on_screen:?}"
         );
         assert!(
-            on_screen.contains("3 bindings"),
+            on_screen.contains("4 bindings"),
             "the question must say what answering it does: {on_screen:?}"
         );
         assert!(
@@ -2499,9 +2506,9 @@ mod tests {
     }
 
     #[test]
-    fn a_clean_configuration_takes_all_three() {
+    fn a_clean_configuration_takes_all_four() {
         let d = decide(&Existing::default());
-        assert_eq!(d.to_add.len(), 3);
+        assert_eq!(d.to_add.len(), 4);
         assert!(d.already.is_empty());
         assert!(d.blocked.is_empty());
     }
@@ -2513,7 +2520,7 @@ mod tests {
             ..Existing::default()
         };
         let d = decide(&existing);
-        assert_eq!(d.to_add.len(), 2);
+        assert_eq!(d.to_add.len(), 3);
         assert_eq!(d.already.len(), 1);
         // It says which key it is on, which is not the key we would have used.
         assert_eq!(d.already[0].0.action, "ptt");
@@ -2527,7 +2534,7 @@ mod tests {
             ..Existing::default()
         };
         let d = decide(&existing);
-        assert_eq!(d.to_add.len(), 2, "the other two are still added");
+        assert_eq!(d.to_add.len(), 3, "the other three are still added");
         assert_eq!(d.blocked.len(), 1);
         assert_eq!(d.blocked[0].0.action, "ptt");
         assert_eq!(d.blocked[0].1, "someone.else.thing");
@@ -2589,7 +2596,7 @@ mod tests {
     fn a_command_block_with_a_key_and_no_command_still_reserves_that_key() {
         let existing = inspect("[[keys.command]]\nkey = \"ctrl+g\"\ntype = \"shell\"\n").unwrap();
         let d = decide(&existing);
-        assert_eq!(d.to_add.len(), 2, "the other two are still added");
+        assert_eq!(d.to_add.len(), 3, "the other three are still added");
         assert_eq!(d.blocked.len(), 1);
         assert_eq!(d.blocked[0].0.action, "ptt");
         assert!(
@@ -2628,19 +2635,24 @@ mod tests {
             &path,
             "[[keys.command]]\nkey = \"ctrl+g\"\ntype = \"shell\"\ncommand = \"one\"\n\n\
              [[keys.command]]\nkey = \"prefix+i\"\ntype = \"shell\"\ncommand = \"two\"\n\n\
-             [[keys.command]]\nkey = \"ctrl+shift+g\"\ntype = \"shell\"\ncommand = \"three\"\n",
+             [[keys.command]]\nkey = \"ctrl+shift+g\"\ntype = \"shell\"\ncommand = \"three\"\n\n\
+             [[keys.command]]\nkey = \"prefix+shift+s\"\ntype = \"shell\"\ncommand = \"four\"\n",
         )
         .unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
         let (code, said) = capture(&FakeHerdr::clean(), Some(path.clone()), true, vec!["y"]);
         assert_eq!(code, 0, "{said}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-        for holder in ["one", "two", "three"] {
+        for holder in ["one", "two", "three", "four"] {
             assert!(said.contains(holder), "every holder is named: {said}");
         }
         assert!(
             said.contains("nothing was added"),
-            "three refusals must not close on a line that reads like success: {said}"
+            "four refusals must not close on a line that reads like success: {said}"
+        );
+        assert!(
+            said.contains("4 of the 4 bindings"),
+            "the count comes from the list: {said}"
         );
     }
 
@@ -2763,5 +2775,15 @@ description = "ours, already here"
                 binding.action
             );
         }
+    }
+
+    #[test]
+    fn the_snippet_for_the_settings_carries_its_action_and_description() {
+        let rendered = render(&[BINDINGS.last().unwrap()]);
+        assert!(rendered.contains("herdr-voice.settings"), "{rendered}");
+        assert!(
+            rendered.contains("description = \"herdr-voice: settings\""),
+            "{rendered}"
+        );
     }
 }

@@ -14,6 +14,7 @@ mod capture;
 mod chooser;
 mod client;
 mod config;
+mod config_edit;
 mod context;
 mod daemon;
 mod delivery;
@@ -25,15 +26,19 @@ mod gate;
 mod http_failure;
 mod indicator;
 mod outward;
+mod popup;
 mod proto;
 mod ptt;
 mod record;
+mod reload;
 mod repeat;
 mod rewrite;
+mod rewrite_models;
 /// Test-only, unix-only: writes a script a test then runs, and returns only
 /// once it can be executed.
 #[cfg(all(test, unix))]
 mod script_fixture;
+mod settings;
 mod setup;
 mod stderr;
 mod stt;
@@ -66,8 +71,8 @@ enum Command {
     Status,
     /// Choose the speech model.
     Model,
-    /// Choose the microphone.
-    Mic,
+    /// Change the configuration; `--open` opens the popup in herdr.
+    Settings,
     /// Print the version and exit.
     Version,
     /// Print usage.
@@ -88,7 +93,7 @@ impl Command {
             Command::Setup => "setup",
             Command::Status => "status",
             Command::Model => "model",
-            Command::Mic => "mic",
+            Command::Settings => "settings",
             Command::Version => "version",
             Command::Help => "help",
             Command::Unknown(_) => "unknown",
@@ -107,7 +112,7 @@ fn parse(args: &[String]) -> Command {
         Some("setup") => Command::Setup,
         Some("status") => Command::Status,
         Some("model") => Command::Model,
-        Some("mic") => Command::Mic,
+        Some("settings") => Command::Settings,
         Some("--version") | Some("-V") | Some("version") => Command::Version,
         Some(other) => Command::Unknown(other.to_string()),
     }
@@ -127,7 +132,7 @@ pub const MIN_HERDR_VERSION: &str = "0.8.0";
 /// nowhere else would trip `dead_code`, and CI runs clippy with `-D warnings`.
 #[cfg(test)]
 const IMPLEMENTED: &[&str] = &[
-    "daemon", "doctor", "cancel", "dictate", "model", "ptt", "setup",
+    "daemon", "doctor", "cancel", "dictate", "model", "ptt", "setup", "settings",
 ];
 
 const USAGE: &str = "\
@@ -140,6 +145,7 @@ usage:
   herdr-voice dictate    start a recording, or finish the one running
   herdr-voice ptt        one keypress of hold-to-talk; bind it to a key
   herdr-voice model      list the speech models, or --choose to install one
+  herdr-voice settings   change the configuration; --open opens the popup in herdr
   herdr-voice setup      print the keybindings to add, and offer to add them
   herdr-voice --version  print the version
 ";
@@ -185,7 +191,12 @@ fn main() -> ExitCode {
             ExitCode::from(chooser::run(choosing))
         }
         Command::Setup => ExitCode::from(setup::main()),
-        other @ (Command::Status | Command::Mic) => {
+        Command::Settings => ExitCode::from(settings::dispatch(
+            &args,
+            &mut settings::open,
+            &mut settings::run,
+        )),
+        other @ Command::Status => {
             eprintln!("{}: not implemented yet", other.name());
             ExitCode::from(NOT_IMPLEMENTED)
         }
@@ -222,7 +233,7 @@ mod tests {
         // The manifest names these; rejecting one would produce a plugin that
         // installs and then does nothing when the action is invoked.
         for name in [
-            "daemon", "dictate", "ptt", "cancel", "setup", "status", "model", "mic", "doctor",
+            "daemon", "dictate", "ptt", "cancel", "setup", "status", "model", "settings", "doctor",
         ] {
             assert!(
                 !matches!(parse(&args(&[name])), Command::Unknown(_)),
@@ -235,19 +246,17 @@ mod tests {
     fn the_commands_this_issue_implements_are_not_in_the_unimplemented_arm() {
         // A guard against a later change quietly folding one back into the 69 arm.
         for name in [
-            "daemon", "doctor", "cancel", "dictate", "model", "ptt", "setup",
+            "daemon", "doctor", "cancel", "dictate", "model", "ptt", "setup", "settings",
         ] {
             assert!(
                 IMPLEMENTED.contains(&name),
                 "{name} is implemented and must not report 'not implemented yet'"
             );
         }
-        for name in ["status", "mic"] {
-            assert!(
-                !IMPLEMENTED.contains(&name),
-                "{name} is not implemented in this issue"
-            );
-        }
+        assert!(
+            !IMPLEMENTED.contains(&"status"),
+            "status is not implemented in this issue"
+        );
     }
 
     #[test]
@@ -263,5 +272,19 @@ mod tests {
             parse(&args(&["transcribe"])),
             Command::Unknown("transcribe".to_string())
         );
+    }
+
+    #[test]
+    fn the_separate_microphone_command_is_gone() {
+        // The microphone is a section of the settings popup.
+        assert_eq!(parse(&args(&["mic"])), Command::Unknown("mic".to_string()));
+        assert!(!IMPLEMENTED.contains(&"mic"));
+        assert!(!USAGE.contains("herdr-voice mic"));
+        assert!(USAGE.contains("herdr-voice settings"));
+    }
+
+    #[test]
+    fn the_usage_says_what_settings_does_and_what_its_flag_is_for() {
+        assert!(USAGE.contains("change the configuration; --open opens the popup in herdr"));
     }
 }

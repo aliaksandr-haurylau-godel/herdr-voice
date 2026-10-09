@@ -55,6 +55,13 @@ description = "Print the keybindings to add, and offer to add them"
 contexts = ["global"]
 command = ["target/release/herdr-voice", "setup"]
 
+[[actions]]
+id = "settings"
+title = "herdr-voice: settings"
+description = "Open the popup that shows every setting and changes it, including the microphone and both models"
+contexts = ["global"]
+command = ["target/release/herdr-voice", "settings", "--open"]
+
 [[panes]]
 id = "setup"
 title = "Dictation: setup"
@@ -80,9 +87,9 @@ height = 16
 command = ["target/release/herdr-voice", "model", "--choose"]
 
 [[panes]]
-id = "mic"
-title = "Choose a microphone"
+id = "settings"
+title = "herdr-voice: settings"
 placement = "popup"
-width = "60%"
-height = 14
-command = ["target/release/herdr-voice", "mic", "--choose"]
+width = "70%"
+height = 24
+command = ["target/release/herdr-voice", "settings"]

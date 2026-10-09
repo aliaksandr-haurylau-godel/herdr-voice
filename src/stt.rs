@@ -43,7 +43,7 @@ pub enum EngineError {
 }
 
 /// The engines this build can be asked for.
-const ENGINES: &[&str] = &["candle", "http", "command"];
+pub(crate) const ENGINES: &[&str] = &["candle", "http", "command"];
 
 /// What `[stt] command` might look like, taken from what the prototype ran.
 const COMMAND_EXAMPLE: &str = r#"command = ["whisper-cli", "-m", "{model}", "-f", "{audio}", "-l", "{language}", "-np", "-nt"]"#;

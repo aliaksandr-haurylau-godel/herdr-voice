@@ -22,6 +22,12 @@ pub const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 /// landing squarely on the successful case.
 pub const WORKING_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long a popup waits for the answer to a reload. The daemon answers it after
+/// the order already in the recorder's queue, and opening a Bluetooth headset can
+/// take longer than `REPLY_TIMEOUT`; a late answer would otherwise be reported as a
+/// daemon that did not take the change, and then be applied anyway.
+pub const RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The bound for a command, chosen by its name.
 ///
 /// By name and not by what the command turns out to do: the client picks its bound
@@ -32,6 +38,7 @@ pub const WORKING_TIMEOUT: Duration = Duration::from_secs(120);
 pub fn timeout_for(command: &str) -> Duration {
     match command {
         "dictate" => WORKING_TIMEOUT,
+        "reload" => RELOAD_TIMEOUT,
         _ => REPLY_TIMEOUT,
     }
 }
@@ -112,10 +119,22 @@ pub fn send_to(
     entrypoint: Option<String>,
     context: Vec<u8>,
 ) -> Outcome {
+    outcome(exchange(address, command, entrypoint, context))
+}
+
+/// One connection, one frame, one reply: what `send_to` does, before every result
+/// is turned into a code and a message. A caller that has to tell "no daemon" from
+/// "the daemon refused" reads this and not the message text.
+pub fn exchange(
+    address: &Address,
+    command: &str,
+    entrypoint: Option<String>,
+    context: Vec<u8>,
+) -> Result<Reply, ClientError> {
     let waited = timeout_for(command);
     let mut stream = match transport::connect(address) {
         Ok(stream) => stream,
-        Err(_) => return outcome(Err(ClientError::NoDaemon(address.display().to_string()))),
+        Err(_) => return Err(ClientError::NoDaemon(address.display().to_string())),
     };
 
     let request = Request {
@@ -124,7 +143,7 @@ pub fn send_to(
         context,
     };
     if let Err(e) = request.write_to(&mut stream) {
-        return outcome(Err(ClientError::Transport(e.to_string())));
+        return Err(ClientError::Transport(e.to_string()));
     }
 
     // The reply is read on another thread so a daemon that never answers costs a
@@ -137,15 +156,31 @@ pub fn send_to(
     });
 
     match receiver.recv_timeout(waited) {
-        Ok(Ok(reply)) => outcome(Ok(reply)),
-        Ok(Err(why)) => outcome(Err(ClientError::Protocol(why))),
-        Err(_) => outcome(Err(ClientError::Timeout(waited))),
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(why)) => Err(ClientError::Protocol(why)),
+        Err(_) => Err(ClientError::Timeout(waited)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exchange_with_nobody_listening_says_no_daemon_rather_than_a_code() {
+        let dir = std::env::temp_dir().join(format!("herdr-voice-exchange-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let address = transport::address(&transport::Vars {
+            state_dir: Some(dir.display().to_string()),
+            xdg_state_home: None,
+            home: None,
+        })
+        .expect("an address");
+        assert!(matches!(
+            exchange(&address, "reload", None, Vec::new()),
+            Err(ClientError::NoDaemon(_))
+        ));
+    }
 
     #[test]
     fn an_ok_reply_succeeds_and_passes_on_what_the_daemon_said() {
@@ -298,6 +333,31 @@ mod tests {
                 code: 1,
                 message: Some(TEXT.to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn a_reload_may_wait_behind_a_device_that_is_still_opening() {
+        // The daemon answers it after the order already in the recorder's queue, and
+        // opening a Bluetooth headset can take longer than the short bound.
+        assert!(timeout_for("reload") > REPLY_TIMEOUT);
+        assert!(timeout_for("reload") <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_daemon_that_closes_without_answering_is_a_protocol_failure_not_a_timeout() {
+        let address = crate::transport::tests_support::probe_address("client-closes");
+        let listener = crate::transport::listen(&address).expect("listen");
+        let server = std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(listener.accept().expect("accept"));
+            let _ = Request::read_from(&mut reader);
+            // The stream is dropped here, with nothing written.
+        });
+        let result = exchange(&address, "reload", None, Vec::new());
+        server.join().unwrap();
+        assert!(
+            matches!(result, Err(ClientError::Protocol(_))),
+            "{result:?}"
         );
     }
 }

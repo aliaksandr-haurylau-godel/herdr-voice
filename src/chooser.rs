@@ -1,17 +1,19 @@
 //! Choosing a speech model, and downloading the one chosen.
 //!
 //! Two entry points because two questions are asked: `herdr-voice model` says
-//! what exists, and `--choose` spends the gigabytes. The configuration edit is
-//! line-oriented so comments and every other key survive — the `toml` crate in
-//! the tree parses and does not preserve formatting, and `toml_edit` is a new
-//! dependency for one line of text. See `tasks/15/DESIGN_15.md`, section 5.
+//! what exists, and `--choose` spends the gigabytes. The same flow,
+//! `choose_speech_model`, is the speech-model entry of the settings popup. The
+//! configuration edit is `config_edit`'s: it changes one key and leaves everything
+//! else in the file. See `tasks/15/DESIGN_15.md`, section 5, and
+//! `tasks/104/DESIGN_104.md`, section 2.4.
 
-use std::io::Write;
 use std::path::Path;
 
-use crate::stt::candle::store;
+use crate::popup::{
+    config_note, not_in_list, parse_answer, save_and_tell, Answer, Io, Real, World, LEAVE_HINT,
+};
+use crate::stt::candle::store::Glance;
 use crate::stt::catalogue::{self, Entry};
-use crate::stt::fetch;
 
 /// A size the way a person reads it, not the way a computer stores it.
 fn human(bytes: u64) -> String {
@@ -32,14 +34,19 @@ fn human(bytes: u64) -> String {
 /// installed is asking a question about names and sizes, and waiting a minute
 /// for the answer would be absurd. The full check happens where it matters —
 /// before a model is loaded, and again right after a download.
-fn list(models: &Path, configured: &str) -> String {
+pub fn list(
+    catalogue: &'static [Entry],
+    configured: &str,
+    state: &dyn Fn(&Entry) -> Glance,
+    models: Option<&Path>,
+) -> String {
     let mut out = String::from("Speech models this plugin can install:\n\n");
-    for (i, entry) in catalogue::MODELS.iter().enumerate() {
+    for (i, entry) in catalogue.iter().enumerate() {
         let size = human(catalogue::weights(entry).bytes);
-        let present = match store::glance(models, entry.identifier, Some(entry)) {
-            store::Glance::Whole => "installed",
-            store::Glance::Absent => "not installed",
-            store::Glance::WrongSize => "installed, but the wrong size",
+        let present = match state(entry) {
+            Glance::Whole => "installed",
+            Glance::Absent => "not installed",
+            Glance::WrongSize => "installed, but the wrong size",
         };
         let marker = if entry.identifier == configured {
             "  (current)"
@@ -54,267 +61,205 @@ fn list(models: &Path, configured: &str) -> String {
             entry.mel_bins
         ));
     }
-    out.push_str("\nThey live in ");
-    out.push_str(&models.join("candle").display().to_string());
-    out.push('\n');
+    if let Some(models) = models {
+        out.push_str("\nThey live in ");
+        out.push_str(&models.join("candle").display().to_string());
+        out.push('\n');
+    }
     out
 }
 
-/// The entry a typed answer names, or `None` — never a guess.
-fn pick(answer: &str) -> Option<&'static Entry> {
-    let n: usize = answer.trim().parse().ok()?;
-    if n == 0 {
-        return None;
-    }
-    catalogue::MODELS.get(n - 1)
-}
+/// What to do next for an engine that does not use a model from this catalogue. The
+/// catalogue installs weights for the built-in engine, `candle`, and a person who
+/// uses another engine decides whether to move to it; the popup never does.
+const MOVE_TO_CANDLE: &str = "To use a model from this list, set [stt] engine to \"candle\" \
+     in the settings popup, then choose the model again";
 
-/// A progress line that overwrites itself, so a 3 GB download is one line.
-struct Line {
-    name: String,
-    total: u64,
-}
+/// The speech-model flow: list the catalogue, take a number, and by the engine in
+/// the configuration either install and write `[stt] model`, or say why not and
+/// what to change. Writes nothing for an engine that would not use the model.
+pub fn choose_speech_model(world: &mut dyn World, io: &mut Io, catalogue: &'static [Entry]) {
+    if catalogue.is_empty() {
+        io.say(
+            "No speech models are on offer in this build, which is a defect in the build: \
+             report it, and set [stt] model by hand in the meantime.",
+        );
+        io.fail();
+        return;
+    }
+    let snapshot = world.snapshot();
+    if let Some(note) = config_note(&snapshot.loaded.source) {
+        io.say(&note);
+    }
+    let stt = snapshot.loaded.config.stt.clone();
+    let models = world.models_dir();
+    let listing = list(
+        catalogue,
+        &stt.model,
+        &|entry| world.model_state(entry),
+        models.as_deref(),
+    );
+    io.say(&listing);
 
-impl fetch::Progress for Line {
-    fn file(&mut self, name: &str, total: u64) {
-        self.name = name.to_string();
-        self.total = total;
-    }
-    fn bytes(&mut self, done: u64) {
-        // A zero total means the catalogue said the file is empty, which it
-        // never does; checked_div keeps that from being a division by zero
-        // anyway, because a progress line is not worth a panic.
-        let percent = (done * 100).checked_div(self.total).unwrap_or(0);
-        print!("\r  {} {percent:>3}%  ", self.name);
-        let _ = std::io::stdout().flush();
-    }
-    fn done(&mut self, name: &str) {
-        println!("\r  {name} done            ");
-    }
-}
-
-/// The table a line opens, if it opens one: `[stt] # speech` is the `[stt]`
-/// table, and TOML says so.
-///
-/// A naive `starts_with('[') && ends_with(']')` misses exactly that line, and
-/// missing it made the editor append a second `[stt]` table and produce a file
-/// that does not parse — which `config::load` then discards whole, losing every
-/// other setting in it. Found by an S4 review.
-fn table_name(line: &str) -> Option<&str> {
-    let line = line.trim_start();
-    let mut rest = line.strip_prefix('[')?;
-    // Scan to the closing bracket, ignoring one inside a quoted key.
-    let mut quoted = false;
-    let mut end = None;
-    for (at, c) in rest.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            ']' if !quoted => {
-                end = Some(at);
-                break;
-            }
-            _ => {}
+    let Some(line) = io.ask(&format!(
+        "Type the number of the model, then Enter. {LEAVE_HINT}: "
+    )) else {
+        return;
+    };
+    let entry = match parse_answer(&line, catalogue.len()) {
+        Answer::Leave => {
+            io.say("Nothing was changed.");
+            return;
         }
+        Answer::Invalid(text) => {
+            io.say(&not_in_list(&text, catalogue.len()));
+            return;
+        }
+        Answer::Pick(at) => &catalogue[at],
+    };
+    let id = entry.identifier;
+
+    match stt.engine.as_str() {
+        "candle" => install_and_write(world, io, entry, &stt.model),
+        "command" if stt.command.is_empty() => io.say(&format!(
+            "[stt] engine is \"command\" but [stt] command is empty, so no speech engine is set \
+             up yet, and nothing was changed. `herdr-voice doctor` says what is missing. \
+             {MOVE_TO_CANDLE}."
+        )),
+        "command" if crate::stt::wants_our_model(&stt.command) => {
+            let file = crate::stt::model::file_name(id);
+            let place = match &models {
+                Some(dir) => dir.join(&file).display().to_string(),
+                None => format!("{file} in the models directory"),
+            };
+            io.say(&format!(
+                "[stt] engine is \"command\" and its command uses {{model}}, so a take looks for \
+                 the file {place}. The models in this list are weights for the built-in engine \
+                 (\"candle\"), so installing {id} would not change what a take uses. Nothing was \
+                 downloaded or written.\n\
+                 To use {id}: {MOVE_TO_CANDLE}; or, to keep the command, put {file} into the \
+                 models directory, then set [stt] model to \"{id}\" in the configuration file."
+            ));
+        }
+        "command" => io.say(&format!(
+            "[stt] engine is \"command\" and its command does not use {{model}}: it brings its \
+             own model, so [stt] model is not used and nothing was changed. {MOVE_TO_CANDLE}."
+        )),
+        "http" => io.say(&format!(
+            "[stt] engine is \"http\": the server's model is named by [stt] http_model, \
+             [stt] model is not used, and nothing was changed. {MOVE_TO_CANDLE}."
+        )),
+        other => io.say(&format!(
+            "[stt] engine is {other:?}, which is not one of {}; nothing was changed. \
+             {MOVE_TO_CANDLE}.",
+            crate::stt::ENGINES.join(", ")
+        )),
     }
-    let end = end?;
-    let name = &rest[..end];
-    rest = &rest[end + 1..];
-    // Only whitespace or a comment may follow the header.
-    let tail = rest.trim_start();
-    if tail.is_empty() || tail.starts_with('#') {
-        Some(name.trim())
+}
+
+/// The `candle` branch: download what is missing, then write `[stt] model` when it
+/// is not the configured one.
+fn install_and_write(world: &mut dyn World, io: &mut Io, entry: &'static Entry, configured: &str) {
+    let id = entry.identifier;
+    let state = world.model_state(entry);
+    let here = configured == id;
+    if state == Glance::Whole && here {
+        io.say(&format!("{id} is installed and already configured."));
+        return;
+    }
+    if state == Glance::Whole {
+        io.say(&format!("{id} is already installed."));
     } else {
-        None
-    }
-}
-
-/// `[stt] model = "<identifier>"`, put into a configuration file's text without
-/// disturbing anything else in it.
-fn set_model_key(existing: &str, identifier: &str) -> String {
-    let line = format!("model = \"{identifier}\"");
-    let mut out: Vec<String> = Vec::new();
-    let mut in_stt = false;
-    let mut wrote = false;
-    let mut saw_stt = false;
-
-    for text in existing.lines() {
-        let trimmed = text.trim();
-        if let Some(name) = table_name(text) {
-            // Leaving [stt] without having found a model key: add one at its end.
-            if in_stt && !wrote {
-                out.push(line.clone());
-                wrote = true;
-            }
-            in_stt = name == "stt";
-            saw_stt |= in_stt;
-            out.push(text.to_string());
-            continue;
-        }
-        // Only a `model` key inside [stt]. [rewrite] has one too, and editing
-        // that one would silently repoint the rewrite engine.
-        if in_stt && !wrote {
-            if let Some(rest) = trimmed.strip_prefix("model") {
-                if rest.trim_start().starts_with('=') {
-                    out.push(line.clone());
-                    wrote = true;
-                    continue;
-                }
-            }
-        }
-        out.push(text.to_string());
-    }
-
-    if in_stt && !wrote {
-        out.push(line.clone());
-        wrote = true;
-    }
-    if !saw_stt {
-        if !out.is_empty() && !out.last().is_some_and(|l| l.trim().is_empty()) {
-            out.push(String::new());
-        }
-        out.push("[stt]".to_string());
-        out.push(line);
-    } else if !wrote {
-        out.push(line);
-    }
-
-    let mut text = out.join("\n");
-    text.push('\n');
-    text
-}
-
-/// Read the configuration file, put `[stt] model` in it, write it back. Returns
-/// the file written, for the message.
-fn write_model_key(
-    vars: &crate::config::Vars,
-    identifier: &str,
-) -> Result<std::path::PathBuf, String> {
-    let dir = crate::config::directory(vars)
-        .ok_or_else(|| "there is no configuration directory to write to".to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(crate::config::FILE_NAME);
-    // An absent configuration file is a valid state, so this is a create, not a
-    // failure (`CLAUDE.md`, "Rules for the code").
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let edited = set_model_key(&existing, identifier);
-    // Never write a file that does not parse. `config::load` treats an
-    // unparsable file as absent and falls back to every default, so a bad edit
-    // here would silently discard every other setting the person has — the
-    // "silent failure" `CLAUDE.md` weighs the same as a wrong transcript. The
-    // caller prints the one line to add by hand when this refuses.
-    if toml::from_str::<toml::Value>(&edited).is_err() {
-        return Err(format!(
-            "the edit would have made {} unparsable, so nothing was written",
-            path.display()
+        io.say(&format!(
+            "Installing {id} ({})",
+            human(catalogue::weights(entry).bytes)
         ));
+        if let Err(why) = world.install(entry) {
+            io.say(&why);
+            io.fail();
+            return;
+        }
+        io.say(&format!("{id} is installed."));
+        if here {
+            // The daemon built its speech engine at start, when this model was not
+            // there, and nothing in the file changed for a reload to report.
+            io.say(
+                "The daemon loaded its speech engine before it was there, so restart herdr to \
+                 use it.",
+            );
+        }
     }
-    std::fs::write(&path, edited).map_err(|e| e.to_string())?;
-    Ok(path)
+    if here {
+        return;
+    }
+    save_and_tell(
+        world,
+        io,
+        "stt",
+        "model",
+        crate::config_edit::quote(id),
+        &format!("{id:?}"),
+    );
 }
 
 /// `herdr-voice model`, and `--choose`. Returns the process's exit code.
-///
-/// The models directory is resolved here rather than passed in, the same way
-/// `doctor::run` does it, because this is the outermost layer: `list`, `pick`
-/// and `set_model_key` all take what they need and are testable without an
-/// environment.
 pub fn run(choosing: bool) -> u8 {
-    let models = match crate::transport::state_directory(&crate::transport::Vars::from_env()) {
-        Some(state) => state.join("models"),
-        None => {
-            eprintln!(
-                "cannot tell where models live: neither HERDR_PLUGIN_STATE_DIR nor a \
-                 home directory is set, so there is nowhere to put one. Set \
-                 HERDR_PLUGIN_STATE_DIR and try again"
-            );
-            return 1;
-        }
-    };
-    let vars = crate::config::Vars::from_env();
-    let loaded = crate::config::load(crate::config::directory(&vars).as_deref());
-
-    print!("{}", list(&models, &loaded.config.stt.model));
+    let mut world = Real::from_env();
     if !choosing {
+        let snapshot = world.snapshot();
+        let models = world.models_dir();
+        print!(
+            "{}",
+            list(
+                &catalogue::MODELS,
+                &snapshot.loaded.config.stt.model,
+                &|entry| world.model_state(entry),
+                models.as_deref(),
+            )
+        );
         return 0;
     }
-
-    println!("\nType the number of the model to install, then Enter.");
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        eprintln!("nothing was read from the terminal; run `herdr-voice model --choose` again");
-        return 1;
-    }
-    let entry = match pick(&answer) {
-        Some(entry) => entry,
-        None => {
-            eprintln!(
-                "{:?} is not one of the numbers above. Run `herdr-voice model --choose` \
-                 again and type a number between 1 and {}",
-                answer.trim(),
-                catalogue::MODELS.len()
-            );
-            return 1;
-        }
+    let code = {
+        let stdin = std::io::stdin();
+        let mut input = stdin.lock();
+        let mut out = std::io::stdout();
+        let mut io = Io::new(&mut input, &mut out);
+        choose_speech_model(&mut world, &mut io, &catalogue::MODELS);
+        u8::from(io.failed)
     };
-
-    println!(
-        "Installing {} ({})",
-        entry.identifier,
-        human(catalogue::weights(entry).bytes)
-    );
-    let mut line = Line {
-        name: String::new(),
-        total: 0,
-    };
-    if let Err(why) = fetch::model(entry.identifier, &models, &mut line) {
-        eprintln!("{why}");
-        return 1;
-    }
-
-    // Verify what was just downloaded with the real check, not the glance the
-    // listing uses: this is the moment a bad download must be caught.
-    if let Err(why) = store::locate(&models, entry.identifier, Some(entry)) {
-        eprintln!("{why}");
-        return 1;
-    }
-
-    if loaded.config.stt.model == entry.identifier {
-        println!("{} is installed and already configured.", entry.identifier);
-        return 0;
-    }
-    match write_model_key(&vars, entry.identifier) {
-        Ok(path) => {
-            println!(
-                "{} is installed, and {} now names it.",
-                entry.identifier,
-                path.display()
-            );
-            println!("The daemon still holds the previous model. Restart it to use this one.");
-            0
-        }
-        Err(why) => {
-            // The model is on disk and good; only the configuration edit failed,
-            // so the person needs one line, not another three gigabytes.
-            eprintln!(
-                "{} is installed, but the configuration could not be written: {why}",
-                entry.identifier
-            );
-            eprintln!("Add this to [stt] in your configuration file by hand:");
-            eprintln!("  model = \"{}\"", entry.identifier);
-            1
-        }
-    }
+    crate::popup::pause();
+    code
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::popup::tests_support::FakeWorld;
+    use crate::popup::Reached;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+
+    /// Runs the flow with `typed` as the person's input; returns the printed text.
+    fn drive(world: &mut FakeWorld, typed: &str, catalogue: &'static [Entry]) -> (String, bool) {
+        let mut input = Cursor::new(typed.as_bytes().to_vec());
+        let mut out: Vec<u8> = Vec::new();
+        let mut io = Io::new(&mut input, &mut out);
+        choose_speech_model(world, &mut io, catalogue);
+        let failed = io.failed;
+        (String::from_utf8(out).unwrap(), failed)
+    }
+
+    fn state(glance: Glance) -> impl Fn(&Entry) -> Glance {
+        move |_| glance
+    }
 
     #[test]
     fn the_listing_shows_every_model_with_a_size_before_anything_is_downloaded() {
         let text = list(
-            &std::path::PathBuf::from("/nowhere-at-all"),
+            &catalogue::MODELS,
             "large-v3-turbo",
+            &state(Glance::Absent),
+            Some(&PathBuf::from("/nowhere-at-all")),
         );
         for entry in catalogue::MODELS.iter() {
             assert!(
@@ -329,11 +274,26 @@ mod tests {
             text.contains("not installed"),
             "it must say what is there: {text}"
         );
+        let home = PathBuf::from("/nowhere-at-all").join("candle");
+        assert!(text.contains(&home.display().to_string()), "{text}");
+    }
+
+    #[test]
+    fn the_listing_says_what_is_installed_and_what_is_the_wrong_size() {
+        let whole = list(&catalogue::MODELS, "", &state(Glance::Whole), None);
+        assert!(whole.contains("— installed"), "{whole}");
+        assert!(!whole.contains("not installed"), "{whole}");
+        let wrong = list(&catalogue::MODELS, "", &state(Glance::WrongSize), None);
+        assert!(wrong.contains("the wrong size"), "{wrong}");
+        assert!(
+            !wrong.contains("They live in"),
+            "no directory, no line about it: {wrong}"
+        );
     }
 
     #[test]
     fn the_configured_model_is_marked_in_the_listing() {
-        let text = list(&std::path::PathBuf::from("/nowhere-at-all"), "small");
+        let text = list(&catalogue::MODELS, "small", &state(Glance::Absent), None);
         let marked: Vec<&str> = text.lines().filter(|l| l.contains("small")).collect();
         assert_eq!(marked.len(), 1, "got {marked:?}");
         assert!(marked[0].contains("current"), "got {}", marked[0]);
@@ -347,145 +307,235 @@ mod tests {
     }
 
     #[test]
-    fn a_choice_outside_the_list_is_refused_rather_than_guessed() {
-        for answer in ["", "0", "7", "large", "-1", "2x"] {
-            assert!(
-                pick(answer).is_none(),
-                "{answer:?} must not resolve to a model"
-            );
+    fn with_the_candle_engine_a_model_that_is_not_there_is_installed_and_written() {
+        let mut world = FakeWorld::new(
+            "choose-candle",
+            "[stt]\nengine = \"candle\"\nlanguage = \"ru\"\n",
+        );
+        world.reached = Reached::NoDaemon;
+        let (said, failed) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(!failed, "{said}");
+        assert_eq!(world.installs, vec!["tiny".to_string()]);
+        assert_eq!(world.saved, vec!["[stt] model = \"tiny\"".to_string()]);
+        assert_eq!(world.told, 1);
+        assert!(said.contains("Installing tiny (151 MB)"), "{said}");
+        // The configuration now uses the model, and nothing else in it changed.
+        let file = world.file();
+        assert!(file.contains("model = \"tiny\""), "{file}");
+        assert!(
+            file.contains("engine = \"candle\"") && file.contains("language = \"ru\""),
+            "{file}"
+        );
+    }
+
+    #[test]
+    fn with_the_candle_engine_a_model_that_is_there_but_not_configured_is_not_downloaded_again() {
+        let mut world = FakeWorld::new("choose-candle-there", "[stt]\nengine = \"candle\"\n");
+        world.states.push(("small".to_string(), Glance::Whole));
+        let (said, _) = drive(&mut world, "3\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty(), "{said}");
+        assert_eq!(world.saved, vec!["[stt] model = \"small\"".to_string()]);
+        assert!(said.contains("small is already installed"), "{said}");
+    }
+
+    #[test]
+    fn with_the_candle_engine_the_configured_installed_model_is_said_to_be_so_and_nothing_happens()
+    {
+        let mut world = FakeWorld::new(
+            "choose-candle-configured",
+            "[stt]\nengine = \"candle\"\nmodel = \"tiny\"\n",
+        );
+        world.states.push(("tiny".to_string(), Glance::Whole));
+        let before = world.file();
+        let (said, failed) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(!failed);
+        assert!(
+            said.contains("tiny is installed and already configured"),
+            "{said}"
+        );
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert_eq!(world.told, 0);
+        assert_eq!(world.file(), before);
+    }
+
+    #[test]
+    fn with_the_candle_engine_the_configured_model_that_is_missing_is_installed_without_a_write() {
+        let mut world = FakeWorld::new(
+            "choose-candle-missing",
+            "[stt]\nengine = \"candle\"\nmodel = \"tiny\"\n",
+        );
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert_eq!(world.installs, vec!["tiny".to_string()]);
+        assert!(world.saved.is_empty(), "the key already says tiny: {said}");
+    }
+
+    #[test]
+    fn a_failed_download_says_so_writes_nothing_and_fails() {
+        let mut world = FakeWorld::new("choose-install-fails", "[stt]\nengine = \"candle\"\n");
+        world.install_error = Some("cannot reach huggingface.co; check the network".to_string());
+        let (said, failed) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(failed);
+        assert!(said.contains("cannot reach huggingface.co"), "{said}");
+        assert!(world.saved.is_empty());
+        assert_eq!(world.told, 0);
+    }
+
+    #[test]
+    fn with_a_command_that_uses_the_model_nothing_is_downloaded_or_written_and_the_file_is_named() {
+        let mut world = FakeWorld::new(
+            "choose-command-model",
+            "[stt]\nengine = \"command\"\ncommand = [\"whisper-cli\", \"-m\", \"{model}\"]\n",
+        );
+        let before = world.file();
+        let (said, failed) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(!failed, "{said}");
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert_eq!(world.file(), before);
+        assert!(said.contains("ggml-tiny.bin"), "{said}");
+        let file = PathBuf::from("/models").join("ggml-tiny.bin");
+        assert!(
+            said.contains(&file.display().to_string()),
+            "the models directory is named: {said}"
+        );
+        assert!(said.contains("set [stt] engine to \"candle\""), "{said}");
+        assert!(said.contains("Nothing was downloaded or written"), "{said}");
+    }
+
+    #[test]
+    fn with_the_http_engine_the_model_key_is_said_not_to_be_used() {
+        let mut world = FakeWorld::new("choose-http", "[stt]\nengine = \"http\"\n");
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert!(said.contains("[stt] http_model"), "{said}");
+        assert!(said.contains("set [stt] engine to \"candle\""), "{said}");
+    }
+
+    #[test]
+    fn an_engine_that_is_none_of_the_three_is_named_with_the_three() {
+        let mut world = FakeWorld::new("choose-unknown", "[stt]\nengine = \"whisperx\"\n");
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert!(
+            said.contains("\"whisperx\"") && said.contains("candle, http, command"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn an_empty_catalogue_says_what_happened_and_fails() {
+        let mut world = FakeWorld::new("choose-empty", "");
+        let (said, failed) = drive(&mut world, "1\n", &[]);
+        assert!(failed);
+        assert!(said.contains("No speech models are on offer"), "{said}");
+        assert!(said.contains("report it"), "{said}");
+    }
+
+    #[test]
+    fn esc_an_empty_line_and_a_number_outside_the_list_change_nothing() {
+        for (typed, expected) in [
+            ("\u{1b}\n", "Nothing was changed"),
+            ("\n", "Nothing was changed"),
+            ("9\n", "between 1 and 6"),
+        ] {
+            let mut world = FakeWorld::new("choose-leave", "[stt]\nengine = \"candle\"\n");
+            let (said, failed) = drive(&mut world, typed, &catalogue::MODELS);
+            assert!(!failed, "{typed:?}: {said}");
+            assert!(said.contains(expected), "{typed:?}: {said}");
+            assert!(world.installs.is_empty() && world.saved.is_empty());
         }
-        assert_eq!(pick("1").map(|e| e.identifier), Some("tiny"));
-        assert_eq!(pick(" 4 ").map(|e| e.identifier), Some("large-v3-turbo"));
     }
 
     #[test]
-    fn a_file_with_no_stt_table_gains_one() {
-        let out = set_model_key("[audio]\ninput = \"\"\n", "tiny");
-        assert!(out.contains("[stt]"), "got {out}");
-        assert!(out.contains("model = \"tiny\""), "got {out}");
+    fn the_end_of_the_input_is_said_and_fails() {
+        let mut world = FakeWorld::new("choose-eof", "[stt]\nengine = \"candle\"\n");
+        let (said, failed) = drive(&mut world, "", &catalogue::MODELS);
+        assert!(failed);
         assert!(
-            out.contains("[audio]"),
-            "it must not lose what was there: {out}"
+            said.contains("nothing was read from the terminal"),
+            "{said}"
         );
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("tiny"));
     }
 
     #[test]
-    fn an_existing_model_line_is_replaced_and_the_comments_around_it_survive() {
-        let before = "\
-# my configuration
-[stt]
-# which model to use
-model = \"large-v3-turbo\"
-language = \"ru\"
+    fn a_configuration_that_does_not_parse_is_said_before_the_list() {
+        let mut world = FakeWorld::new("choose-invalid", "[stt\nengine = ");
+        let (said, _) = drive(&mut world, "\n", &catalogue::MODELS);
+        assert!(said.contains("does not load"), "{said}");
+        assert!(said.find("does not load").unwrap() < said.find("1. tiny").unwrap());
+    }
 
-[ui]
-toasts = false
-";
-        let out = set_model_key(before, "small");
-        assert!(out.contains("model = \"small\""), "got {out}");
+    #[test]
+    fn installing_the_configured_model_that_was_missing_says_to_restart_herdr() {
+        let mut world = FakeWorld::new(
+            "choose-restart-after-install",
+            "[stt]\nengine = \"candle\"\nmodel = \"tiny\"\n",
+        );
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert_eq!(world.installs, vec!["tiny".to_string()]);
+        assert!(said.contains("restart herdr"), "{said}");
+        assert!(said.contains("before it was there"), "{said}");
+    }
+
+    #[test]
+    fn the_shipped_default_is_said_to_have_no_command_at_all_and_not_to_bring_its_own_model() {
+        let mut world = FakeWorld::new("choose-default", "");
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert!(said.contains("[stt] command is empty"), "{said}");
+        assert!(said.contains("herdr-voice doctor"), "{said}");
+        assert!(!said.contains("brings its own model"), "{said}");
+        assert!(said.contains("set [stt] engine to \"candle\""), "{said}");
+    }
+
+    #[test]
+    fn a_command_without_the_model_placeholder_is_said_to_bring_its_own_model() {
+        let mut world = FakeWorld::new(
+            "choose-own-model",
+            "[stt]\nengine = \"command\"\ncommand = [\"my-transcriber\", \"{audio}\"]\n",
+        );
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert!(said.contains("brings its own model"), "{said}");
+    }
+
+    #[test]
+    fn the_advice_for_a_command_that_uses_the_model_includes_naming_it_in_the_configuration() {
+        let mut world = FakeWorld::new(
+            "choose-advice",
+            "[stt]\nengine = \"command\"\ncommand = [\"whisper-cli\", \"-m\", \"{model}\"]\n",
+        );
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
         assert!(
-            !out.contains("large-v3-turbo"),
-            "the old value must go: {out}"
+            said.contains("then set [stt] model to \"tiny\" in the configuration file"),
+            "{said}"
         );
-        assert!(
-            out.contains("# which model to use"),
-            "comments must survive: {out}"
+    }
+
+    #[test]
+    fn a_gigabyte_is_shown_in_gigabytes() {
+        assert_eq!(human(1_000_000_000), "1.00 GB");
+        assert_eq!(human(999_999_999), "1000 MB");
+    }
+
+    #[test]
+    fn the_configured_installed_model_is_not_also_said_to_be_only_installed() {
+        let mut world = FakeWorld::new(
+            "choose-not-twice",
+            "[stt]\nengine = \"candle\"\nmodel = \"tiny\"\n",
         );
-        assert!(
-            out.contains("language = \"ru\""),
-            "other keys must survive: {out}"
-        );
-        assert!(
-            out.contains("toasts = false"),
-            "other tables must survive: {out}"
-        );
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("small"));
-        assert_eq!(parsed["ui"]["toasts"].as_bool(), Some(false));
+        world.states.push(("tiny".to_string(), Glance::Whole));
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(!said.contains("is already installed."), "{said}");
     }
 
     #[test]
-    fn a_stt_table_with_no_model_key_gains_one_inside_itself() {
-        let out = set_model_key("[stt]\nlanguage = \"ru\"\n\n[ui]\ntoasts = true\n", "base");
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("base"));
-        assert_eq!(parsed["stt"]["language"].as_str(), Some("ru"));
-        assert_eq!(parsed["ui"]["toasts"].as_bool(), Some(true));
-    }
-
-    #[test]
-    fn a_model_key_in_another_table_is_not_the_one_that_changes() {
-        // [rewrite] has a model key too. Editing the wrong one would silently
-        // repoint the rewrite engine.
-        let before = "[rewrite]\nmodel = \"haiku\"\n\n[stt]\nmodel = \"tiny\"\n";
-        let out = set_model_key(before, "small");
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(
-            parsed["rewrite"]["model"].as_str(),
-            Some("haiku"),
-            "got {out}"
-        );
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("small"), "got {out}");
-    }
-
-    #[test]
-    fn a_table_header_with_a_comment_after_it_is_still_that_table() {
-        // Found by an S4 review: `[stt] # speech` matched neither the header test
-        // nor the name test, so a second [stt] table was appended and the file
-        // stopped parsing — which config::load turns into "every setting lost".
-        let before =
-            "[rewrite]\nmodel = \"haiku\"\n\n[stt] # speech\nmodel = \"tiny\"\nlanguage = \"ru\"\n";
-        let out = set_model_key(before, "small");
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("small"), "got {out}");
-        assert_eq!(parsed["stt"]["language"].as_str(), Some("ru"));
-        assert_eq!(parsed["rewrite"]["model"].as_str(), Some("haiku"));
-        assert_eq!(out.matches("[stt]").count(), 1, "one table, not two: {out}");
-        assert!(out.contains("# speech"), "the comment must survive: {out}");
-    }
-
-    #[test]
-    fn headers_are_recognised_whatever_surrounds_them() {
-        assert_eq!(table_name("[stt]"), Some("stt"));
-        assert_eq!(table_name("  [stt]  "), Some("stt"));
-        assert_eq!(table_name("[stt] # speech"), Some("stt"));
-        assert_eq!(table_name("[ stt ]"), Some("stt"));
-        assert_eq!(table_name("[a.b]"), Some("a.b"));
-        // Not headers.
-        assert_eq!(table_name("model = \"tiny\""), None);
-        assert_eq!(table_name("# [stt]"), None);
-        assert_eq!(table_name("[stt] model = 1"), None);
-        assert_eq!(table_name(""), None);
-    }
-
-    #[test]
-    fn spaces_inside_the_header_still_name_the_table() {
-        let out = set_model_key("[ stt ]\nlanguage = \"ru\"\n", "base");
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("base"), "got {out}");
-        assert_eq!(out.matches("stt").count(), 1, "one table, not two: {out}");
-    }
-
-    #[test]
-    fn an_empty_file_becomes_a_valid_one() {
-        let out = set_model_key("", "tiny");
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("tiny"));
-    }
-
-    #[test]
-    fn a_stt_table_that_is_the_last_one_still_gains_the_key_inside_itself() {
-        // The "leaving [stt]" branch never fires when [stt] is last, so the
-        // after-the-loop branch is the one that has to work.
-        let out = set_model_key(
-            "[audio]\ninput = \"\"\n\n[stt]\nlanguage = \"en\"\n",
-            "base",
-        );
-        let parsed: toml::Value = toml::from_str(&out).expect("must remain valid TOML");
-        assert_eq!(parsed["stt"]["model"].as_str(), Some("base"));
-        assert_eq!(parsed["stt"]["language"].as_str(), Some("en"));
-        assert_eq!(parsed["audio"]["input"].as_str(), Some(""));
+    fn a_model_of_the_wrong_size_is_downloaded_again_before_it_is_written() {
+        let mut world = FakeWorld::new("choose-wrong-size", "[stt]\nengine = \"candle\"\n");
+        world.states.push(("tiny".to_string(), Glance::WrongSize));
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert_eq!(world.installs, vec!["tiny".to_string()], "{said}");
+        assert!(said.contains("Installing tiny"), "{said}");
+        assert!(!said.contains("already installed"), "{said}");
+        assert_eq!(world.saved, vec!["[stt] model = \"tiny\"".to_string()]);
     }
 }
