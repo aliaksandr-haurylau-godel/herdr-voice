@@ -45,11 +45,10 @@ pub static BINDINGS: [Binding; 4] = [
         key: "ctrl+shift+g",
         description: "dictation: cancel the recording",
     },
-    // A proposal until the owner names the key (`tasks/103/AC_103.md`, AC-40).
     Binding {
-        action: "mic",
-        key: "prefix+shift+i",
-        description: "dictation: choose a microphone",
+        action: "settings",
+        key: "prefix+shift+s",
+        description: "herdr-voice: settings",
     },
 ];
 
@@ -1183,7 +1182,7 @@ mod tests {
                 ("ptt", "ctrl+g"),
                 ("dictate", "prefix+i"),
                 ("cancel", "ctrl+shift+g"),
-                ("mic", "prefix+shift+i"),
+                ("settings", "prefix+shift+s"),
             ]
         );
     }
@@ -2637,7 +2636,7 @@ mod tests {
             "[[keys.command]]\nkey = \"ctrl+g\"\ntype = \"shell\"\ncommand = \"one\"\n\n\
              [[keys.command]]\nkey = \"prefix+i\"\ntype = \"shell\"\ncommand = \"two\"\n\n\
              [[keys.command]]\nkey = \"ctrl+shift+g\"\ntype = \"shell\"\ncommand = \"three\"\n\n\
-             [[keys.command]]\nkey = \"prefix+shift+i\"\ntype = \"shell\"\ncommand = \"four\"\n",
+             [[keys.command]]\nkey = \"prefix+shift+s\"\ntype = \"shell\"\ncommand = \"four\"\n",
         )
         .unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
@@ -2779,11 +2778,11 @@ description = "ours, already here"
     }
 
     #[test]
-    fn the_snippet_for_the_microphone_carries_its_action_and_description() {
+    fn the_snippet_for_the_settings_carries_its_action_and_description() {
         let rendered = render(&[BINDINGS.last().unwrap()]);
-        assert!(rendered.contains("herdr-voice.mic"), "{rendered}");
+        assert!(rendered.contains("herdr-voice.settings"), "{rendered}");
         assert!(
-            rendered.contains("description = \"dictation: choose a microphone\""),
+            rendered.contains("description = \"herdr-voice: settings\""),
             "{rendered}"
         );
     }

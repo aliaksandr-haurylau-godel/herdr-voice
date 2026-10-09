@@ -56,11 +56,11 @@ contexts = ["global"]
 command = ["target/release/herdr-voice", "setup"]
 
 [[actions]]
-id = "mic"
-title = "Dictation: choose a microphone"
-description = "Open the popup that lists the inputs and switches the one the next take records from"
+id = "settings"
+title = "herdr-voice: settings"
+description = "Open the popup that shows every setting and changes it, including the microphone and both models"
 contexts = ["global"]
-command = ["target/release/herdr-voice", "mic", "--open"]
+command = ["target/release/herdr-voice", "settings", "--open"]
 
 [[panes]]
 id = "setup"
@@ -87,9 +87,9 @@ height = 16
 command = ["target/release/herdr-voice", "model", "--choose"]
 
 [[panes]]
-id = "mic"
-title = "Choose a microphone"
+id = "settings"
+title = "herdr-voice: settings"
 placement = "popup"
-width = "60%"
-height = 14
-command = ["target/release/herdr-voice", "mic", "--choose"]
+width = "70%"
+height = 24
+command = ["target/release/herdr-voice", "settings"]

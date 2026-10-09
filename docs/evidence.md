@@ -2662,6 +2662,12 @@ finally:
 
 ## The microphone popup and the reload request, for issue #103
 
+The popup described here was built as a command of its own (`herdr-voice mic`) and became the
+microphone entry of the settings popup (`herdr-voice settings`); the command, its action and
+its pane no longer exist. What was run below is the code that the settings popup still uses:
+the writer, the reload request, the recorder's reconfigure and the input list. The menu in
+front of it is new and is recorded in the section for issue #104.
+
 Platform: macOS on Apple silicon, the machine this plugin is developed on. herdr 0.9.3 is
 installed there; it was **not** used to open anything (see "Not verified"). The binary is
 the release build of this branch (`cargo build --release`, its own target directory),
