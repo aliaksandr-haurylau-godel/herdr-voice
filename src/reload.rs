@@ -5,7 +5,7 @@
 //! failing. See `tasks/103/DESIGN_103.md`, section 2.4.
 
 /// What a reload reply says.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Applied {
     /// The sections the daemon now uses the new values of.
     pub applied: Vec<String>,

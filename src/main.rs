@@ -27,6 +27,7 @@ mod http_failure;
 mod indicator;
 mod mic;
 mod outward;
+mod popup;
 mod proto;
 mod ptt;
 mod record;
