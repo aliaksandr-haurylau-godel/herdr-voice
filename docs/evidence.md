@@ -182,19 +182,26 @@ The crate's own source settles why, and settles two related worries as well
 
 ## Linux, in a container
 
-Run twice on 2026-08-25 by `scripts/linux-check.sh`, which performs the whole
-check in one non-interactive pass and prints the table below itself. The two runs
-agreed step for step; the second exists to show the script is re-runnable on a
-machine it has already touched. The plugin was built from revision `68fbe89`, the
-tip of `main`, which is the first revision that records anything — capture landed
-there. The script itself carries the changes described below, which are not in
-`68fbe89`.
+`scripts/linux-check.sh` ran on 2026-08-25 against two revisions of the plugin. On
+`e32a9b7` it could not touch capture, because capture did not exist: its `no-device`
+step was recorded as pending. On `68fbe89`, the tip of `main` and the first revision
+that records anything, it ran with capture. This section records more than one attempt
+on `68fbe89`: one after which a daemon outlived its server, which the next attempt
+found (below), and, after the check's cleanup was changed, two re-runs that were clean
+and agreed step for step. The second re-run was made to show that the script can be
+re-run on a machine it has already touched. The table is the result those re-runs
+agreed on; the record does not say which of the two it was copied from, nor how many
+attempts there were in all. What the run on `e32a9b7` established about installation,
+the socket path and the `[[startup]]` entry was re-observed on `68fbe89` and is stated
+below as one result. The script itself carries the changes described below, which are
+not in `68fbe89`.
 
-This is the second run of this check. The first, on revision `e32a9b7`, could not
-touch capture at all, because capture did not exist: its `no-device` step was
-recorded as pending. Everything that run established about installation, the
-socket path and the `[[startup]]` entry was re-observed here and is stated below
-as one result.
+Because the second re-run was on a machine the first had touched, its `no-device`,
+`named-device` and `herdr-log` rows could have been satisfied by the first re-run's
+herdr log records: the script excluded one earlier `dictate` record and no earlier
+`cancel` record (`tasks/23/AC_23.md`). Whether they were is not recorded. Their
+agreement with the first re-run on those three rows is therefore not independent
+evidence.
 
 The machine: a throwaway Debian GNU/Linux 12 (bookworm) container, `aarch64`,
 kernel 6.18.15, no sound hardware of any kind — no `/dev/snd`, no PipeWire, no
@@ -2516,6 +2523,207 @@ job of `check.yml`; the loop was also run under `dash`, `bash`, `ksh` and
 `zsh --emulate sh` by the code review of this change), and a `.leakwords` with CRLF line
 endings, which is out of bounds and behaves as before.
 
+
+## `cancel` stops a running take, for issue #18
+
+Run on 2026-10-07 on macOS 27.0.1 (Darwin 27.0.0, arm64), debug builds of `0.1.0-beta.5`:
+the baseline from `main` at `eae0135` (built from `git archive` into a scratch directory)
+and the branch `fix/18-cancel` at `b6750ef`. Each binary was built into a target directory
+of its own.
+
+**Method.** A Python script kept outside the repository (below) starts `herdr-voice daemon`
+with `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_CONFIG_DIR` and `HOME` pointing into a scratch
+directory, `PATH` reduced to `/usr/bin:/bin`, and `HERDR_BIN_PATH` naming a script that
+appends its arguments to a log and exits 0. Nothing it did could reach a running herdr or
+the installed plugin. Takes are recorded from the real default microphone
+(`[audio] silence_db = -120` so a quiet room is not refused as silent) and transcribed by
+`sh -c "echo spoken words"`; the rewrite step is off. The invocation context names
+the pane `w1:p1` and no tab.
+
+**The instrument, checked first: the baseline.** On `eae0135` the script reproduces the
+defect the issue reports, the same way a person meets it:
+
+```
+-- take 1: start it, speak for 3 seconds, cancel it
+  dictate  exit 0   'recording for w1:p1'
+  cancel   exit 0   'nothing to cancel'
+  wav files in the takes directory: []
+-- the next dictate
+  dictate  exit 0   'delivered to w1:p1 [-72.6 dB]'
+  herdr was asked to do: ... pane read w1:p1 ..., pane send-text w1:p1 spoken words
+```
+
+`cancel` claims nothing is running while a take is, and the next `dictate` ends that same
+take and types its text into the pane.
+
+**The branch, the same script:**
+
+```
+-- a cancel with nothing recording
+  cancel   exit 0   'nothing to cancel'
+-- take 1: start it, speak for 3 seconds, cancel it
+  dictate  exit 0   'recording for w1:p1'
+  cancel   exit 0   'cancelled the recording for w1:p1; nothing was transcribed or delivered'
+  wav files in the takes directory: []
+  herdr was asked to do: tab list, and `pane report-metadata` calls for the indicator only
+-- the next dictate
+  dictate  exit 0   'recording for w1:p1'
+-- and the one after it (ends take 2)
+  dictate  exit 0   'delivered to w1:p1 [-69.8 dB]'
+  herdr was asked to do: ... pane read w1:p1 ..., pane send-text w1:p1 spoken words  (once)
+-- a cancel with nothing recording, after all that
+  cancel   exit 0   'nothing to cancel'
+```
+
+The cancelled take left no file and caused no `pane read` or `pane send-text`. The `dictate`
+after it began a new take; the next one ended that take, and `pane send-text` ran once, for
+the second take. The indicator's `REC` counter started again at `0:00` for the second take.
+
+What this run does not show: the tab label being restored after a cancel, because the
+invocation context carried no `tab_id` and so no label was decorated (the restore on `Idle`
+is covered by the unit tests in `src/indicator.rs`); a `cancel` during a hold, which is
+refused and is covered by `cancel_during_a_hold_is_refused_and_leaves_the_take_running` and
+two neighbours in `src/daemon.rs`; and Linux or Windows.
+
+The script, invoked as `python3 -I s5_18.py <binary> <label>`:
+
+```python
+import os, subprocess, sys, time, tempfile, glob, json
+
+binary, label = sys.argv[1], sys.argv[2]
+D = tempfile.mkdtemp(prefix="hv18-")
+os.makedirs(f"{D}/config"); os.makedirs(f"{D}/state")
+calls = f"{D}/herdr-calls.log"
+fake = f"{D}/herdr"
+open(fake, "w").write(f'#!/bin/sh\necho "$@" >> "{calls}"\nexit 0\n')
+os.chmod(fake, 0o755)
+open(f"{D}/herdr-config.toml", "w").write("")
+open(f"{D}/config/config.toml", "w").write(
+    '[audio]\nsilence_db = -120\n\n'
+    '[stt]\nengine = "command"\ncommand = ["sh", "-c", "echo spoken words"]\n\n'
+    '[rewrite]\nengine = "off"\n'
+)
+env = {
+    "PATH": "/usr/bin:/bin", "HOME": D,
+    "HERDR_BIN_PATH": fake, "HERDR_CONFIG_PATH": f"{D}/herdr-config.toml",
+    "HERDR_PLUGIN_CONFIG_DIR": f"{D}/config", "HERDR_PLUGIN_STATE_DIR": f"{D}/state",
+}
+ctx = json.dumps({"focused_pane_id": "w1:p1"})
+
+def press(cmd, with_context=True):
+    e = dict(env)
+    if with_context:
+        e["HERDR_PLUGIN_CONTEXT_JSON"] = ctx
+    e["HERDR_PLUGIN_ENTRYPOINT_ID"] = cmd
+    t = time.time()
+    r = subprocess.run([binary, cmd], env=e, capture_output=True, text=True, timeout=60)
+    print(f"  {cmd:8} exit {r.returncode} after {time.time()-t:4.1f}s  stdout={r.stdout.strip()!r} stderr={r.stderr.strip()!r}")
+    return r
+
+def wavs():
+    return sorted(os.path.basename(p) for p in glob.glob(f"{D}/state/takes/*.wav"))
+
+def delivered():
+    return open(calls).read().strip().splitlines() if os.path.exists(calls) else []
+
+print(f"== {label}  (binary {binary})")
+daemon = subprocess.Popen([binary, "daemon"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(1.5)
+try:
+    print("-- a cancel with nothing recording")
+    press("cancel", with_context=False)
+    print("-- take 1: start it, speak for 3 seconds, cancel it")
+    press("dictate")
+    time.sleep(3)
+    press("cancel", with_context=False)
+    print(f"  wav files in the takes directory: {wavs()}")
+    print(f"  herdr was asked to do: {delivered()}")
+    print("-- the next dictate")
+    press("dictate")
+    time.sleep(3)
+    print("-- and the one after it (ends take 2)")
+    press("dictate")
+    print(f"  wav files in the takes directory: {wavs()}")
+    calls_now = delivered()
+    print(f"  herdr was asked to do ({len(calls_now)} calls):")
+    for c in calls_now:
+        print(f"    {c}")
+    print("-- a cancel with nothing recording, after all that")
+    press("cancel", with_context=False)
+finally:
+    daemon.terminate()
+    try:
+        daemon.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        daemon.kill()
+    journal = sorted(glob.glob(f"{D}/state/*journal*") + glob.glob(f"{D}/state/**/*.log", recursive=True))
+    print(f"-- scratch directory (kept for the journal): {D}")
+```
+
+## The Linux check's decisions, with stubs, for issue #23
+
+Run on 2026-10-07 on macOS 27.0.1 (Darwin 27.0.0, arm64). **No Linux run, no
+container and no real herdr were involved.** `scripts/linux-check.sh` was run as a
+whole, as the unmodified script from `e92f0b2` and as the script on branch
+`fix/23-linux-check` at `cd2ac27`, against stub commands (`scripts/test-linux-check.sh`):
+a `herdr` that keeps a JSON-lines plugin log it can be asked about, a plugin binary
+(`doctor`, `daemon`, `cancel`), a `pkill` that signals nothing, and the package and
+toolchain commands. The real `jq` was used (jq-1.7.1). The stub `pkill` is first on
+`PATH` and the test refuses to start otherwise, because the script's own `pkill -f
+'herdr-voice daemon'` matches a daemon an owner may have running; after every run the
+owner's daemon was still there (read with `pgrep -fl`, nothing signalled) and no stub
+process was left. Every case runs under a 60-second limit.
+
+```
+$ sh scripts/test-linux-check.sh                                  # /bin/bash 3.2.57
+75 ok, all cases passed, 69 s
+$ HERDR_VOICE_TEST_BASH=<path of bash 5.3.20> sh scripts/test-linux-check.sh
+75 ok, all cases passed
+$ shellcheck scripts/linux-check.sh scripts/test-linux-check.sh   # shellcheck 0.11.0
+(no output)
+```
+
+The same test, final version, against the unmodified `scripts/linux-check.sh` of
+`e92f0b2`: 27 `ok` and 48 `FAIL`, ending "48 case(s) failed". Every case fails on it
+but two, `clean` and `substring-id`; `substring-id` guards the exact comparison of log
+ids and passes on a script that excludes one id by `!=`. The cases, with the number
+of failed assertions on the unmodified script: `stale-dictate` (2), `stale-cancel` (2),
+`unreadable-log` (1), `unreadable-log-before-no-device` (3),
+`unreadable-log-before-named-device` (3), `config-restored` (2), `config-absent` (1),
+`interrupt` (3), `interrupt-term` (2), `interrupt-hup` (2), `interrupt-twice` (2),
+`leftover-backup` (3), `leftover-marker` (3), `leftover-backup-and-marker` (3),
+`leftover-unwritable` (2), `restore-fails` (2), `daemon-will-not-stop` (4),
+`default-stop-timeout` (2), `daemon-still-up-at-the-end` (2, one of them "hit the
+60-second limit": the unmodified script blocks in `wait` on a daemon that ignores
+`TERM`), `hung-invoke` (2), `tab` (1) and `tab-in-exit-code` (1).
+
+Mutation testing of the changed script: two runs, one mutation at a time, each followed
+by the full test. 54 mutations in the first run, 38 killed; every survivor was either
+killed by a case added afterwards or is equivalent or unreachable, as `tasks/23/RUN_23.md`
+lists one by one.
+
+What this does not show, and so leaves unproven:
+
+- That the changed script passes in a real container with a real herdr. The stubs
+  answer the way the issue's review observed herdr 0.8.2 to answer (`--plugin` and
+  `--limit` on `herdr plugin log list`, `.result.pane.pane_id`, an empty match as
+  `"logs":[]`); the `log_id` values and record fields (`action_id`, `status`,
+  `exit_code`, `stderr`) are assumed to be what the script already relied on.
+- That `herdr plugin log list --limit 30` returns the newest 30 records, oldest first.
+  The script already depended on this through `last`; the stub models it and nothing
+  here checks it against herdr.
+- A real hang. `hung-invoke` makes the stub `herdr plugin action invoke` return 124 at
+  once and the stub `timeout` does not wait, so it shows the 124 branch only. A
+  non-zero return other than 124 from that invoke in the `named-device` step is still
+  reported, as before, as the take never finishing.
+- `interrupt-twice` tells `cleanup`'s `trap '' INT TERM HUP` from its absence only
+  under bash 4 and later. bash 3.2 does not run a trap again while it runs the `EXIT`
+  trap, so there the case passes either way. The ubuntu job runs it under bash 5.
+- A `TERM` sent to the script alone rather than to its process group is handled when
+  the foreground command ends, which is how bash behaves; a Ctrl-C reaches both.
+- `restore-fails` and `leftover-unwritable` are skipped, with a printed line, when the
+  test runs as root, where a read-only directory stops nothing.
+- Linux. The macOS runner and the Ubuntu runner run the test in CI; this run did not.
 
 ## A transcript that is one phrase repeated, for issue #30
 

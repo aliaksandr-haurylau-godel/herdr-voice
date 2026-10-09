@@ -80,6 +80,8 @@ jobs:
         run: sh scripts/test-install.sh
       - name: the pre-commit hook, with and without .leakwords
         run: sh scripts/test-pre-commit.sh
+      - name: the Linux check's decisions, with stubs
+        run: sh scripts/test-linux-check.sh
 
   scripts-windows:
     name: the Windows install script
