@@ -32,6 +32,7 @@ mod ptt;
 mod record;
 mod reload;
 mod rewrite;
+mod rewrite_models;
 /// Test-only, unix-only: writes a script a test then runs, and returns only
 /// once it can be executed.
 #[cfg(all(test, unix))]
