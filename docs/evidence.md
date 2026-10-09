@@ -2804,3 +2804,73 @@ What this does not show, and so leaves unproven:
 - `restore-fails` and `leftover-unwritable` are skipped, with a printed line, when the
   test runs as root, where a read-only directory stops nothing.
 - Linux. The macOS runner and the Ubuntu runner run the test in CI; this run did not.
+
+## The settings popup, for issues #104, #103, #46 and #49
+
+Platform: macOS on Apple silicon, the machine this plugin is developed on. herdr 0.9.3 is
+installed there; it was **not** used to open anything (see "Not verified"). The binary is the
+release build of this branch (`cargo build --release`, its own target directory), run by hand
+with a minimal environment: no `HERDR_*` variable of the developing session reaches it,
+`HERDR_PLUGIN_CONFIG_DIR` and `HERDR_PLUGIN_STATE_DIR` name scratch directories, and
+`HERDR_BIN_PATH` names a program that does not exist (a recording stub for the `--open` check),
+so nothing touched an installed plugin, a running herdr or a running daemon. The popup ran in a
+pseudo-terminal of 24 rows by 100 columns, the size the manifest gives its pane, against a daemon of
+its own. The rewrite server was asked `GET /v1/models` only (it is the local server this plugin's
+author uses); no model was loaded or unloaded there. Input names are generalised below; the machine
+had three, and the server served eight models, one of them an embedding model.
+
+### What was run, and what came out
+
+| Step | What was run | What came out |
+|---|---|---|
+| The sections screen | `herdr-voice settings`, nothing configured | the eight sections numbered, each with "0 of N keys set"; the question "Type a section number, then Enter. Esc then Enter, or an empty line, leaves it as it is"; the screen is 10 lines |
+| A keys screen | section 2, `[stt]` | the eight keys with their values, each marked `(default)`, the secret key shown as `not set`; 9 lines and the question |
+| The microphone through the menu, a daemon running on a file with `[stt] language = "ru"` and a comment | `audio`, `input`, the first input | the three inputs numbered; "[audio] input is now "Headset" in <config dir>/config.toml. The daemon applied it: the next take records from it."; no word of a restart for `[stt]`; the file kept the comment and `[stt]` and gained `[audio] input = "Headset"` |
+| A key outside `[audio]`, the daemon running | `ui`, `toasts`, `false` | "[ui] toasts is now false ... This needs a restart of herdr to apply: [ui]."; the keys screen drawn again with `toasts = false` and no `(default)` |
+| A value that is not the type | `blink_ms`: `abc` | `"abc" is not a whole number; nothing was changed. Open the key again and type it as a whole number.` |
+| A number the key cannot hold | `blink_ms`: `-5` | "the edit ([ui] blink_ms = -5) would have made <config dir>/config.toml unloadable (line 2, column 12: invalid value: integer `-5`, expected u64), so nothing was written. Check the value you typed; ..."; the file is unchanged |
+| A key with a fixed set | `[stt] engine`: `whisperx` | `"whisperx" is not one of candle, http, command; nothing was changed.` |
+| The speech model on the shipped default | `[stt] model`, tiny | the catalogue (six models, sizes, "not installed", the models directory); then "[stt] engine is "command" but [stt] command is empty, so no speech engine is set up yet, and nothing was changed. `herdr-voice doctor` says what is missing. To use a model from this list, set [stt] engine to "candle" ..."; no file written |
+| The speech model on `candle`, the real download | `[stt] engine`: `candle`, then `[stt] model`, tiny | "Installing tiny (151 MB)", progress lines for the three files, "tiny is installed.", "[stt] model is now "tiny" ...", "This needs a restart of herdr to apply: [stt]."; the file holds `engine = "candle"` and `model = "tiny"`; the models directory holds the three files; `herdr-voice doctor` on that configuration reports the model `ok` |
+| After the restart the popup named | a daemon already running on the shipped defaults, the popup used, a take, the daemon restarted, a take | before the restart the running daemon still answers that no speech engine is configured (so the popup's "needs a restart" is true); after it the journal says "recognition: the built-in engine, on the GPU, through Metal" and the take is recognised and goes on to delivery (which fails here only because there is no herdr to deliver to) |
+| The rewrite model from the server | `[rewrite] url` set to the server's chat-completions address, `[rewrite] engine`: `http`, then `[rewrite] model` | "Models the server serves:" with the eight names numbered; choosing the first wrote `model` to `[rewrite]` and to no other table |
+| A server that is not there | the same with the address on a port nothing listens on | `"http://127.0.0.1:9/v1/models" refused the connection: nothing is listening at that address and port. Start the server, or correct the address in the configuration`, then "Type the model's name instead"; the name typed was written |
+| Secrets | a file that sets both tokens and loads; one whose token has no quotes; one whose token is a number | the tokens are shown as `set`; for the two files that do not load the popup says "<config dir>/config.toml does not load (line 2: this line sets a token, so the parser's message is not shown; check that the value is in quotes)" and shows the defaults; no token value appeared in any output |
+| Esc | Esc and Enter at the sections level | the popup ended by itself after "Press Enter to close." and Enter, exit 0 |
+| An arrow key, a number outside the list | inside a section: an up arrow and Enter, then 99 | the arrow went back one level; `"99" is not one of the numbers above; type a number between 1 and 8`, and the question was asked again |
+| The end of the input | Ctrl-D inside a section | "nothing was read from the terminal; open the settings again from herdr" once, exit 1, the sections were not drawn again; the file is unchanged |
+| The action | `herdr-voice settings --open` with `HERDR_BIN_PATH` set to a script that records its arguments | exit 0; herdr was run with `plugin pane open --plugin herdr-voice --entrypoint settings` |
+| No herdr | the same with a program that does not exist | exit 1, `cannot run "/nonexistent/herdr": ... Check that herdr is installed and on the PATH` |
+| The removed command | `herdr-voice mic` | exit 2, `unknown command: mic` |
+
+Every popup ended by itself after the Enter at "Press Enter to close." (the script allowed ten seconds for it and none needed them): nothing waited on a lock.
+
+### What the check found
+
+Nothing that the earlier stages had not. The by-hand run was made after the code review and the
+mutation run of this change, which had found a token printed from a file that does not load, and
+the check above confirms the fix on the real binary.
+
+### Not verified
+
+1. **The pane through herdr.** Opening the pane needs this build linked into herdr's plugin
+   registry, and that registry is shared with the herdr in use, so it was not done. The three points
+   stay as `docs/design.md` and `tasks/104/DESIGN_104.md` state them: whether `herdr plugin pane open
+   --entrypoint settings` opens the popup placement without `--placement`; whether herdr closes a
+   popup the moment its command exits (the popup waits for Enter once at the end, so a message is
+   readable either way); whether the popup's environment carries `HERDR_PLUGIN_STATE_DIR` (the socket
+   of the daemon in use lies at the path the popup derives without it, which is not an observation of
+   the popup's environment). One step on the machine of the person who uses herdr settles all three:
+   with this build the one herdr runs, `herdr plugin action invoke herdr-voice.settings`; watch that it
+   opens as a popup and not a full pane, change a key outside `[audio]` and choose an input, and read
+   that the input says "The daemon applied it" (not "No dictation daemon is running") and that every
+   message stays on screen until Enter.
+2. **Whether 24 rows is enough in herdr.** The screens measured here are 9 to 14 lines plus the
+   question; a list longer than the pane (a machine with many inputs, a server serving many models)
+   scrolls and the top is lost. Whether herdr gives a popup that height on a small terminal was not
+   observed.
+3. **The next take using the rewrite model.** The speech model was shown to be used after the restart
+   the popup names; the rewrite model was not, because a take posts to the server, and a post to the
+   server in use may make it load a model, which this check must not do. What was shown is that the key
+   is written, that a running daemon reports `needs a restart: rewrite`, and that the model list is
+   fetched with one `GET`.
