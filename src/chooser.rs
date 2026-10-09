@@ -1,16 +1,19 @@
 //! Choosing a speech model, and downloading the one chosen.
 //!
 //! Two entry points because two questions are asked: `herdr-voice model` says
-//! what exists, and `--choose` spends the gigabytes. The configuration edit is
-//! `config_edit`'s: it changes one key and leaves everything else in the file.
-//! See `tasks/15/DESIGN_15.md`, section 5.
+//! what exists, and `--choose` spends the gigabytes. The same flow,
+//! `choose_speech_model`, is the speech-model entry of the settings popup. The
+//! configuration edit is `config_edit`'s: it changes one key and leaves everything
+//! else in the file. See `tasks/15/DESIGN_15.md`, section 5, and
+//! `tasks/104/DESIGN_104.md`, section 2.4.
 
-use std::io::Write;
 use std::path::Path;
 
-use crate::stt::candle::store;
+use crate::popup::{
+    config_note, not_in_list, parse_answer, save_and_tell, Answer, Io, Real, World, LEAVE_HINT,
+};
+use crate::stt::candle::store::Glance;
 use crate::stt::catalogue::{self, Entry};
-use crate::stt::fetch;
 
 /// A size the way a person reads it, not the way a computer stores it.
 fn human(bytes: u64) -> String {
@@ -31,14 +34,19 @@ fn human(bytes: u64) -> String {
 /// installed is asking a question about names and sizes, and waiting a minute
 /// for the answer would be absurd. The full check happens where it matters —
 /// before a model is loaded, and again right after a download.
-fn list(models: &Path, configured: &str) -> String {
+pub fn list(
+    catalogue: &'static [Entry],
+    configured: &str,
+    state: &dyn Fn(&Entry) -> Glance,
+    models: Option<&Path>,
+) -> String {
     let mut out = String::from("Speech models this plugin can install:\n\n");
-    for (i, entry) in catalogue::MODELS.iter().enumerate() {
+    for (i, entry) in catalogue.iter().enumerate() {
         let size = human(catalogue::weights(entry).bytes);
-        let present = match store::glance(models, entry.identifier, Some(entry)) {
-            store::Glance::Whole => "installed",
-            store::Glance::Absent => "not installed",
-            store::Glance::WrongSize => "installed, but the wrong size",
+        let present = match state(entry) {
+            Glance::Whole => "installed",
+            Glance::Absent => "not installed",
+            Glance::WrongSize => "installed, but the wrong size",
         };
         let marker = if entry.identifier == configured {
             "  (current)"
@@ -53,153 +61,192 @@ fn list(models: &Path, configured: &str) -> String {
             entry.mel_bins
         ));
     }
-    out.push_str("\nThey live in ");
-    out.push_str(&models.join("candle").display().to_string());
-    out.push('\n');
+    if let Some(models) = models {
+        out.push_str("\nThey live in ");
+        out.push_str(&models.join("candle").display().to_string());
+        out.push('\n');
+    }
     out
 }
 
-/// The entry a typed answer names, or `None` — never a guess.
-fn pick(answer: &str) -> Option<&'static Entry> {
-    let n: usize = answer.trim().parse().ok()?;
-    if n == 0 {
-        return None;
+/// What to do next for an engine that does not use a model from this catalogue. The
+/// catalogue installs weights for the built-in engine, `candle`, and a person who
+/// uses another engine decides whether to move to it; the popup never does.
+const MOVE_TO_CANDLE: &str = "To use a model from this list, set [stt] engine to \"candle\" \
+     in the settings popup, then choose the model again";
+
+/// The speech-model flow: list the catalogue, take a number, and by the engine in
+/// the configuration either install and write `[stt] model`, or say why not and
+/// what to change. Writes nothing for an engine that would not use the model.
+pub fn choose_speech_model(world: &mut dyn World, io: &mut Io, catalogue: &'static [Entry]) {
+    if catalogue.is_empty() {
+        io.say(
+            "No speech models are on offer in this build, which is a defect in the build: \
+             report it, and set [stt] model by hand in the meantime.",
+        );
+        io.fail();
+        return;
     }
-    catalogue::MODELS.get(n - 1)
+    let snapshot = world.snapshot();
+    if let Some(note) = config_note(&snapshot.loaded.source) {
+        io.say(&note);
+    }
+    let stt = snapshot.loaded.config.stt.clone();
+    let models = world.models_dir();
+    let listing = list(
+        catalogue,
+        &stt.model,
+        &|entry| world.model_state(entry),
+        models.as_deref(),
+    );
+    io.say(&listing);
+
+    let Some(line) = io.ask(&format!(
+        "Type the number of the model, then Enter. {LEAVE_HINT}: "
+    )) else {
+        return;
+    };
+    let entry = match parse_answer(&line, catalogue.len()) {
+        Answer::Leave => {
+            io.say("Nothing was changed.");
+            return;
+        }
+        Answer::Invalid(text) => {
+            io.say(&not_in_list(&text, catalogue.len()));
+            return;
+        }
+        Answer::Pick(at) => &catalogue[at],
+    };
+    let id = entry.identifier;
+
+    match stt.engine.as_str() {
+        "candle" => install_and_write(world, io, entry, &stt.model),
+        "command" if crate::stt::wants_our_model(&stt.command) => {
+            let file = crate::stt::model::file_name(id);
+            let place = match &models {
+                Some(dir) => dir.join(&file).display().to_string(),
+                None => format!("{file} in the models directory"),
+            };
+            io.say(&format!(
+                "[stt] engine is \"command\" and its command uses {{model}}, so a take looks for \
+                 the file {place}. The models in this list are weights for the built-in engine \
+                 (\"candle\"), so installing {id} would not change what a take uses. Nothing was \
+                 downloaded or written.\n\
+                 To use {id}: {MOVE_TO_CANDLE}; or, to keep the command, put {file} into the \
+                 models directory."
+            ));
+        }
+        "command" => io.say(&format!(
+            "[stt] engine is \"command\" and its command does not use {{model}}: it brings its \
+             own model, so [stt] model is not used and nothing was changed. {MOVE_TO_CANDLE}."
+        )),
+        "http" => io.say(&format!(
+            "[stt] engine is \"http\": the server's model is named by [stt] http_model, \
+             [stt] model is not used, and nothing was changed. {MOVE_TO_CANDLE}."
+        )),
+        other => io.say(&format!(
+            "[stt] engine is {other:?}, which is not one of {}; nothing was changed. \
+             {MOVE_TO_CANDLE}.",
+            crate::stt::ENGINES.join(", ")
+        )),
+    }
 }
 
-/// A progress line that overwrites itself, so a 3 GB download is one line.
-struct Line {
-    name: String,
-    total: u64,
-}
-
-impl fetch::Progress for Line {
-    fn file(&mut self, name: &str, total: u64) {
-        self.name = name.to_string();
-        self.total = total;
+/// The `candle` branch: download what is missing, then write `[stt] model` when it
+/// is not the configured one.
+fn install_and_write(world: &mut dyn World, io: &mut Io, entry: &'static Entry, configured: &str) {
+    let id = entry.identifier;
+    let state = world.model_state(entry);
+    let here = configured == id;
+    if state == Glance::Whole && here {
+        io.say(&format!("{id} is installed and already configured."));
+        return;
     }
-    fn bytes(&mut self, done: u64) {
-        // A zero total means the catalogue said the file is empty, which it
-        // never does; checked_div keeps that from being a division by zero
-        // anyway, because a progress line is not worth a panic.
-        let percent = (done * 100).checked_div(self.total).unwrap_or(0);
-        print!("\r  {} {percent:>3}%  ", self.name);
-        let _ = std::io::stdout().flush();
+    if state == Glance::Whole {
+        io.say(&format!("{id} is already installed."));
+    } else {
+        io.say(&format!(
+            "Installing {id} ({})",
+            human(catalogue::weights(entry).bytes)
+        ));
+        if let Err(why) = world.install(entry) {
+            io.say(&why);
+            io.fail();
+            return;
+        }
+        io.say(&format!("{id} is installed."));
     }
-    fn done(&mut self, name: &str) {
-        println!("\r  {name} done            ");
+    if here {
+        return;
     }
+    save_and_tell(
+        world,
+        io,
+        "stt",
+        "model",
+        crate::config_edit::quote(id),
+        &format!("{id:?}"),
+    );
 }
 
 /// `herdr-voice model`, and `--choose`. Returns the process's exit code.
-///
-/// The models directory is resolved here rather than passed in, the same way
-/// `doctor::run` does it, because this is the outermost layer: `list` and `pick`
-/// take what they need and are testable without an
-/// environment.
 pub fn run(choosing: bool) -> u8 {
-    let models = match crate::transport::state_directory(&crate::transport::Vars::from_env()) {
-        Some(state) => state.join("models"),
-        None => {
-            eprintln!(
-                "cannot tell where models live: neither HERDR_PLUGIN_STATE_DIR nor a \
-                 home directory is set, so there is nowhere to put one. Set \
-                 HERDR_PLUGIN_STATE_DIR and try again"
-            );
-            return 1;
-        }
-    };
-    let vars = crate::config::Vars::from_env();
-    let loaded = crate::config::load(crate::config::directory(&vars).as_deref());
-
-    print!("{}", list(&models, &loaded.config.stt.model));
+    let mut world = Real::from_env();
     if !choosing {
+        let snapshot = world.snapshot();
+        let models = world.models_dir();
+        print!(
+            "{}",
+            list(
+                &catalogue::MODELS,
+                &snapshot.loaded.config.stt.model,
+                &|entry| world.model_state(entry),
+                models.as_deref(),
+            )
+        );
         return 0;
     }
-
-    println!("\nType the number of the model to install, then Enter.");
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        eprintln!("nothing was read from the terminal; run `herdr-voice model --choose` again");
-        return 1;
-    }
-    let entry = match pick(&answer) {
-        Some(entry) => entry,
-        None => {
-            eprintln!(
-                "{:?} is not one of the numbers above. Run `herdr-voice model --choose` \
-                 again and type a number between 1 and {}",
-                answer.trim(),
-                catalogue::MODELS.len()
-            );
-            return 1;
-        }
+    let code = {
+        let stdin = std::io::stdin();
+        let mut input = stdin.lock();
+        let mut out = std::io::stdout();
+        let mut io = Io::new(&mut input, &mut out);
+        choose_speech_model(&mut world, &mut io, &catalogue::MODELS);
+        u8::from(io.failed)
     };
-
-    println!(
-        "Installing {} ({})",
-        entry.identifier,
-        human(catalogue::weights(entry).bytes)
-    );
-    let mut line = Line {
-        name: String::new(),
-        total: 0,
-    };
-    if let Err(why) = fetch::model(entry.identifier, &models, &mut line) {
-        eprintln!("{why}");
-        return 1;
-    }
-
-    // Verify what was just downloaded with the real check, not the glance the
-    // listing uses: this is the moment a bad download must be caught.
-    if let Err(why) = store::locate(&models, entry.identifier, Some(entry)) {
-        eprintln!("{why}");
-        return 1;
-    }
-
-    if loaded.config.stt.model == entry.identifier {
-        println!("{} is installed and already configured.", entry.identifier);
-        return 0;
-    }
-    let edit = [crate::config_edit::Edit {
-        table: "stt",
-        key: "model",
-        value: crate::config_edit::quote(entry.identifier),
-    }];
-    match crate::config_edit::write_keys(crate::config::directory(&vars).as_deref(), &edit) {
-        Ok(path) => {
-            println!(
-                "{} is installed, and {} now names it.",
-                entry.identifier,
-                path.display()
-            );
-            println!("The daemon still holds the previous model. Restart it to use this one.");
-            0
-        }
-        Err(why) => {
-            // The model is on disk and good; only the configuration edit failed,
-            // so the person needs one line, not another three gigabytes.
-            eprintln!(
-                "{} is installed, but the configuration could not be written: {why}",
-                entry.identifier
-            );
-            eprintln!("Add this to [stt] in your configuration file by hand:");
-            eprintln!("  model = \"{}\"", entry.identifier);
-            1
-        }
-    }
+    crate::popup::pause();
+    code
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::popup::tests_support::FakeWorld;
+    use crate::popup::Reached;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+
+    /// Runs the flow with `typed` as the person's input; returns the printed text.
+    fn drive(world: &mut FakeWorld, typed: &str, catalogue: &'static [Entry]) -> (String, bool) {
+        let mut input = Cursor::new(typed.as_bytes().to_vec());
+        let mut out: Vec<u8> = Vec::new();
+        let mut io = Io::new(&mut input, &mut out);
+        choose_speech_model(world, &mut io, catalogue);
+        let failed = io.failed;
+        (String::from_utf8(out).unwrap(), failed)
+    }
+
+    fn state(glance: Glance) -> impl Fn(&Entry) -> Glance {
+        move |_| glance
+    }
 
     #[test]
     fn the_listing_shows_every_model_with_a_size_before_anything_is_downloaded() {
         let text = list(
-            &std::path::PathBuf::from("/nowhere-at-all"),
+            &catalogue::MODELS,
             "large-v3-turbo",
+            &state(Glance::Absent),
+            Some(&PathBuf::from("/nowhere-at-all")),
         );
         for entry in catalogue::MODELS.iter() {
             assert!(
@@ -214,11 +261,25 @@ mod tests {
             text.contains("not installed"),
             "it must say what is there: {text}"
         );
+        assert!(text.contains("/nowhere-at-all/candle"), "{text}");
+    }
+
+    #[test]
+    fn the_listing_says_what_is_installed_and_what_is_the_wrong_size() {
+        let whole = list(&catalogue::MODELS, "", &state(Glance::Whole), None);
+        assert!(whole.contains("— installed"), "{whole}");
+        assert!(!whole.contains("not installed"), "{whole}");
+        let wrong = list(&catalogue::MODELS, "", &state(Glance::WrongSize), None);
+        assert!(wrong.contains("the wrong size"), "{wrong}");
+        assert!(
+            !wrong.contains("They live in"),
+            "no directory, no line about it: {wrong}"
+        );
     }
 
     #[test]
     fn the_configured_model_is_marked_in_the_listing() {
-        let text = list(&std::path::PathBuf::from("/nowhere-at-all"), "small");
+        let text = list(&catalogue::MODELS, "small", &state(Glance::Absent), None);
         let marked: Vec<&str> = text.lines().filter(|l| l.contains("small")).collect();
         assert_eq!(marked.len(), 1, "got {marked:?}");
         assert!(marked[0].contains("current"), "got {}", marked[0]);
@@ -232,14 +293,170 @@ mod tests {
     }
 
     #[test]
-    fn a_choice_outside_the_list_is_refused_rather_than_guessed() {
-        for answer in ["", "0", "7", "large", "-1", "2x"] {
-            assert!(
-                pick(answer).is_none(),
-                "{answer:?} must not resolve to a model"
-            );
+    fn with_the_candle_engine_a_model_that_is_not_there_is_installed_and_written() {
+        let mut world = FakeWorld::new(
+            "choose-candle",
+            "[stt]\nengine = \"candle\"\nlanguage = \"ru\"\n",
+        );
+        world.reached = Reached::NoDaemon;
+        let (said, failed) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(!failed, "{said}");
+        assert_eq!(world.installs, vec!["tiny".to_string()]);
+        assert_eq!(world.saved, vec!["[stt] model = \"tiny\"".to_string()]);
+        assert_eq!(world.told, 1);
+        assert!(said.contains("Installing tiny (151 MB)"), "{said}");
+        // The configuration now uses the model, and nothing else in it changed.
+        let file = world.file();
+        assert!(file.contains("model = \"tiny\""), "{file}");
+        assert!(
+            file.contains("engine = \"candle\"") && file.contains("language = \"ru\""),
+            "{file}"
+        );
+    }
+
+    #[test]
+    fn with_the_candle_engine_a_model_that_is_there_but_not_configured_is_not_downloaded_again() {
+        let mut world = FakeWorld::new("choose-candle-there", "[stt]\nengine = \"candle\"\n");
+        world.states.push(("small".to_string(), Glance::Whole));
+        let (said, _) = drive(&mut world, "3\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty(), "{said}");
+        assert_eq!(world.saved, vec!["[stt] model = \"small\"".to_string()]);
+        assert!(said.contains("small is already installed"), "{said}");
+    }
+
+    #[test]
+    fn with_the_candle_engine_the_configured_installed_model_is_said_to_be_so_and_nothing_happens()
+    {
+        let mut world = FakeWorld::new(
+            "choose-candle-configured",
+            "[stt]\nengine = \"candle\"\nmodel = \"tiny\"\n",
+        );
+        world.states.push(("tiny".to_string(), Glance::Whole));
+        let before = world.file();
+        let (said, failed) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(!failed);
+        assert!(
+            said.contains("tiny is installed and already configured"),
+            "{said}"
+        );
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert_eq!(world.told, 0);
+        assert_eq!(world.file(), before);
+    }
+
+    #[test]
+    fn with_the_candle_engine_the_configured_model_that_is_missing_is_installed_without_a_write() {
+        let mut world = FakeWorld::new(
+            "choose-candle-missing",
+            "[stt]\nengine = \"candle\"\nmodel = \"tiny\"\n",
+        );
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert_eq!(world.installs, vec!["tiny".to_string()]);
+        assert!(world.saved.is_empty(), "the key already says tiny: {said}");
+    }
+
+    #[test]
+    fn a_failed_download_says_so_writes_nothing_and_fails() {
+        let mut world = FakeWorld::new("choose-install-fails", "[stt]\nengine = \"candle\"\n");
+        world.install_error = Some("cannot reach huggingface.co; check the network".to_string());
+        let (said, failed) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(failed);
+        assert!(said.contains("cannot reach huggingface.co"), "{said}");
+        assert!(world.saved.is_empty());
+        assert_eq!(world.told, 0);
+    }
+
+    #[test]
+    fn with_a_command_that_uses_the_model_nothing_is_downloaded_or_written_and_the_file_is_named() {
+        let mut world = FakeWorld::new(
+            "choose-command-model",
+            "[stt]\nengine = \"command\"\ncommand = [\"whisper-cli\", \"-m\", \"{model}\"]\n",
+        );
+        let before = world.file();
+        let (said, failed) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(!failed, "{said}");
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert_eq!(world.file(), before);
+        assert!(said.contains("ggml-tiny.bin"), "{said}");
+        assert!(
+            said.contains("/models/ggml-tiny.bin"),
+            "the models directory is named: {said}"
+        );
+        assert!(said.contains("set [stt] engine to \"candle\""), "{said}");
+        assert!(said.contains("Nothing was downloaded or written"), "{said}");
+    }
+
+    #[test]
+    fn with_a_command_that_brings_its_own_model_the_model_key_is_said_not_to_be_used() {
+        // The shipped default: engine "command" and an empty command.
+        let mut world = FakeWorld::new("choose-command-own", "");
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert!(said.contains("does not use {model}"), "{said}");
+        assert!(said.contains("[stt] model is not used"), "{said}");
+        assert!(said.contains("set [stt] engine to \"candle\""), "{said}");
+    }
+
+    #[test]
+    fn with_the_http_engine_the_model_key_is_said_not_to_be_used() {
+        let mut world = FakeWorld::new("choose-http", "[stt]\nengine = \"http\"\n");
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert!(said.contains("[stt] http_model"), "{said}");
+        assert!(said.contains("set [stt] engine to \"candle\""), "{said}");
+    }
+
+    #[test]
+    fn an_engine_that_is_none_of_the_three_is_named_with_the_three() {
+        let mut world = FakeWorld::new("choose-unknown", "[stt]\nengine = \"whisperx\"\n");
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(world.installs.is_empty() && world.saved.is_empty());
+        assert!(
+            said.contains("\"whisperx\"") && said.contains("candle, http, command"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn an_empty_catalogue_says_what_happened_and_fails() {
+        let mut world = FakeWorld::new("choose-empty", "");
+        let (said, failed) = drive(&mut world, "1\n", &[]);
+        assert!(failed);
+        assert!(said.contains("No speech models are on offer"), "{said}");
+        assert!(said.contains("report it"), "{said}");
+    }
+
+    #[test]
+    fn esc_an_empty_line_and_a_number_outside_the_list_change_nothing() {
+        for (typed, expected) in [
+            ("\u{1b}\n", "Nothing was changed"),
+            ("\n", "Nothing was changed"),
+            ("9\n", "between 1 and 6"),
+        ] {
+            let mut world = FakeWorld::new("choose-leave", "[stt]\nengine = \"candle\"\n");
+            let (said, failed) = drive(&mut world, typed, &catalogue::MODELS);
+            assert!(!failed, "{typed:?}: {said}");
+            assert!(said.contains(expected), "{typed:?}: {said}");
+            assert!(world.installs.is_empty() && world.saved.is_empty());
         }
-        assert_eq!(pick("1").map(|e| e.identifier), Some("tiny"));
-        assert_eq!(pick(" 4 ").map(|e| e.identifier), Some("large-v3-turbo"));
+    }
+
+    #[test]
+    fn the_end_of_the_input_is_said_and_fails() {
+        let mut world = FakeWorld::new("choose-eof", "[stt]\nengine = \"candle\"\n");
+        let (said, failed) = drive(&mut world, "", &catalogue::MODELS);
+        assert!(failed);
+        assert!(
+            said.contains("nothing was read from the terminal"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_configuration_that_does_not_parse_is_said_before_the_list() {
+        let mut world = FakeWorld::new("choose-invalid", "[stt\nengine = ");
+        let (said, _) = drive(&mut world, "\n", &catalogue::MODELS);
+        assert!(said.contains("does not parse"), "{said}");
+        assert!(said.find("does not parse").unwrap() < said.find("1. tiny").unwrap());
     }
 }
