@@ -147,9 +147,20 @@ and asks for the name to type. Otherwise `rewrite_models::models_url` derives th
 address), and `world.rewrite_models` makes one `GET`, with `Authorization: Bearer <token>` when the
 token is set, bounded to ten seconds. A list with names is shown numbered with the configured one
 marked, and a number chooses. A failure (unreachable, refused, no answer in time, an error status,
-a body that is not `{"data":[{"id": ...}]}`, no entries, or no list address) is said in the words
-`http_failure::Cause::describe` gives, which name the address and end in what to do, followed by
-"type the model's name instead"; the name typed is written. The token is never printed.
+a body that is not `{"data":[{"id": ...}]}`, no entries, or no list address) is a `ListFailure`:
+
+```
+pub enum ListFailure {
+    Server(String),   // the sentence http_failure::Cause::describe gives: unreachable, refused, silent, an error status
+    NoAddress(String),// [rewrite] url does not end in /chat/completions, so there is no list address
+    BadBody(String),  // the answer is not {"data":[{"id": ...}]}
+    Empty,            // the list has no entries
+}
+```
+
+each with a sentence that names the address and ends in what to do, followed by "type the model's
+name instead"; the name typed is written. `ListFailure` is defined in `src/rewrite_models.rs` and
+carries its sentence (`Display`). The token is never printed.
 
 ### 2.5 The real world, `settings::Real`
 
@@ -251,7 +262,7 @@ the person a reopen.
 | AC-27 | `Real::save` | the writer writes only `config.toml` in the configuration directory (its tests) |
 | AC-43 | the array and secret branches | tests |
 | AC-44 | `settings::run` | by hand: the popup ends by itself after Enter; a test that `run_with` pauses once |
-| AC-28 to 31 | `chooser::choose_speech_model` | tests over a fake `World` for each engine, an empty catalogue, installed and not, and the configured model |
+| AC-28 to 31 | `chooser::choose_speech_model` | tests over a fake `World` for each engine, an empty catalogue, installed and not, and the configured model; one of them has the fake save through `config_edit::write_keys` to a temporary configuration file with the download replaced, which is what AC-31 asks of `run()` since `run()` is only a wrapper that builds the real `World` |
 | AC-32, 38 | by hand | after the restart named, a take uses the model; recorded as not verified where it cannot be run |
 | AC-33 to 37 | `rewrite_models` and the rewrite flow | tests with a local fake server that records every request: one `GET`, the bearer header, the failures |
 | AC-41 | manifest | `scripts/check_manifest.py` |
