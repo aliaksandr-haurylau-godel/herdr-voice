@@ -38,6 +38,7 @@ mod rewrite_models;
 /// once it can be executed.
 #[cfg(all(test, unix))]
 mod script_fixture;
+mod settings;
 mod setup;
 mod stderr;
 mod stt;
