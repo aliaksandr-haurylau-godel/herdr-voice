@@ -31,6 +31,7 @@ mod proto;
 mod ptt;
 mod record;
 mod reload;
+mod repeat;
 mod rewrite;
 mod rewrite_models;
 /// Test-only, unix-only: writes a script a test then runs, and returns only

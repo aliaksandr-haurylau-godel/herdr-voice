@@ -2660,6 +2660,223 @@ finally:
     print(f"-- scratch directory (kept for the journal): {D}")
 ```
 
+## The Linux check's decisions, with stubs, for issue #23
+
+Run on 2026-10-07 on macOS 27.0.1 (Darwin 27.0.0, arm64). **No Linux run, no
+container and no real herdr were involved.** `scripts/linux-check.sh` was run as a
+whole, as the unmodified script from `e92f0b2` and as the script on branch
+`fix/23-linux-check` at `cd2ac27`, against stub commands (`scripts/test-linux-check.sh`):
+a `herdr` that keeps a JSON-lines plugin log it can be asked about, a plugin binary
+(`doctor`, `daemon`, `cancel`), a `pkill` that signals nothing, and the package and
+toolchain commands. The real `jq` was used (jq-1.7.1). The stub `pkill` is first on
+`PATH` and the test refuses to start otherwise, because the script's own `pkill -f
+'herdr-voice daemon'` matches a daemon an owner may have running; after every run the
+owner's daemon was still there (read with `pgrep -fl`, nothing signalled) and no stub
+process was left. Every case runs under a 60-second limit.
+
+```
+$ sh scripts/test-linux-check.sh                                  # /bin/bash 3.2.57
+75 ok, all cases passed, 69 s
+$ HERDR_VOICE_TEST_BASH=<path of bash 5.3.20> sh scripts/test-linux-check.sh
+75 ok, all cases passed
+$ shellcheck scripts/linux-check.sh scripts/test-linux-check.sh   # shellcheck 0.11.0
+(no output)
+```
+
+The same test, final version, against the unmodified `scripts/linux-check.sh` of
+`e92f0b2`: 27 `ok` and 48 `FAIL`, ending "48 case(s) failed". Every case fails on it
+but two, `clean` and `substring-id`; `substring-id` guards the exact comparison of log
+ids and passes on a script that excludes one id by `!=`. The cases, with the number
+of failed assertions on the unmodified script: `stale-dictate` (2), `stale-cancel` (2),
+`unreadable-log` (1), `unreadable-log-before-no-device` (3),
+`unreadable-log-before-named-device` (3), `config-restored` (2), `config-absent` (1),
+`interrupt` (3), `interrupt-term` (2), `interrupt-hup` (2), `interrupt-twice` (2),
+`leftover-backup` (3), `leftover-marker` (3), `leftover-backup-and-marker` (3),
+`leftover-unwritable` (2), `restore-fails` (2), `daemon-will-not-stop` (4),
+`default-stop-timeout` (2), `daemon-still-up-at-the-end` (2, one of them "hit the
+60-second limit": the unmodified script blocks in `wait` on a daemon that ignores
+`TERM`), `hung-invoke` (2), `tab` (1) and `tab-in-exit-code` (1).
+
+Mutation testing of the changed script: two runs, one mutation at a time, each followed
+by the full test. 54 mutations in the first run, 38 killed; every survivor was either
+killed by a case added afterwards or is equivalent or unreachable, as `tasks/23/RUN_23.md`
+lists one by one.
+
+What this does not show, and so leaves unproven:
+
+- That the changed script passes in a real container with a real herdr. The stubs
+  answer the way the issue's review observed herdr 0.8.2 to answer (`--plugin` and
+  `--limit` on `herdr plugin log list`, `.result.pane.pane_id`, an empty match as
+  `"logs":[]`); the `log_id` values and record fields (`action_id`, `status`,
+  `exit_code`, `stderr`) are assumed to be what the script already relied on.
+- That `herdr plugin log list --limit 30` returns the newest 30 records, oldest first.
+  The script already depended on this through `last`; the stub models it and nothing
+  here checks it against herdr.
+- A real hang. `hung-invoke` makes the stub `herdr plugin action invoke` return 124 at
+  once and the stub `timeout` does not wait, so it shows the 124 branch only. A
+  non-zero return other than 124 from that invoke in the `named-device` step is still
+  reported, as before, as the take never finishing.
+- `interrupt-twice` tells `cleanup`'s `trap '' INT TERM HUP` from its absence only
+  under bash 4 and later. bash 3.2 does not run a trap again while it runs the `EXIT`
+  trap, so there the case passes either way. The ubuntu job runs it under bash 5.
+- A `TERM` sent to the script alone rather than to its process group is handled when
+  the foreground command ends, which is how bash behaves; a Ctrl-C reaches both.
+- `restore-fails` and `leftover-unwritable` are skipped, with a printed line, when the
+  test runs as root, where a read-only directory stops nothing.
+- Linux. The macOS runner and the Ubuntu runner run the test in CI; this run did not.
+
+## A transcript that is one phrase repeated, for issue #30
+
+Run on 2026-10-07 on macOS 27.0.1 (Darwin 27.0.0, arm64), debug builds of `0.1.0-beta.5`:
+the baseline from `main` at `e92f0b2` (built from `git archive` into a scratch directory)
+and the branch `fix/30-repeated-phrase` at `ec3bf3a`. Each binary was built into a target
+directory of its own.
+
+**Method.** A Python script kept outside the repository (below) starts `herdr-voice daemon`
+with `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_CONFIG_DIR` and `HOME` pointing into a scratch
+directory, `PATH` reduced to `/usr/bin:/bin`, and `HERDR_BIN_PATH` naming a script that
+appends its arguments to a log and exits 0. Nothing it did could reach a running herdr or
+the installed plugin. Takes are recorded from the real default microphone
+(`[audio] silence_db = -120`, so the quiet room is not refused as silent) and transcribed
+by `sh -c "cat <file>"`, a file the script rewrites between takes, which stands in for the
+transcriber: the issue's own text, `Продолжение следует...` four times, and an ordinary
+sentence. The rewrite step is off and `[ui] toasts` is at its default, on. The daemon's
+standard error, where the journal goes, is read back. A take is two `dictate` presses three
+seconds apart; a hold is two `ptt` presses half a second apart.
+
+**The instrument, checked first: the baseline.** On `e92f0b2` the repeated text is delivered
+with nothing said about it, and the take's file is gone:
+
+```
+-- a take of one phrase repeated, by dictate
+  dictate  exit 0   'delivered to w1:p1 [-92.0 dB]'
+  wav files in the takes directory: []
+  herdr was asked: ['pane send-text w1:p1 Продолжение следует... Продолжение следует... Продолжение следует... Продолжение следует...']
+  journal: ['delivering: Продолжение следует... ×4']
+```
+
+**The branch, the same script:**
+
+```
+-- a take of one phrase repeated, by dictate
+  dictate  exit 0   'delivered to w1:p1 [-84.6 dB]; probably not speech: the text is one phrase repeated 4 times, the way a transcriber fills silence. It was delivered; check what reached the pane. The take is kept at <scratch>/state/takes/1791367876793-97552-1.wav'
+  wav files in the takes directory: ['1791367876793-97552-1.wav']
+  herdr was asked: ['pane send-text w1:p1 Продолжение следует... ×4',
+                    'notification show Probably not speech --body w1:p1: the text is one phrase repeated 4 times, the way a transcriber fills silence. It was delivered; check what reached the pane. The take is kept at <scratch>/state/takes/1791367876793-97552-1.wav']
+  journal: ['delivering: Продолжение следует... ×4',
+            'probably not speech: pane=w1:p1 repeats=4 block_words=2 take=<scratch>/state/takes/1791367876793-97552-1.wav']
+-- a take of ordinary speech, by dictate
+  dictate  exit 0   'delivered to w1:p1 [-100.0 dB]'
+  wav files in the takes directory: []
+  herdr was asked: ['pane send-text w1:p1 fix the worklog entry']
+  journal: ['delivering: fix the worklog entry']
+-- a take of one phrase repeated, by a ptt hold (no reply reaches anybody)
+  wav files in the takes directory: ['1791367884223-97552-3.wav']
+  herdr was asked: ['pane send-text w1:p1 Продолжение следует... ×4', 'notification show Probably not speech --body w1:p1: ...  The take is kept at <scratch>/state/takes/1791367884223-97552-3.wav']
+  journal: ['delivering: Продолжение следует... ×4', 'probably not speech: pane=w1:p1 repeats=4 block_words=2 take=<scratch>/state/takes/1791367884223-97552-3.wav']
+```
+
+(`×4` stands for the four copies of the phrase in the output, which was printed in full.)
+The text was delivered whole in all three cases. The repeated text kept its take and said
+so in the reply, the journal and the toast; the hold, which has no reply, said so in the
+journal and the toast. The ordinary sentence kept nothing and said nothing.
+
+What this run does not show: the sentence on a real silent microphone through a real
+transcriber (the transcriber here is a stand-in, so the claim "a transcriber returns this
+for silence" rests on the measurement recorded earlier in this file); `[delivery] submit`
+(the delivery call is the same one with another verb); Linux and Windows.
+
+The script, invoked as `python3 -I s5_30.py <binary> <label>`:
+
+```python
+import os, subprocess, sys, time, tempfile, glob, json
+
+binary, label = sys.argv[1], sys.argv[2]
+D = tempfile.mkdtemp(prefix="hv30-")
+os.makedirs(f"{D}/config"); os.makedirs(f"{D}/state")
+calls = f"{D}/herdr-calls.log"
+said = f"{D}/said.txt"
+fake = f"{D}/herdr"
+open(fake, "w").write(f'#!/bin/sh\necho "$@" >> "{calls}"\nexit 0\n')
+os.chmod(fake, 0o755)
+open(f"{D}/herdr-config.toml", "w").write("")
+open(f"{D}/config/config.toml", "w").write(
+    '[audio]\nsilence_db = -120\n\n'
+    f'[stt]\nengine = "command"\ncommand = ["sh", "-c", "cat {said}"]\n\n'
+    '[rewrite]\nengine = "off"\n'
+)
+env = {
+    "PATH": "/usr/bin:/bin", "HOME": D,
+    "HERDR_BIN_PATH": fake, "HERDR_CONFIG_PATH": f"{D}/herdr-config.toml",
+    "HERDR_PLUGIN_CONFIG_DIR": f"{D}/config", "HERDR_PLUGIN_STATE_DIR": f"{D}/state",
+}
+ctx = json.dumps({"focused_pane_id": "w1:p1"})
+REPEATED = "Продолжение следует... Продолжение следует... Продолжение следует... Продолжение следует..."
+ORDINARY = "fix the worklog entry"
+
+def press(cmd):
+    e = dict(env)
+    e["HERDR_PLUGIN_CONTEXT_JSON"] = ctx
+    e["HERDR_PLUGIN_ENTRYPOINT_ID"] = cmd
+    t = time.time()
+    r = subprocess.run([binary, cmd], env=e, capture_output=True, text=True, timeout=60)
+    print(f"  {cmd:8} exit {r.returncode} after {time.time()-t:4.1f}s  stdout={r.stdout.strip()!r} stderr={r.stderr.strip()!r}")
+
+def wavs():
+    return sorted(os.path.basename(p) for p in glob.glob(f"{D}/state/takes/*.wav"))
+
+def herdr_calls(*words):
+    if not os.path.exists(calls):
+        return []
+    return [l for l in open(calls).read().splitlines() if any(l.startswith(w) for w in words)]
+
+def journal():
+    return [l for l in open(f"{D}/daemon.err", errors="replace").read().splitlines()
+            if "probably not speech" in l or l.startswith("delivering")]
+
+def show(title):
+    print(f"  wav files in the takes directory: {wavs()}")
+    print(f"  herdr was asked: {herdr_calls('pane send-text', 'notification')}")
+    print(f"  journal: {journal()}")
+
+print(f"== {label}  (binary {binary})")
+err = open(f"{D}/daemon.err", "w")
+daemon = subprocess.Popen([binary, "daemon"], env=env, stdout=subprocess.DEVNULL, stderr=err)
+time.sleep(1.5)
+try:
+    for name, text in (("a take of one phrase repeated, by dictate", REPEATED),
+                       ("a take of ordinary speech, by dictate", ORDINARY)):
+        print(f"-- {name}")
+        open(said, "w").write(text)
+        open(calls, "w").write("")
+        for f in glob.glob(f"{D}/state/takes/*.wav"):
+            os.remove(f)
+        open(f"{D}/daemon.err", "w").close()
+        press("dictate")
+        time.sleep(3)
+        press("dictate")
+        time.sleep(0.5)
+        show(name)
+    print("-- a take of one phrase repeated, by a ptt hold (no reply reaches anybody)")
+    open(said, "w").write(REPEATED)
+    open(calls, "w").write("")
+    for f in glob.glob(f"{D}/state/takes/*.wav"):
+        os.remove(f)
+    open(f"{D}/daemon.err", "w").close()
+    press("ptt")
+    time.sleep(0.5)
+    press("ptt")
+    time.sleep(5)
+    show("ptt")
+finally:
+    daemon.terminate()
+    try:
+        daemon.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        daemon.kill()
+    print(f"-- scratch directory: {D}")
+```
+
 ## The microphone popup and the reload request, for issue #103
 
 The popup described here was built as a command of its own (`herdr-voice mic`) and became the
@@ -2739,71 +2956,6 @@ the one herdr runs, `herdr plugin action invoke herdr-voice.mic`, then watch tha
 popup appears as a popup and not as a full pane, choose an input, and read that it says
 "The daemon applied it" (not "No dictation daemon is running", which is what a popup
 that cannot find the daemon would say) and that the message stays on screen until Enter.
-
-## The Linux check's decisions, with stubs, for issue #23
-
-Run on 2026-10-07 on macOS 27.0.1 (Darwin 27.0.0, arm64). **No Linux run, no
-container and no real herdr were involved.** `scripts/linux-check.sh` was run as a
-whole, as the unmodified script from `e92f0b2` and as the script on branch
-`fix/23-linux-check` at `cd2ac27`, against stub commands (`scripts/test-linux-check.sh`):
-a `herdr` that keeps a JSON-lines plugin log it can be asked about, a plugin binary
-(`doctor`, `daemon`, `cancel`), a `pkill` that signals nothing, and the package and
-toolchain commands. The real `jq` was used (jq-1.7.1). The stub `pkill` is first on
-`PATH` and the test refuses to start otherwise, because the script's own `pkill -f
-'herdr-voice daemon'` matches a daemon an owner may have running; after every run the
-owner's daemon was still there (read with `pgrep -fl`, nothing signalled) and no stub
-process was left. Every case runs under a 60-second limit.
-
-```
-$ sh scripts/test-linux-check.sh                                  # /bin/bash 3.2.57
-75 ok, all cases passed, 69 s
-$ HERDR_VOICE_TEST_BASH=<path of bash 5.3.20> sh scripts/test-linux-check.sh
-75 ok, all cases passed
-$ shellcheck scripts/linux-check.sh scripts/test-linux-check.sh   # shellcheck 0.11.0
-(no output)
-```
-
-The same test, final version, against the unmodified `scripts/linux-check.sh` of
-`e92f0b2`: 27 `ok` and 48 `FAIL`, ending "48 case(s) failed". Every case fails on it
-but two, `clean` and `substring-id`; `substring-id` guards the exact comparison of log
-ids and passes on a script that excludes one id by `!=`. The cases, with the number
-of failed assertions on the unmodified script: `stale-dictate` (2), `stale-cancel` (2),
-`unreadable-log` (1), `unreadable-log-before-no-device` (3),
-`unreadable-log-before-named-device` (3), `config-restored` (2), `config-absent` (1),
-`interrupt` (3), `interrupt-term` (2), `interrupt-hup` (2), `interrupt-twice` (2),
-`leftover-backup` (3), `leftover-marker` (3), `leftover-backup-and-marker` (3),
-`leftover-unwritable` (2), `restore-fails` (2), `daemon-will-not-stop` (4),
-`default-stop-timeout` (2), `daemon-still-up-at-the-end` (2, one of them "hit the
-60-second limit": the unmodified script blocks in `wait` on a daemon that ignores
-`TERM`), `hung-invoke` (2), `tab` (1) and `tab-in-exit-code` (1).
-
-Mutation testing of the changed script: two runs, one mutation at a time, each followed
-by the full test. 54 mutations in the first run, 38 killed; every survivor was either
-killed by a case added afterwards or is equivalent or unreachable, as `tasks/23/RUN_23.md`
-lists one by one.
-
-What this does not show, and so leaves unproven:
-
-- That the changed script passes in a real container with a real herdr. The stubs
-  answer the way the issue's review observed herdr 0.8.2 to answer (`--plugin` and
-  `--limit` on `herdr plugin log list`, `.result.pane.pane_id`, an empty match as
-  `"logs":[]`); the `log_id` values and record fields (`action_id`, `status`,
-  `exit_code`, `stderr`) are assumed to be what the script already relied on.
-- That `herdr plugin log list --limit 30` returns the newest 30 records, oldest first.
-  The script already depended on this through `last`; the stub models it and nothing
-  here checks it against herdr.
-- A real hang. `hung-invoke` makes the stub `herdr plugin action invoke` return 124 at
-  once and the stub `timeout` does not wait, so it shows the 124 branch only. A
-  non-zero return other than 124 from that invoke in the `named-device` step is still
-  reported, as before, as the take never finishing.
-- `interrupt-twice` tells `cleanup`'s `trap '' INT TERM HUP` from its absence only
-  under bash 4 and later. bash 3.2 does not run a trap again while it runs the `EXIT`
-  trap, so there the case passes either way. The ubuntu job runs it under bash 5.
-- A `TERM` sent to the script alone rather than to its process group is handled when
-  the foreground command ends, which is how bash behaves; a Ctrl-C reaches both.
-- `restore-fails` and `leftover-unwritable` are skipped, with a printed line, when the
-  test runs as root, where a read-only directory stops nothing.
-- Linux. The macOS runner and the Ubuntu runner run the test in CI; this run did not.
 
 ## The settings popup, for issues #104, #103, #46 and #49
 
