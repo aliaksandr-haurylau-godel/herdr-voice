@@ -511,12 +511,25 @@ pub fn wants_open(args: &[String]) -> bool {
     args.iter().any(|a| a == "--open")
 }
 
+/// The pane the action opens: the manifest's pane `settings`.
+pub const ENTRYPOINT: &str = "settings";
+
+/// What `herdr-voice settings` does for its arguments, with the two things it can do
+/// passed in so that the choice between them is tested without a herdr or a terminal.
+pub fn dispatch(args: &[String], open: &mut dyn FnMut() -> u8, run: &mut dyn FnMut() -> u8) -> u8 {
+    if wants_open(args) {
+        open()
+    } else {
+        run()
+    }
+}
+
 /// `herdr-voice settings --open`: what the manifest's `settings` action runs.
 pub fn open() -> u8 {
     let herdr = crate::delivery::herdr_binary();
     let plugin = std::env::var("HERDR_PLUGIN_ID")
         .unwrap_or_else(|_| crate::transport::PLUGIN_ID.to_string());
-    match crate::popup::open_with(&herdr, &plugin, "settings", OPEN_BOUND) {
+    match crate::popup::open_with(&herdr, &plugin, ENTRYPOINT, OPEN_BOUND) {
         Ok(()) => 0,
         Err(why) => {
             eprintln!("{why}");
@@ -1335,5 +1348,222 @@ mod tests {
             1,
             "{said}"
         );
+    }
+
+    #[test]
+    fn the_engines_the_popup_accepts_for_the_rewrite_include_every_one_the_engine_resolves() {
+        for name in ["off", "agent", "http", "command"] {
+            assert!(REWRITE_ENGINES.contains(&name), "{name}");
+        }
+        let mut world = FakeWorld::new("rewrite-engine-command", "");
+        let typed = format!(
+            "{}\n{}\ncommand\n\n\n",
+            s("rewrite"),
+            k("rewrite", "engine")
+        );
+        drive(&mut world, &typed);
+        assert!(
+            world.file().contains("engine = \"command\""),
+            "{}",
+            world.file()
+        );
+    }
+
+    #[test]
+    fn a_context_source_that_is_none_of_the_three_is_refused_and_names_them() {
+        let mut world = FakeWorld::new("context-source", "");
+        let typed = format!("{}\n{}\nvosk\n\n\n", s("context"), k("context", "source"));
+        let (_, said) = drive(&mut world, &typed);
+        assert!(said.contains("not one of auto, transcript, pane"), "{said}");
+        assert!(world.saved.is_empty());
+    }
+
+    #[test]
+    fn the_prompt_for_a_key_with_a_fixed_set_lists_the_set() {
+        let mut world = FakeWorld::new("engine-prompt", "");
+        let typed = format!("{}\n{}\n\u{1b}\n\n\n", s("stt"), k("stt", "engine"));
+        let (_, said) = drive(&mut world, &typed);
+        assert!(said.contains("New value (candle, http, command)"), "{said}");
+    }
+
+    #[test]
+    fn a_value_is_cut_at_sixty_characters_counted_as_characters() {
+        let shown = |n: usize| value_text(&Value::String("x".repeat(n)));
+        // The quotes count: 58 letters is 60 characters.
+        assert_eq!(shown(58).chars().count(), 60);
+        assert!(!shown(58).ends_with("..."), "{}", shown(58));
+        assert_eq!(shown(59).chars().count(), 60, "cut to 57 and the dots");
+        assert!(shown(59).ends_with("..."), "{}", shown(59));
+        // Forty Cyrillic letters are eighty bytes and forty-two characters: shown whole.
+        let cyrillic = value_text(&Value::String("я".repeat(40)));
+        assert!(!cyrillic.ends_with("..."), "{cyrillic}");
+    }
+
+    #[test]
+    fn a_value_with_a_line_break_is_shown_on_one_line() {
+        let table: toml::Table = toml::from_str("[rewrite]\nmodel = \"a\\nb\"\n").unwrap();
+        let rewrite = sections()
+            .into_iter()
+            .find(|x| x.name == "rewrite")
+            .unwrap();
+        let rendered = render_keys(&rewrite, Some(&table));
+        assert_eq!(
+            rendered.trim_end().lines().count(),
+            rewrite.keys.len() + 1,
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn the_sections_are_numbered_from_one_and_the_equals_signs_line_up() {
+        let rendered = render_sections(&sections(), None);
+        assert!(
+            rendered.lines().next().unwrap().starts_with("  1. audio"),
+            "{rendered}"
+        );
+        let stt = sections().into_iter().find(|x| x.name == "stt").unwrap();
+        let keys = render_keys(&stt, None);
+        let columns: Vec<usize> = keys
+            .lines()
+            .skip(1)
+            .map(|l| l.find(" = ").expect("every key line has an equals sign"))
+            .collect();
+        assert!(columns.windows(2).all(|w| w[0] == w[1]), "{keys}");
+    }
+
+    #[test]
+    fn the_end_of_the_input_at_the_microphone_question_draws_the_keys_once() {
+        let mut world = mic_world("eof-at-mic", "", &["Built-in"]);
+        let typed = format!("{}\n{}\n", s("audio"), k("audio", "input"));
+        let (code, said) = drive(&mut world, &typed);
+        assert_eq!(code, 1, "{said}");
+        assert_eq!(said.matches("1. input").count(), 1, "{said}");
+        assert_eq!(
+            said.matches("nothing was read from the terminal").count(),
+            1,
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_does_not_end_the_menu() {
+        let mut world = FakeWorld::new("failed-write-goes-on", "");
+        world.save_error = Some(WriteError::Io {
+            path: "config.toml".to_string(),
+            why: "permission denied".to_string(),
+        });
+        let typed = format!("{}\n{}\nfalse\n\n\n", s("ui"), k("ui", "toasts"));
+        let (code, said) = drive(&mut world, &typed);
+        assert_eq!(code, 1, "{said}");
+        assert!(
+            !said.contains("nothing was read"),
+            "the input was not at its end: {said}"
+        );
+        assert!(
+            said.matches("toasts").count() >= 2,
+            "the keys are drawn again: {said}"
+        );
+        assert!(
+            said.contains("Esc then Enter, or an empty line, leaves it as it is"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn the_configured_input_is_marked_current_in_the_microphone_entry() {
+        let mut world = mic_world("mic-current", "[audio]\ninput = \"B\"\n", &["A", "B"]);
+        let typed = format!("{}\n{}\n\n\n\n", s("audio"), k("audio", "input"));
+        let (_, said) = drive(&mut world, &typed);
+        assert!(said.contains("2. B  (current)"), "{said}");
+    }
+
+    #[test]
+    fn a_typed_rewrite_model_for_an_engine_other_than_http_is_said_not_to_be_used_yet() {
+        let mut world = FakeWorld::new("rw-typed-note", "[rewrite]\nengine = \"off\"\n");
+        let typed = format!("{}\n{}\nm1\n\n\n", s("rewrite"), k("rewrite", "model"));
+        let (_, said) = drive(&mut world, &typed);
+        assert!(
+            said.contains("not used until you set [rewrite] engine"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_text_with_a_control_character_is_shown_escaped_and_written_escaped() {
+        let mut world = FakeWorld::new("control-text", "");
+        let typed = format!("{}\n{}\na\u{7}b\n\n\n", s("stt"), k("stt", "language"));
+        let (_, said) = drive(&mut world, &typed);
+        assert!(
+            said.contains("[stt] language is now \"a\\u{7}b\""),
+            "{said}"
+        );
+        assert!(
+            world.file().contains("language = \"a\\u0007b\""),
+            "{}",
+            world.file()
+        );
+    }
+
+    #[test]
+    fn the_flag_alone_opens_and_nothing_else_does() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        assert!(!wants_open(&args(&["settings", "--help"])));
+        assert!(!wants_open(&args(&["settings", "--opening"])));
+    }
+
+    #[test]
+    fn the_command_runs_the_popup_or_opens_it_and_never_both() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        let calls = std::cell::RefCell::new(Vec::new());
+        let mut open = || {
+            calls.borrow_mut().push("open");
+            11
+        };
+        let mut run = || {
+            calls.borrow_mut().push("run");
+            22
+        };
+        assert_eq!(
+            dispatch(&args(&["settings", "--open"]), &mut open, &mut run),
+            11
+        );
+        assert_eq!(dispatch(&args(&["settings"]), &mut open, &mut run), 22);
+        assert_eq!(*calls.borrow(), vec!["open", "run"]);
+    }
+
+    #[test]
+    fn the_action_opens_the_pane_the_manifest_declares() {
+        assert_eq!(ENTRYPOINT, "settings");
+        let manifest: toml::Value =
+            toml::from_str(&std::fs::read_to_string("herdr-plugin.toml").unwrap()).unwrap();
+        assert!(manifest["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"].as_str() == Some(ENTRYPOINT)));
+    }
+
+    #[test]
+    fn after_a_failed_write_the_next_answer_is_still_read_and_can_succeed() {
+        let mut world = FakeWorld::new("failed-then-ok", "");
+        world.save_error = Some(WriteError::Io {
+            path: "config.toml".to_string(),
+            why: "permission denied".to_string(),
+        });
+        // The first attempt fails; the same key is chosen again and the write works.
+        let typed = format!(
+            "{}\n{}\nfalse\n{}\ntrue\n\n\n",
+            s("ui"),
+            k("ui", "toasts"),
+            k("ui", "toasts")
+        );
+        let (code, said) = drive(&mut world, &typed);
+        assert_eq!(code, 1, "the first failure is not forgotten: {said}");
+        assert!(
+            world.file().contains("toasts = true"),
+            "{}\n{said}",
+            world.file()
+        );
+        assert_eq!(world.saved.len(), 2, "{said}");
     }
 }

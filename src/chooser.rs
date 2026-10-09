@@ -508,4 +508,32 @@ mod tests {
             "{said}"
         );
     }
+
+    #[test]
+    fn a_gigabyte_is_shown_in_gigabytes() {
+        assert_eq!(human(1_000_000_000), "1.00 GB");
+        assert_eq!(human(999_999_999), "1000 MB");
+    }
+
+    #[test]
+    fn the_configured_installed_model_is_not_also_said_to_be_only_installed() {
+        let mut world = FakeWorld::new(
+            "choose-not-twice",
+            "[stt]\nengine = \"candle\"\nmodel = \"tiny\"\n",
+        );
+        world.states.push(("tiny".to_string(), Glance::Whole));
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert!(!said.contains("is already installed."), "{said}");
+    }
+
+    #[test]
+    fn a_model_of_the_wrong_size_is_downloaded_again_before_it_is_written() {
+        let mut world = FakeWorld::new("choose-wrong-size", "[stt]\nengine = \"candle\"\n");
+        world.states.push(("tiny".to_string(), Glance::WrongSize));
+        let (said, _) = drive(&mut world, "1\n", &catalogue::MODELS);
+        assert_eq!(world.installs, vec!["tiny".to_string()], "{said}");
+        assert!(said.contains("Installing tiny"), "{said}");
+        assert!(!said.contains("already installed"), "{said}");
+        assert_eq!(world.saved, vec!["[stt] model = \"tiny\"".to_string()]);
+    }
 }

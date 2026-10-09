@@ -373,4 +373,35 @@ mod tests {
                 .unwrap();
         assert_eq!(names, vec!["a[31mb".to_string(), "ok".to_string()]);
     }
+
+    #[test]
+    fn the_bound_is_ten_seconds() {
+        assert_eq!(LIST_BOUND, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn an_answer_bigger_than_a_list_of_names_can_be_is_not_read_whole() {
+        let body = format!(r#"{{"data":[{{"id":"{}"}}]}}"#, "x".repeat(1_200_000));
+        let (url, server) = serve(&ok(&body));
+        let failure = fetch(&url, "", Duration::from_secs(10)).unwrap_err();
+        let _ = server.join();
+        assert!(matches!(failure, ListFailure::BadBody(_)), "{failure:?}");
+    }
+
+    #[test]
+    fn a_redirect_names_where_it_points_and_the_token_is_taken_out_of_that() {
+        let redirect =
+            "HTTP/1.1 302 Found\r\nLocation: http://elsewhere.invalid/?key=s3cret-token\r\n\
+                        Content-Length: 0\r\nConnection: close\r\n\r\n";
+        let (url, server) = serve(redirect);
+        let failure = fetch(&url, "s3cret-token", Duration::from_secs(5)).unwrap_err();
+        server.join().unwrap();
+        let said = failure.to_string();
+        assert!(
+            said.contains("it points to http://elsewhere.invalid/"),
+            "{said}"
+        );
+        assert!(!said.contains("s3cret-token"), "{said}");
+        assert!(said.contains("***"), "{said}");
+    }
 }

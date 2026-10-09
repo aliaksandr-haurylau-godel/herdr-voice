@@ -190,13 +190,11 @@ fn main() -> ExitCode {
             ExitCode::from(chooser::run(choosing))
         }
         Command::Setup => ExitCode::from(setup::main()),
-        Command::Settings => {
-            if settings::wants_open(&args) {
-                ExitCode::from(settings::open())
-            } else {
-                ExitCode::from(settings::run())
-            }
-        }
+        Command::Settings => ExitCode::from(settings::dispatch(
+            &args,
+            &mut settings::open,
+            &mut settings::run,
+        )),
         other @ Command::Status => {
             eprintln!("{}: not implemented yet", other.name());
             ExitCode::from(NOT_IMPLEMENTED)
@@ -282,5 +280,10 @@ mod tests {
         assert!(!IMPLEMENTED.contains(&"mic"));
         assert!(!USAGE.contains("herdr-voice mic"));
         assert!(USAGE.contains("herdr-voice settings"));
+    }
+
+    #[test]
+    fn the_usage_says_what_settings_does_and_what_its_flag_is_for() {
+        assert!(USAGE.contains("change the configuration; --open opens the popup in herdr"));
     }
 }

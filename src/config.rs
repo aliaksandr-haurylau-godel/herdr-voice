@@ -834,4 +834,54 @@ mod tests {
             "{why}"
         );
     }
+
+    #[test]
+    fn a_failure_with_no_position_gives_no_message_of_the_parsers() {
+        use serde::de::Error as _;
+        let error = toml::de::Error::custom("token = 12345");
+        let said = parse_failure(&error, "");
+        assert!(!said.contains("12345"), "{said}");
+        assert!(said.contains("no position"), "{said}");
+    }
+
+    #[test]
+    fn the_position_is_the_line_and_the_column_of_the_value_and_never_the_line_itself() {
+        let text = "[ui]\nblink_ms = \"fast\"\n";
+        let error = toml::from_str::<Config>(text).unwrap_err();
+        let said = parse_failure(&error, text);
+        assert!(said.starts_with("line 2, column 12: "), "{said}");
+        assert!(!said.contains('\n'), "{said}");
+        assert!(!said.contains("blink_ms = "), "{said}");
+    }
+
+    #[test]
+    fn the_column_is_counted_in_characters_not_bytes() {
+        let text = "[audio]\ninput = \"ййй\" junk\n";
+        let error = toml::from_str::<Config>(text).unwrap_err();
+        let said = parse_failure(&error, text);
+        assert!(said.contains("line 2, column 15"), "{said}");
+    }
+
+    #[test]
+    fn only_the_line_that_sets_a_token_is_hidden() {
+        let text = "[rewrite]\ntoken = \"ok\"\n[ui]\nblink_ms = \"fast\"\n";
+        let error = toml::from_str::<Config>(text).unwrap_err();
+        let said = parse_failure(&error, text);
+        assert!(
+            said.contains("line 4") && said.contains("invalid type"),
+            "{said}"
+        );
+        assert!(!said.contains("sets a token"), "{said}");
+    }
+
+    #[test]
+    fn a_token_key_in_capitals_is_hidden_too() {
+        let text = "[rewrite]\nTOKEN = plain-value\n";
+        let error = toml::from_str::<Config>(text).unwrap_err();
+        let said = parse_failure(&error, text);
+        assert!(
+            said.contains("sets a token") && !said.contains("plain-value"),
+            "{said}"
+        );
+    }
 }

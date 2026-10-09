@@ -987,4 +987,40 @@ toasts = false
         assert!(said.contains("Check the value you typed"), "{said}");
         assert!(said.contains("inline table"), "{said}");
     }
+
+    #[test]
+    fn a_refused_edit_does_not_print_a_token_value_and_names_the_line_of_the_edited_text() {
+        let dir = scratch("refused-token");
+        std::fs::write(dir.join("config.toml"), "[rewrite]\n").unwrap();
+        let edit = Edit {
+            table: "rewrite",
+            key: "token",
+            value: "12345".to_string(),
+        };
+        let said = write_keys(Some(&dir), &[edit]).unwrap_err().to_string();
+        // The edit's own text is named (it is the person's input); the parser's
+        // message about it is not.
+        assert!(said.contains("line 2: this line sets a token"), "{said}");
+        assert_eq!(
+            said.matches("12345").count(),
+            1,
+            "only in the edit's own description: {said}"
+        );
+    }
+
+    #[test]
+    fn the_position_in_a_refusal_is_in_the_edited_text_not_the_original() {
+        let dir = scratch("refused-position");
+        std::fs::write(dir.join("config.toml"), "[ui]\ntoasts = true\n").unwrap();
+        let edit = Edit {
+            table: "ptt",
+            key: "release_ms",
+            value: "-5".to_string(),
+        };
+        let said = write_keys(Some(&dir), &[edit]).unwrap_err().to_string();
+        assert!(
+            said.contains("line 5"),
+            "a line the original does not have: {said}"
+        );
+    }
 }

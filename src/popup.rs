@@ -995,4 +995,85 @@ mod tests {
         let note = config_note(&snapshot.loaded.source).expect("a note");
         assert!(note.contains("defaults"), "{note}");
     }
+
+    #[test]
+    fn a_section_is_only_reported_applied_or_to_restart_when_it_is_the_one_changed() {
+        let (said, _) = change_note("audio", &applied(&["ui"], &[]));
+        assert!(said.contains("already uses it"), "{said}");
+        assert!(!said.contains("next take"), "{said}");
+        let (said, _) = change_note("ui", &applied(&[], &["stt"]));
+        assert!(
+            !said.contains("needs a restart of herdr to apply: [ui]"),
+            "{said}"
+        );
+        assert!(said.contains("already runs with this value"), "{said}");
+        assert!(
+            said.contains("Other changes in the file also need a restart of herdr: stt"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_saved_change_the_daemon_did_not_take_fails_the_popup_though_the_key_was_written() {
+        let mut world = tests_support::FakeWorld::new("save-daemon-fails", "[ui]\ntoasts = true\n");
+        world.reached = Reached::Failed("the daemon did not answer".to_string());
+        let mut input = Cursor::new(Vec::new());
+        let mut out: Vec<u8> = Vec::new();
+        let mut io = Io::new(&mut input, &mut out);
+        let saved = save_and_tell(
+            &mut world,
+            &mut io,
+            "ui",
+            "toasts",
+            "false".to_string(),
+            "false",
+        );
+        assert!(saved, "the key was written");
+        assert!(io.failed, "and the person has to act on the daemon");
+    }
+
+    #[test]
+    fn the_confirmation_uses_the_shown_form_and_the_hand_edit_line_uses_the_value() {
+        let mut world = tests_support::FakeWorld::new("save-shown", "");
+        let mut input = Cursor::new(Vec::new());
+        let mut out: Vec<u8> = Vec::new();
+        let mut io = Io::new(&mut input, &mut out);
+        save_and_tell(
+            &mut world,
+            &mut io,
+            "ui",
+            "toasts",
+            "false".to_string(),
+            "SHOWN-FORM",
+        );
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .contains("is now SHOWN-FORM in"));
+
+        let mut world = tests_support::FakeWorld::new("save-value", "");
+        world.save_error = Some(WriteError::NoDirectory);
+        let mut input = Cursor::new(Vec::new());
+        let mut out: Vec<u8> = Vec::new();
+        let mut io = Io::new(&mut input, &mut out);
+        save_and_tell(
+            &mut world,
+            &mut io,
+            "ui",
+            "toasts",
+            "VALUE-TEXT".to_string(),
+            "SHOWN-FORM",
+        );
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("  toasts = VALUE-TEXT"), "{said}");
+        assert!(!said.contains("SHOWN-FORM"), "{said}");
+    }
+
+    #[test]
+    fn the_bound_on_opening_the_popup_and_the_words_that_leave_a_question_are_what_they_say() {
+        assert_eq!(OPEN_BOUND, Duration::from_secs(10));
+        assert_eq!(
+            LEAVE_HINT,
+            "Esc then Enter, or an empty line, leaves it as it is"
+        );
+    }
 }
