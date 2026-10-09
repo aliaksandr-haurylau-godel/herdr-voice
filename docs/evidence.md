@@ -2523,6 +2523,143 @@ job of `check.yml`; the loop was also run under `dash`, `bash`, `ksh` and
 `zsh --emulate sh` by the code review of this change), and a `.leakwords` with CRLF line
 endings, which is out of bounds and behaves as before.
 
+
+## `cancel` stops a running take, for issue #18
+
+Run on 2026-10-07 on macOS 27.0.1 (Darwin 27.0.0, arm64), debug builds of `0.1.0-beta.5`:
+the baseline from `main` at `eae0135` (built from `git archive` into a scratch directory)
+and the branch `fix/18-cancel` at `b6750ef`. Each binary was built into a target directory
+of its own.
+
+**Method.** A Python script kept outside the repository (below) starts `herdr-voice daemon`
+with `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_CONFIG_DIR` and `HOME` pointing into a scratch
+directory, `PATH` reduced to `/usr/bin:/bin`, and `HERDR_BIN_PATH` naming a script that
+appends its arguments to a log and exits 0. Nothing it did could reach a running herdr or
+the installed plugin. Takes are recorded from the real default microphone
+(`[audio] silence_db = -120` so a quiet room is not refused as silent) and transcribed by
+`sh -c "echo spoken words"`; the rewrite step is off. The invocation context names
+the pane `w1:p1` and no tab.
+
+**The instrument, checked first: the baseline.** On `eae0135` the script reproduces the
+defect the issue reports, the same way a person meets it:
+
+```
+-- take 1: start it, speak for 3 seconds, cancel it
+  dictate  exit 0   'recording for w1:p1'
+  cancel   exit 0   'nothing to cancel'
+  wav files in the takes directory: []
+-- the next dictate
+  dictate  exit 0   'delivered to w1:p1 [-72.6 dB]'
+  herdr was asked to do: ... pane read w1:p1 ..., pane send-text w1:p1 spoken words
+```
+
+`cancel` claims nothing is running while a take is, and the next `dictate` ends that same
+take and types its text into the pane.
+
+**The branch, the same script:**
+
+```
+-- a cancel with nothing recording
+  cancel   exit 0   'nothing to cancel'
+-- take 1: start it, speak for 3 seconds, cancel it
+  dictate  exit 0   'recording for w1:p1'
+  cancel   exit 0   'cancelled the recording for w1:p1; nothing was transcribed or delivered'
+  wav files in the takes directory: []
+  herdr was asked to do: tab list, and `pane report-metadata` calls for the indicator only
+-- the next dictate
+  dictate  exit 0   'recording for w1:p1'
+-- and the one after it (ends take 2)
+  dictate  exit 0   'delivered to w1:p1 [-69.8 dB]'
+  herdr was asked to do: ... pane read w1:p1 ..., pane send-text w1:p1 spoken words  (once)
+-- a cancel with nothing recording, after all that
+  cancel   exit 0   'nothing to cancel'
+```
+
+The cancelled take left no file and caused no `pane read` or `pane send-text`. The `dictate`
+after it began a new take; the next one ended that take, and `pane send-text` ran once, for
+the second take. The indicator's `REC` counter started again at `0:00` for the second take.
+
+What this run does not show: the tab label being restored after a cancel, because the
+invocation context carried no `tab_id` and so no label was decorated (the restore on `Idle`
+is covered by the unit tests in `src/indicator.rs`); a `cancel` during a hold, which is
+refused and is covered by `cancel_during_a_hold_is_refused_and_leaves_the_take_running` and
+two neighbours in `src/daemon.rs`; and Linux or Windows.
+
+The script, invoked as `python3 -I s5_18.py <binary> <label>`:
+
+```python
+import os, subprocess, sys, time, tempfile, glob, json
+
+binary, label = sys.argv[1], sys.argv[2]
+D = tempfile.mkdtemp(prefix="hv18-")
+os.makedirs(f"{D}/config"); os.makedirs(f"{D}/state")
+calls = f"{D}/herdr-calls.log"
+fake = f"{D}/herdr"
+open(fake, "w").write(f'#!/bin/sh\necho "$@" >> "{calls}"\nexit 0\n')
+os.chmod(fake, 0o755)
+open(f"{D}/herdr-config.toml", "w").write("")
+open(f"{D}/config/config.toml", "w").write(
+    '[audio]\nsilence_db = -120\n\n'
+    '[stt]\nengine = "command"\ncommand = ["sh", "-c", "echo spoken words"]\n\n'
+    '[rewrite]\nengine = "off"\n'
+)
+env = {
+    "PATH": "/usr/bin:/bin", "HOME": D,
+    "HERDR_BIN_PATH": fake, "HERDR_CONFIG_PATH": f"{D}/herdr-config.toml",
+    "HERDR_PLUGIN_CONFIG_DIR": f"{D}/config", "HERDR_PLUGIN_STATE_DIR": f"{D}/state",
+}
+ctx = json.dumps({"focused_pane_id": "w1:p1"})
+
+def press(cmd, with_context=True):
+    e = dict(env)
+    if with_context:
+        e["HERDR_PLUGIN_CONTEXT_JSON"] = ctx
+    e["HERDR_PLUGIN_ENTRYPOINT_ID"] = cmd
+    t = time.time()
+    r = subprocess.run([binary, cmd], env=e, capture_output=True, text=True, timeout=60)
+    print(f"  {cmd:8} exit {r.returncode} after {time.time()-t:4.1f}s  stdout={r.stdout.strip()!r} stderr={r.stderr.strip()!r}")
+    return r
+
+def wavs():
+    return sorted(os.path.basename(p) for p in glob.glob(f"{D}/state/takes/*.wav"))
+
+def delivered():
+    return open(calls).read().strip().splitlines() if os.path.exists(calls) else []
+
+print(f"== {label}  (binary {binary})")
+daemon = subprocess.Popen([binary, "daemon"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(1.5)
+try:
+    print("-- a cancel with nothing recording")
+    press("cancel", with_context=False)
+    print("-- take 1: start it, speak for 3 seconds, cancel it")
+    press("dictate")
+    time.sleep(3)
+    press("cancel", with_context=False)
+    print(f"  wav files in the takes directory: {wavs()}")
+    print(f"  herdr was asked to do: {delivered()}")
+    print("-- the next dictate")
+    press("dictate")
+    time.sleep(3)
+    print("-- and the one after it (ends take 2)")
+    press("dictate")
+    print(f"  wav files in the takes directory: {wavs()}")
+    calls_now = delivered()
+    print(f"  herdr was asked to do ({len(calls_now)} calls):")
+    for c in calls_now:
+        print(f"    {c}")
+    print("-- a cancel with nothing recording, after all that")
+    press("cancel", with_context=False)
+finally:
+    daemon.terminate()
+    try:
+        daemon.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        daemon.kill()
+    journal = sorted(glob.glob(f"{D}/state/*journal*") + glob.glob(f"{D}/state/**/*.log", recursive=True))
+    print(f"-- scratch directory (kept for the journal): {D}")
+```
+
 ## The Linux check's decisions, with stubs, for issue #23
 
 Run on 2026-10-07 on macOS 27.0.1 (Darwin 27.0.0, arm64). **No Linux run, no

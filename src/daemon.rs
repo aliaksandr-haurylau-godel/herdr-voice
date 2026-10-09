@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::bias;
-use crate::capture::{Recorder, Started};
+use crate::capture::{Cancelled, Recorder, Started};
 use crate::config;
 use crate::context;
 use crate::proto::{Reply, Request};
@@ -35,8 +35,8 @@ pub enum Outcome {
 }
 
 /// Commands that deliver into a pane, and therefore need herdr to have named one.
-/// `cancel` is not one of them: it stops whatever is running and clears what a
-/// dead run left behind, neither of which needs a target.
+/// `cancel` is not one of them: it stops whatever is recording, which needs no
+/// target.
 pub fn needs_target_pane(command: &str) -> bool {
     matches!(command, "dictate" | "ptt")
 }
@@ -170,10 +170,7 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
         // while somebody is speaking.
         "ping" => (Reply::Ok("pong".to_string()), Control::Continue),
         "stop" => (Reply::Ok("stopping".to_string()), Control::Stop),
-        "cancel" => (
-            Reply::Ok("nothing to cancel".to_string()),
-            Control::Continue,
-        ),
+        "cancel" => (cancel(recorder, runtime), Control::Continue),
         command if needs_target_pane(command) => {
             // A repeat that arrives is evidence the key is down, whatever its
             // payload turns out to say. The context answers where the take
@@ -245,6 +242,32 @@ pub fn answer(request: &Request, recorder: &Recorder, runtime: &Runtime) -> (Rep
     }
 }
 
+/// Throws away the take that is recording, if there is one.
+///
+/// The hold guard is kept from the check until the recorder has answered, so a
+/// `ptt` cannot claim a hold and start the recorder in between and have its take
+/// discarded here (`tasks/18/DESIGN_18.md`, decision 5). The recorder thread
+/// never takes that guard, so holding it across the call cannot deadlock. A hold
+/// is refused, not ended: ending one at once is issue #55.
+fn cancel(recorder: &Recorder, runtime: &Runtime) -> Reply {
+    let cancelled = {
+        let state = hold_of(runtime);
+        if let Some(why) = hold_refusal(&state) {
+            return Reply::Error(why);
+        }
+        recorder.cancel()
+    };
+    match cancelled {
+        Cancelled::NothingRunning => Reply::Ok("nothing to cancel".to_string()),
+        Cancelled::Discarded { target } => {
+            publish_idle_if_recording(runtime, &target);
+            Reply::Ok(format!(
+                "cancelled the recording for {target}; nothing was transcribed or delivered"
+            ))
+        }
+    }
+}
+
 /// One keypress of the dictation toggle, against the pane herdr named.
 ///
 /// The pane is pinned here, when the take begins, and kept with it until delivery.
@@ -271,22 +294,8 @@ fn dictate(
     // and `Began` by the device, or — worse — takes the toggle's second half
     // and stops, transcribes and delivers the hold's own take, leaving the
     // watcher to report as failed a take that was in fact delivered.
-    match &*hold_of(runtime) {
-        crate::ptt::HoldState::Idle => {}
-        crate::ptt::HoldState::Opening(hold) | crate::ptt::HoldState::Live(hold) => {
-            return Reply::Error(format!(
-                "holding for {}: a key is being held, and the recording ends \
-                 on its own when the key comes up",
-                hold.target
-            ))
-        }
-        crate::ptt::HoldState::Ending(hold) => {
-            return Reply::Error(format!(
-                "holding for {}: the take that key produced is being \
-                 transcribed, and lands in that pane on its own",
-                hold.target
-            ))
-        }
+    if let Some(why) = hold_refusal(&hold_of(runtime)) {
+        return Reply::Error(why);
     }
     match recorder.start(pane, cwd, agent, tab) {
         Started::Began => {
@@ -336,6 +345,25 @@ fn dictate(
     }
 }
 
+/// Why a command that acts on the recorder is refused while a hold exists, or
+/// `None` when there is no hold. `dictate` and `cancel` share it so that the two
+/// cannot say different things about the same state.
+fn hold_refusal(state: &crate::ptt::HoldState) -> Option<String> {
+    match state {
+        crate::ptt::HoldState::Idle => None,
+        crate::ptt::HoldState::Opening(hold) | crate::ptt::HoldState::Live(hold) => Some(format!(
+            "holding for {}: a key is being held, and the recording ends \
+                 on its own when the key comes up",
+            hold.target
+        )),
+        crate::ptt::HoldState::Ending(hold) => Some(format!(
+            "holding for {}: the take that key produced is being \
+             transcribed, and lands in that pane on its own",
+            hold.target
+        )),
+    }
+}
+
 /// The one way the take path says what it is doing. A poisoned lock is
 /// recovered rather than given up on, the same way `hold_of` recovers one: this
 /// is display state, and refusing to publish it would strand a decoration on a
@@ -346,6 +374,20 @@ fn publish(runtime: &Runtime, activity: Activity) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *held = activity;
+}
+
+/// Ends the indicator's `Recording` when it is the one `cancel` just discarded.
+/// Anything else is left alone: a different pane's take began in the meantime,
+/// or a take is in the pipeline and shows `Working`, and a cancel does not
+/// claim to have ended either. The check and the write share one lock.
+fn publish_idle_if_recording(runtime: &Runtime, target: &str) {
+    let mut held = runtime
+        .activity
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if matches!(&*held, Activity::Recording { target: t, .. } if t == target) {
+        *held = Activity::Idle;
+    }
 }
 
 /// Move the hold's stamp forward, if there is one, and say which pane it
@@ -3094,6 +3136,325 @@ mod tests {
         assert!(!needs_target_pane("cancel"));
         assert!(needs_target_pane("dictate"));
         assert!(needs_target_pane("ptt"));
+    }
+
+    fn started_hold() -> (
+        Runtime,
+        Recorder,
+        std::sync::Arc<crate::ptt::tests_support::TestClock>,
+    ) {
+        let (runtime, clock) = fake_runtime_with_clock("a transcript");
+        let recorder = tone_recorder("cancel-hold");
+        let (started, _) = answer(&request("ptt", PANE_1), &recorder, &runtime);
+        assert_eq!(started, Reply::Ok("holding for w1:p1".to_string()));
+        (runtime, recorder, clock)
+    }
+
+    #[test]
+    fn hold_refusal_has_one_text_per_state() {
+        let (runtime, _recorder, _clock) = started_hold();
+        let hold = hold_of(&runtime).hold().expect("a hold").clone();
+        assert_eq!(hold_refusal(&crate::ptt::HoldState::Idle), None);
+        let held = "holding for w1:p1: a key is being held, and the recording ends \
+                    on its own when the key comes up";
+        assert_eq!(
+            hold_refusal(&crate::ptt::HoldState::Opening(hold.clone())).as_deref(),
+            Some(held)
+        );
+        assert_eq!(
+            hold_refusal(&crate::ptt::HoldState::Live(hold.clone())).as_deref(),
+            Some(held)
+        );
+        assert_eq!(
+            hold_refusal(&crate::ptt::HoldState::Ending(hold)).as_deref(),
+            Some(
+                "holding for w1:p1: the take that key produced is being \
+                 transcribed, and lands in that pane on its own"
+            )
+        );
+    }
+
+    #[test]
+    fn idle_is_published_when_recording_for_the_same_pane() {
+        let runtime = fake_runtime("x");
+        publish(
+            &runtime,
+            Activity::Recording {
+                target: "w1:p2".to_string(),
+                tab: None,
+                since: runtime.clock.now(),
+            },
+        );
+        publish_idle_if_recording(&runtime, "w1:p2");
+        assert_eq!(activity_of(&runtime), Activity::Idle);
+    }
+
+    #[test]
+    fn a_recording_for_another_pane_is_left_alone() {
+        let runtime = fake_runtime("x");
+        let other = Activity::Recording {
+            target: "w1:p3".to_string(),
+            tab: None,
+            since: runtime.clock.now(),
+        };
+        publish(&runtime, other.clone());
+        publish_idle_if_recording(&runtime, "w1:p2");
+        assert_eq!(activity_of(&runtime), other);
+    }
+
+    #[test]
+    fn a_working_activity_is_left_alone() {
+        let runtime = fake_runtime("x");
+        let working = Activity::Working {
+            target: "w1:p2".to_string(),
+            tab: None,
+            stage: Stage::Transcribing,
+        };
+        publish(&runtime, working.clone());
+        publish_idle_if_recording(&runtime, "w1:p2");
+        assert_eq!(activity_of(&runtime), working);
+    }
+
+    #[test]
+    fn an_idle_activity_stays_idle() {
+        let runtime = fake_runtime("x");
+        publish_idle_if_recording(&runtime, "w1:p2");
+        assert_eq!(activity_of(&runtime), Activity::Idle);
+    }
+
+    const CANCELLED_P2: &str =
+        "cancelled the recording for w1:p2; nothing was transcribed or delivered";
+
+    #[test]
+    fn cancel_discards_a_running_take_and_names_the_pane() {
+        let recorder = tone_recorder("cancel-names-pane");
+        let runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        answer(&dictate_request(), &recorder, &runtime);
+        let (reply, control) = answer(&request("cancel", b""), &recorder, &runtime);
+        assert_eq!(reply, Reply::Ok(CANCELLED_P2.to_string()));
+        assert!(matches!(control, Control::Continue));
+    }
+
+    #[test]
+    fn a_dictate_after_a_cancel_starts_a_new_take_and_delivers_nothing() {
+        let recorder = tone_recorder("cancel-then-dictate");
+        let fake = crate::delivery::tests_support::FakeDeliverer::ok();
+        let runtime = runtime_with(fake.clone(), false);
+        answer(&dictate_request(), &recorder, &runtime);
+        answer(&request("cancel", b""), &recorder, &runtime);
+        let (reply, _) = answer(&dictate_request(), &recorder, &runtime);
+        assert_eq!(reply, Reply::Ok("recording for w1:p2".to_string()));
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+    }
+
+    #[test]
+    fn cancel_with_nothing_running_replies_nothing_to_cancel() {
+        let recorder = tone_recorder("cancel-idle-daemon");
+        let runtime = fake_runtime("x");
+        let (reply, _) = answer(&request("cancel", b""), &recorder, &runtime);
+        assert_eq!(reply, Reply::Ok("nothing to cancel".to_string()));
+    }
+
+    #[test]
+    fn cancel_leaves_the_indicator_idle_after_a_discard() {
+        let recorder = tone_recorder("cancel-indicator");
+        let runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        answer(&dictate_request(), &recorder, &runtime);
+        assert!(matches!(activity_of(&runtime), Activity::Recording { .. }));
+        answer(&request("cancel", b""), &recorder, &runtime);
+        assert_eq!(activity_of(&runtime), Activity::Idle);
+    }
+
+    #[test]
+    fn cancel_with_nothing_running_does_not_overwrite_working() {
+        let recorder = tone_recorder("cancel-working");
+        let runtime = fake_runtime("x");
+        let working = Activity::Working {
+            target: "w1:p9".to_string(),
+            tab: None,
+            stage: Stage::Transcribing,
+        };
+        publish(&runtime, working.clone());
+        answer(&request("cancel", b""), &recorder, &runtime);
+        assert_eq!(activity_of(&runtime), working);
+    }
+
+    #[test]
+    fn cancel_leaves_no_wav_behind() {
+        let recorder = tone_recorder("cancel-no-wav");
+        let runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        answer(&dictate_request(), &recorder, &runtime);
+        answer(&request("cancel", b""), &recorder, &runtime);
+        assert!(wavs_in(&takes_dir("cancel-no-wav")).is_empty());
+    }
+
+    #[test]
+    fn cancel_during_a_hold_is_refused_and_leaves_the_take_running() {
+        let (runtime, recorder, _clock) = started_hold();
+        let (reply, _) = answer(&request("cancel", b""), &recorder, &runtime);
+        assert_eq!(
+            reply,
+            Reply::Error(
+                "holding for w1:p1: a key is being held, and the recording ends \
+                 on its own when the key comes up"
+                    .to_string()
+            )
+        );
+        assert!(matches!(
+            &*hold_of(&runtime),
+            crate::ptt::HoldState::Live(_)
+        ));
+        assert!(
+            matches!(activity_of(&runtime), Activity::Recording { ref target, .. } if target == "w1:p1"),
+            "a refused cancel must leave the indicator alone, got {:?}",
+            activity_of(&runtime)
+        );
+        let take = recorder.stop().expect("the hold's take is still running");
+        std::fs::remove_file(&take.path).ok();
+    }
+
+    #[test]
+    fn cancel_while_a_hold_is_opening_is_refused_and_does_not_reach_the_recorder() {
+        let (runtime, recorder, _clock) = started_hold();
+        {
+            let mut state = hold_of(&runtime);
+            let hold = state.hold().expect("a hold").clone();
+            *state = crate::ptt::HoldState::Opening(hold);
+        }
+        let (reply, _) = answer(&request("cancel", b""), &recorder, &runtime);
+        assert!(
+            matches!(&reply, Reply::Error(why) if why.starts_with("holding for w1:p1: a key is being held")),
+            "got {reply:?}"
+        );
+        let take = recorder.stop().expect("the take is still running");
+        std::fs::remove_file(&take.path).ok();
+    }
+
+    #[test]
+    fn cancel_while_a_hold_is_being_transcribed_is_refused_with_that_reason() {
+        let (runtime, recorder, _clock) = started_hold();
+        {
+            let mut state = hold_of(&runtime);
+            let hold = state.hold().expect("a hold").clone();
+            *state = crate::ptt::HoldState::Ending(hold);
+        }
+        let (reply, _) = answer(&request("cancel", b""), &recorder, &runtime);
+        assert_eq!(
+            reply,
+            Reply::Error(
+                "holding for w1:p1: the take that key produced is being \
+                 transcribed, and lands in that pane on its own"
+                    .to_string()
+            )
+        );
+        let take = recorder.stop().expect("the take is still running");
+        std::fs::remove_file(&take.path).ok();
+    }
+
+    /// A source whose `stop` reports that it has been reached and then waits to
+    /// be released, so a test can look at the world while `cancel` is inside the
+    /// recorder.
+    struct StopsWhenReleased {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl crate::capture::Source for StopsWhenReleased {
+        fn start(
+            &mut self,
+            _device: Option<&str>,
+            sink: crate::capture::Sink,
+        ) -> Result<crate::capture::Format, String> {
+            sink.push(crate::capture::Event::Samples(vec![0.0; 4_800]));
+            Ok(crate::capture::Format {
+                rate: 48_000,
+                channels: 1,
+            })
+        }
+
+        fn stop(&mut self) {
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
+        }
+    }
+
+    #[test]
+    fn cancel_keeps_the_hold_guard_while_the_recorder_discards() {
+        let (entered, reached) = std::sync::mpsc::channel();
+        let (let_go, release) = std::sync::mpsc::channel();
+        let recorder = Recorder::spawn(
+            move || Box::new(StopsWhenReleased { entered, release }),
+            crate::config::Audio::default(),
+            takes_dir("cancel-guard-held"),
+        );
+        let runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        answer(&dictate_request(), &recorder, &runtime);
+        std::thread::scope(|scope| {
+            let cancelling = scope.spawn(|| answer(&request("cancel", b""), &recorder, &runtime).0);
+            let reached = reached.recv_timeout(std::time::Duration::from_secs(5));
+            // Looked at while the recorder is inside `stop`, and recorded before
+            // anything is asserted: a failed assertion that left the recorder
+            // waiting would leave the scope waiting for it, and the suite hung.
+            let guard_held = matches!(
+                runtime.hold.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
+            let_go.send(()).ok();
+            let reply = cancelling.join().expect("cancel finished");
+            assert!(
+                reached.is_ok(),
+                "the recorder never reached the source's stop"
+            );
+            assert!(
+                guard_held,
+                "the hold guard must be held while the recorder discards the take"
+            );
+            assert_eq!(reply, Reply::Ok(CANCELLED_P2.to_string()));
+        });
+    }
+
+    #[test]
+    fn a_discard_leaves_a_working_indicator_for_another_pane_alone() {
+        let recorder = tone_recorder("cancel-discard-working");
+        let runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        answer(&dictate_request(), &recorder, &runtime);
+        let working = Activity::Working {
+            target: "w1:p9".to_string(),
+            tab: None,
+            stage: Stage::Transcribing,
+        };
+        publish(&runtime, working.clone());
+        let (reply, _) = answer(&request("cancel", b""), &recorder, &runtime);
+        assert_eq!(reply, Reply::Ok(CANCELLED_P2.to_string()));
+        assert_eq!(activity_of(&runtime), working);
+    }
+
+    #[test]
+    fn cancel_waits_for_the_hold_guard() {
+        let recorder = tone_recorder("cancel-waits");
+        let runtime = runtime_with(crate::delivery::tests_support::FakeDeliverer::ok(), false);
+        answer(&dictate_request(), &recorder, &runtime);
+        let guard = hold_of(&runtime);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let (reply, _) = answer(&request("cancel", b""), &recorder, &runtime);
+                sender.send(reply).unwrap();
+            });
+            assert!(
+                receiver
+                    .recv_timeout(std::time::Duration::from_millis(150))
+                    .is_err(),
+                "cancel answered while the hold guard was held"
+            );
+            drop(guard);
+            assert_eq!(
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("cancel answers once the guard is released"),
+                Reply::Ok(CANCELLED_P2.to_string())
+            );
+        });
     }
 
     #[test]
