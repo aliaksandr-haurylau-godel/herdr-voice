@@ -21,6 +21,7 @@
 #   HERDR_VOICE_REVISION  the revision to record when the checkout is not a git
 #                         one — a worktree mounted into a container has its `.git`
 #                         pointing outside the mount, so `git rev-parse` fails there
+#   HERDR_VOICE_STOP_TIMEOUT  seconds to wait for a daemon to stop (default: 10)
 #
 # It is safe to re-run: it unlinks a plugin it linked before, stops a daemon and
 # a server it started before, and reuses the work directory.
@@ -39,6 +40,8 @@ LOGS="${WORK}/logs"
 CLIENT_TIMEOUT=20
 # Starting a server or a daemon is allowed to take longer, but not forever.
 START_TIMEOUT=30
+# How long a daemon that was told to stop may keep answering before the run gives up.
+STOP_TIMEOUT="${HERDR_VOICE_STOP_TIMEOUT:-10}"
 
 mkdir -p "${WORK}" "${LOGS}"
 : >"${REPORT}"
@@ -49,7 +52,9 @@ mkdir -p "${WORK}" "${LOGS}"
 
 record() {
     # step, exit code, one-line outcome
-    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"${REPORT}"
+    # A tab inside a field would shift every column after it when print_report
+    # reads the row back, so a tab is written as a space.
+    printf '%s\t%s\t%s\n' "${1//$'\t'/ }" "${2//$'\t'/ }" "${3//$'\t'/ }" >>"${REPORT}"
 }
 
 print_report() {
@@ -78,8 +83,33 @@ skip_as_failure() {
     fail "$1" "-" "could not run: $2" "$3"
 }
 
+# The plugin's configuration directory, learnt at the link step. While they are
+# empty there is nothing for restore_config to put back.
+CONFIG_FILE=""
+CONFIG_BACKUP=""
+CONFIG_MARKER=""
+
+# Puts the plugin's configuration directory back the way the script found it: the
+# original from the backup, or no config.toml when there was none. Does nothing
+# until the link step has learnt the directory, and nothing when there is nothing
+# to put back. Safe to call more than once. Returns non-zero when it could not put
+# it back. When a backup and a marker are both there the backup is the original
+# and wins.
+restore_config() {
+    if [ -f "${CONFIG_BACKUP}" ]; then
+        mv -f "${CONFIG_BACKUP}" "${CONFIG_FILE}" || return 1
+        rm -f "${CONFIG_MARKER}"
+    elif [ -f "${CONFIG_MARKER}" ]; then
+        rm -f "${CONFIG_FILE}" "${CONFIG_MARKER}"
+    fi
+}
+
 cleanup() {
-    # Best effort, and quiet: this runs after the report has been printed.
+    # Best effort, and quiet. It runs after the report has been printed, or, when a
+    # signal ended the run, after on_signal printed what had been recorded. A second
+    # signal must not cut it short: restoring the configuration is the one thing here
+    # that is not optional.
+    trap '' INT TERM HUP
     if command -v herdr >/dev/null 2>&1; then
         herdr plugin unlink "${PLUGIN_ID}" >/dev/null 2>&1 || true
     fi
@@ -91,12 +121,28 @@ cleanup() {
     # next one: the second run finds a daemon that is on its way out, connects to
     # it, and gets a closed connection instead of a reply.
     pkill -f 'herdr-voice daemon' >/dev/null 2>&1 || true
+    # Whatever way the script ends, the configuration it borrowed goes back.
+    if ! restore_config >/dev/null 2>&1; then
+        printf 'warning: could not put %s back; the original is in %s (or, when it was absent, delete %s); the next run restores it first\n' \
+            "${CONFIG_FILE}" "${CONFIG_BACKUP}" "${CONFIG_FILE}" >&2
+    fi
     if [ -n "${SERVER_PID:-}" ]; then
         herdr server stop >/dev/null 2>&1 || true
         kill "${SERVER_PID}" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT
+# A signal ends the script through cleanup, which an unhandled one would skip. The
+# table is printed first, so an interrupted run still says how far it got.
+on_signal() {
+    # signal name, exit code
+    printf '\nINTERRUPTED by %s: the steps recorded so far follow, and the run stops\n' "$1" >&2
+    print_report
+    exit "$2"
+}
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
 
 # ---------------------------------------------------------------------------
 # What herdr recorded about a plugin command
@@ -108,24 +154,25 @@ trap cleanup EXIT
 # hang.
 # ---------------------------------------------------------------------------
 
-# The id of the newest record herdr holds for an action, or nothing.
-newest_log_id() {
+# Every log id herdr holds for the plugin now, as a JSON array. Fails when herdr
+# cannot be asked, or does not answer the shape the script relies on.
+log_ids() {
     herdr plugin log list --plugin "${PLUGIN_ID}" --limit 30 2>/dev/null \
-        | jq -r --arg id "$1" \
-            '[.result.logs[] | select(.action_id == $id)] | last | .log_id // empty'
+        | jq -ce '[.result.logs[].log_id]'
 }
 
-# Wait for a record that is newer than the one named and has finished. Prints it
-# as one JSON object on success; prints nothing and returns 1 on a timeout.
+# Wait for a record that is not in the set of ids taken before the invocation and
+# has finished. Prints it as one JSON object on success; prints nothing and
+# returns 1 on a timeout.
 await_new_log() {
-    # action id, the log id to ignore, seconds to wait
+    # action id, a JSON array of the log ids to ignore, seconds to wait
     _waited=0
     while [ "${_waited}" -lt "$3" ]; do
         _record="$(herdr plugin log list --plugin "${PLUGIN_ID}" --limit 30 2>/dev/null \
-            | jq -c --arg id "$1" --arg seen "$2" \
+            | jq -c --arg id "$1" --argjson seen "$2" \
                 '[.result.logs[]
                   | select(.action_id == $id)
-                  | select(.log_id != $seen)
+                  | select(.log_id as $i | $seen | any(. == $i) | not)
                   | select(.status != "running")] | last // empty')"
         if [ -n "${_record}" ]; then
             printf '%s\n' "${_record}"
@@ -342,6 +389,19 @@ if ! grep -q "${PLUGIN_ID}" "${LOGS}/plugin-list.log"; then
 fi
 CONFIG_DIR="$(herdr plugin config-dir "${PLUGIN_ID}" 2>/dev/null || echo 'not printed')"
 printf 'linked, config dir: %s\n' "${CONFIG_DIR}"
+if [ "${CONFIG_DIR}" != "not printed" ] && [ -n "${CONFIG_DIR}" ]; then
+    CONFIG_FILE="${CONFIG_DIR}/config.toml"
+    CONFIG_BACKUP="${CONFIG_DIR}/${PLUGIN_ID}-config-backup"
+    CONFIG_MARKER="${CONFIG_DIR}/${PLUGIN_ID}-config-was-absent"
+    # A run that was killed before it could clean up leaves the configuration
+    # borrowed. Put it back before anything uses it.
+    if [ -f "${CONFIG_BACKUP}" ] || [ -f "${CONFIG_MARKER}" ]; then
+        restore_config || fail "link" "-" \
+            "an earlier run left the configuration borrowed and it could not be put back" \
+            "the original is in ${CONFIG_BACKUP} (or, when there was none, delete ${CONFIG_FILE} and ${CONFIG_MARKER}); fix the permissions on ${CONFIG_DIR} and re-run"
+        printf 'an earlier run left the configuration borrowed; restored it before this run uses it\n'
+    fi
+fi
 record "link" "0" "linked; herdr computes config dir ${CONFIG_DIR}"
 
 # ---------------------------------------------------------------------------
@@ -429,6 +489,18 @@ DAEMON_PID=""
 daemon_is_up() {
     "${BIN}" doctor 2>/dev/null | grep -Eq '^daemon +ok'
 }
+# Waits for no daemon to answer. Returns 1 when one still does after STOP_TIMEOUT.
+wait_daemon_gone() {
+    _waited=0
+    while [ "${_waited}" -lt "${STOP_TIMEOUT}" ]; do
+        if ! daemon_is_up; then
+            return 0
+        fi
+        sleep 1
+        _waited=$((_waited + 1))
+    done
+    ! daemon_is_up
+}
 waited=0
 while [ "${waited}" -lt 5 ]; do
     if daemon_is_up; then
@@ -505,6 +577,11 @@ record "doctor" "${DOCTOR_CODE}" "five lines; ${SOCKET_LINE}"
 # ---------------------------------------------------------------------------
 
 printf '\n== step: action ==\n'
+# Every record herdr holds before this invocation. The wait for this run's record
+# below accepts none of them, so an earlier run's cancel cannot stand in for it.
+SEEN_LOGS="$(log_ids)" || fail "action" "-" \
+    "could not read herdr's plugin log before invoking cancel" \
+    "run 'herdr plugin log list --plugin ${PLUGIN_ID} --limit 30' by hand; the check compares records before and after each invocation and cannot go on without the first list"
 set +e
 timeout "${CLIENT_TIMEOUT}" herdr plugin action invoke cancel --plugin "${PLUGIN_ID}" \
     >"${LOGS}/action.log" 2>&1
@@ -532,7 +609,7 @@ record "action" "0" "herdr invoked cancel and it returned 0"
 # ---------------------------------------------------------------------------
 
 printf '\n== step: herdr-log ==\n'
-CANCEL_RECORD="$(await_new_log "cancel" "" "${START_TIMEOUT}" || true)"
+CANCEL_RECORD="$(await_new_log "cancel" "${SEEN_LOGS}" "${START_TIMEOUT}" || true)"
 herdr plugin log list --plugin "${PLUGIN_ID}" --limit 10 \
     >"${LOGS}/plugin-log.log" 2>&1 || true
 cat "${LOGS}/plugin-log.log"
@@ -638,18 +715,28 @@ judge_take() {
     TAKE_SAID="$(printf '%s' "${_stderr}" | head -n 1 | cut -c 1-120)"
 }
 
-SEEN_DICTATE="$(newest_log_id 'dictate')"
-set +e
-timeout "${CLIENT_TIMEOUT}" herdr plugin action invoke dictate --plugin "${PLUGIN_ID}" \
-    >"${LOGS}/no-device.log" 2>&1
-INVOKE_CODE="$?"
-set -e
-cat "${LOGS}/no-device.log"
-if [ "${INVOKE_CODE}" = "124" ]; then
-    fail "no-device" "${INVOKE_CODE}" "herdr did not return from invoking dictate within ${CLIENT_TIMEOUT}s" \
-        "read ${LOGS}/no-device.log"
-fi
-NO_DEVICE_RECORD="$(await_new_log "dictate" "${SEEN_DICTATE}" "${CLIENT_TIMEOUT}" || true)"
+# Invokes the dictate action through herdr and fails the step when herdr itself does
+# not return: a client that hangs is herdr's timing out, not a plugin that never
+# finished.
+invoke_dictate() {
+    # step, the log file name
+    set +e
+    timeout "${CLIENT_TIMEOUT}" herdr plugin action invoke dictate --plugin "${PLUGIN_ID}" \
+        >"${LOGS}/$2" 2>&1
+    INVOKE_CODE="$?"
+    set -e
+    cat "${LOGS}/$2"
+    if [ "${INVOKE_CODE}" = "124" ]; then
+        fail "$1" "${INVOKE_CODE}" "herdr did not return from invoking dictate within ${CLIENT_TIMEOUT}s" \
+            "read ${LOGS}/$2"
+    fi
+}
+
+SEEN_LOGS="$(log_ids)" || fail "no-device" "-" \
+    "could not read herdr's plugin log before invoking dictate" \
+    "run 'herdr plugin log list --plugin ${PLUGIN_ID} --limit 30' by hand; the check compares records before and after each invocation and cannot go on without the first list"
+invoke_dictate "no-device" "no-device.log"
+NO_DEVICE_RECORD="$(await_new_log "dictate" "${SEEN_LOGS}" "${CLIENT_TIMEOUT}" || true)"
 if [ -z "${NO_DEVICE_RECORD}" ]; then
     fail "no-device" "-" "the dictate take never finished within ${CLIENT_TIMEOUT}s" \
         "a hang is the worst of the outcomes: the plugin must name the missing device and exit. The record is still 'running' in herdr plugin log list"
@@ -681,22 +768,23 @@ if [ "${CONFIG_DIR}" = "not printed" ] || [ -z "${CONFIG_DIR}" ]; then
         "read ${LOGS}/link.log; without the directory there is nowhere to put config.toml"
 fi
 mkdir -p "${CONFIG_DIR}"
-CONFIG_FILE="${CONFIG_DIR}/${PLUGIN_ID}-config-backup"
-if [ -f "${CONFIG_DIR}/config.toml" ]; then
-    cp "${CONFIG_DIR}/config.toml" "${CONFIG_FILE}"
+# Borrowed only when nothing is borrowed already: an existing backup is the
+# original, and copying over it would lose it. The marker stands for "there was no
+# config.toml", so that is restored too.
+if [ ! -f "${CONFIG_BACKUP}" ] && [ ! -f "${CONFIG_MARKER}" ]; then
+    if [ -f "${CONFIG_FILE}" ]; then
+        cp "${CONFIG_FILE}" "${CONFIG_BACKUP}"
+    else
+        : >"${CONFIG_MARKER}"
+    fi
 fi
-printf '[audio]\ninput = "%s"\n' "${WRONG_NAME}" >"${CONFIG_DIR}/config.toml"
-printf 'wrote %s with [audio] input = %s\n' "${CONFIG_DIR}/config.toml" "\"${WRONG_NAME}\""
+printf '[audio]\ninput = "%s"\n' "${WRONG_NAME}" >"${CONFIG_FILE}"
+printf 'wrote %s with [audio] input = %s\n' "${CONFIG_FILE}" "\"${WRONG_NAME}\""
 
 pkill -f 'herdr-voice daemon' >/dev/null 2>&1 || true
-waited=0
-while [ "${waited}" -lt 10 ]; do
-    if ! daemon_is_up; then
-        break
-    fi
-    sleep 1
-    waited=$((waited + 1))
-done
+wait_daemon_gone || fail "named-device" "-" \
+    "the old daemon was still answering ${STOP_TIMEOUT}s after it was told to stop" \
+    "find it with 'pgrep -fl herdr-voice' and stop it by hand, then re-run; a second daemon started over it could not bind and the take would run against a daemon that never read the new configuration"
 "${BIN}" daemon >"${LOGS}/daemon-named.log" 2>&1 &
 DAEMON_PID="$!"
 waited=0
@@ -713,14 +801,11 @@ if ! daemon_is_up; then
         "read ${LOGS}/daemon-named.log; a configuration file that does not parse is the usual cause"
 fi
 
-SEEN_DICTATE="$(newest_log_id 'dictate')"
-set +e
-timeout "${CLIENT_TIMEOUT}" herdr plugin action invoke dictate --plugin "${PLUGIN_ID}" \
-    >"${LOGS}/named-device.log" 2>&1
-INVOKE_CODE="$?"
-set -e
-cat "${LOGS}/named-device.log"
-NAMED_RECORD="$(await_new_log "dictate" "${SEEN_DICTATE}" "${CLIENT_TIMEOUT}" || true)"
+SEEN_LOGS="$(log_ids)" || fail "named-device" "-" \
+    "could not read herdr's plugin log before invoking dictate" \
+    "run 'herdr plugin log list --plugin ${PLUGIN_ID} --limit 30' by hand; the check compares records before and after each invocation and cannot go on without the first list"
+invoke_dictate "named-device" "named-device.log"
+NAMED_RECORD="$(await_new_log "dictate" "${SEEN_LOGS}" "${CLIENT_TIMEOUT}" || true)"
 if [ -z "${NAMED_RECORD}" ]; then
     fail "named-device" "-" "the dictate take never finished within ${CLIENT_TIMEOUT}s" \
         "a configured name that matches nothing must be refused at once; the record is still 'running'"
@@ -748,10 +833,9 @@ record "named-device" "$(field "${NAMED_RECORD}" '.exit_code')" \
     "refused and listed what exists: ${TAKE_SAID}"
 
 # Put the configuration back the way it was found, so a re-run starts clean.
-rm -f "${CONFIG_DIR}/config.toml"
-if [ -f "${CONFIG_FILE}" ]; then
-    mv "${CONFIG_FILE}" "${CONFIG_DIR}/config.toml"
-fi
+restore_config || fail "named-device" "-" \
+    "could not put the plugin's configuration back" \
+    "the original is in ${CONFIG_BACKUP} (or, when there was none, delete ${CONFIG_FILE}); fix the permissions on ${CONFIG_DIR} and re-run, which restores it first"
 
 # ---------------------------------------------------------------------------
 # Step 14: a client with no daemon
@@ -764,23 +848,16 @@ fi
 printf '\n== step: no-daemon ==\n'
 if [ -n "${DAEMON_PID}" ]; then
     kill "${DAEMON_PID}" >/dev/null 2>&1 || true
-    wait "${DAEMON_PID}" 2>/dev/null || true
+    # Not `wait`: it blocks for as long as the process lives, which for a daemon
+    # that ignores the signal is for ever, before the bounded check below can say
+    # so. Disowning lets go of it without blocking or printing a job notice.
+    disown "${DAEMON_PID}" 2>/dev/null || true
     DAEMON_PID=""
 else
     herdr plugin unlink "${PLUGIN_ID}" >/dev/null 2>&1 || true
     pkill -f "herdr-voice daemon" >/dev/null 2>&1 || true
 fi
-waited=0
-while [ "${waited}" -lt 10 ]; do
-    if ! daemon_is_up; then
-        break
-    fi
-    sleep 1
-    waited=$((waited + 1))
-done
-if daemon_is_up; then
-    record "no-daemon" "-" "skipped: a daemon is still listening and could not be stopped"
-else
+if wait_daemon_gone; then
     set +e
     timeout "${CLIENT_TIMEOUT}" "${BIN}" cancel >"${LOGS}/no-daemon.log" 2>&1
     CANCEL_CODE="$?"
@@ -800,6 +877,9 @@ else
     fi
     record "no-daemon" "${CANCEL_CODE}" \
         "named the socket and exited: $(head -n 1 "${LOGS}/no-daemon.log" | cut -c 1-80)"
+else
+    fail "no-daemon" "-" "a daemon was still answering ${STOP_TIMEOUT}s after it was told to stop" \
+        "find it with 'pgrep -fl herdr-voice' and stop it by hand; the client's behaviour with no daemon cannot be checked while one answers"
 fi
 
 # ---------------------------------------------------------------------------
