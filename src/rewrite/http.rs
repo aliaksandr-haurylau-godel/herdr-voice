@@ -88,6 +88,18 @@ fn user_message(transcript: &str) -> String {
     format!("{OPEN}\n{}\n{CLOSE}", escape_markers(transcript))
 }
 
+/// A backtick in the reply is the model's own unless the take carried one
+/// first: with none in the take, every backtick is removed and the edges are
+/// trimmed again; with one in the take the engine cannot tell the speaker's
+/// from the model's, so the reply is only trimmed (`tasks/51/DESIGN_51.md`,
+/// section 2).
+fn without_added_backticks(transcript: &str, reply: &str) -> String {
+    if transcript.contains('`') {
+        return reply.trim().to_string();
+    }
+    reply.replace('`', "").trim().to_string()
+}
+
 /// A bound turns a hang into a message rather than a leaked thread — the same
 /// reason #28 exists for delivery and transcription.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -207,7 +219,7 @@ impl HttpEngine {
             .and_then(|c| c.as_str());
 
         match content {
-            Some(text) => Ok(text.trim().to_string()),
+            Some(text) => Ok(without_added_backticks(transcript, text)),
             None => Err(HttpError::Unreadable {
                 url: self.url.clone(),
                 detail: format!(
@@ -980,5 +992,122 @@ mod tests {
         let message = error.to_string();
         assert!(!message.ends_with("could not read: "), "got {message}");
         handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_term_wrapped_in_backticks_is_unwrapped() {
+        assert_eq!(
+            without_added_backticks("run cargo test", "run `cargo test`"),
+            "run cargo test"
+        );
+    }
+
+    #[test]
+    fn a_run_of_backticks_around_several_words_is_removed() {
+        assert_eq!(
+            without_added_backticks(
+                "open the file readme md now",
+                "open `the file readme md` now"
+            ),
+            "open the file readme md now"
+        );
+    }
+
+    #[test]
+    fn a_fence_is_removed_and_the_edges_are_trimmed() {
+        assert_eq!(without_added_backticks("foo", "```\nfoo\n```"), "foo");
+    }
+
+    #[test]
+    fn a_take_with_a_backtick_leaves_the_reply_as_it_is() {
+        assert_eq!(
+            without_added_backticks("say `x` mid-sentence", "\nsay `x` now "),
+            "say `x` now"
+        );
+    }
+
+    #[test]
+    fn a_take_that_is_only_a_backtick_leaves_the_reply_as_it_is() {
+        assert_eq!(without_added_backticks("`", "a `b` c"), "a `b` c");
+    }
+
+    #[test]
+    fn only_the_backtick_is_removed() {
+        assert_eq!(
+            without_added_backticks("x", "\"a\" 'b' *c* ~d~ e_f - g `h`"),
+            "\"a\" 'b' *c* ~d~ e_f - g h"
+        );
+    }
+
+    #[test]
+    fn cyrillic_stays_whole_around_a_backticked_latin_term() {
+        assert_eq!(
+            without_added_backticks("запусти cargo test", "запусти `cargo test` сейчас"),
+            "запусти cargo test сейчас"
+        );
+    }
+
+    #[test]
+    fn a_reply_of_only_backticks_is_empty() {
+        assert_eq!(without_added_backticks("x", "```"), "");
+    }
+
+    #[test]
+    fn a_reply_of_backticks_and_whitespace_is_empty() {
+        assert_eq!(without_added_backticks("x", "` \n`"), "");
+    }
+
+    fn rewrite_through_socket(take: &str, reply_json: &'static str) -> String {
+        let (url, handle) = respond_once(reply_json);
+        let engine = HttpEngine::new(url, String::new(), String::new());
+        let out = engine.rewrite(take, "").expect("text");
+        handle.join().expect("server thread");
+        out
+    }
+
+    #[test]
+    fn a_backticked_reply_is_delivered_without_them() {
+        let out = rewrite_through_socket(
+            "run cargo test",
+            r#"{"choices":[{"message":{"content":"run `cargo test`"}}]}"#,
+        );
+        assert_eq!(out, "run cargo test");
+    }
+
+    #[test]
+    fn a_fenced_reply_is_delivered_as_its_text() {
+        let out = rewrite_through_socket(
+            "foo",
+            r#"{"choices":[{"message":{"content":"```\nfoo\n```"}}]}"#,
+        );
+        assert_eq!(out, "foo");
+    }
+
+    #[test]
+    fn a_reply_for_a_take_with_a_backtick_is_delivered_with_them() {
+        let out = rewrite_through_socket(
+            "say `x`",
+            r#"{"choices":[{"message":{"content":"say `x`"}}]}"#,
+        );
+        assert_eq!(out, "say `x`");
+    }
+
+    #[test]
+    fn the_engine_the_daemon_holds_strips_the_backticks() {
+        let (url, handle) =
+            respond_once(r#"{"choices":[{"message":{"content":"run `cargo test`"}}]}"#);
+        let config = crate::config::Rewrite {
+            engine: "http".to_string(),
+            url,
+            ..Default::default()
+        };
+        let out = match crate::rewrite::resolve(&config) {
+            crate::rewrite::Resolution::Engine(engine) => {
+                engine.rewrite("run cargo test", "").expect("text")
+            }
+            other => panic!("expected an engine, got {other:?}"),
+        };
+        handle.join().expect("server thread");
+        assert_eq!(out, "run cargo test");
     }
 }

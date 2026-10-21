@@ -3026,3 +3026,49 @@ the check above confirms the fix on the real binary.
    server in use may make it load a model, which this check must not do. What was shown is that the key
    is written, that a running daemon reports `needs a restart: rewrite`, and that the model list is
    fetched with one `GET`.
+
+## Repaired terms and backticks, for issue #51
+
+macOS 27.0.1, Apple silicon, 2026-10-21, debug build. The change is in
+`src/rewrite/http.rs`: `without_added_backticks(transcript, reply)` replaces the
+bare trim of the reply. If the take contains a backtick the reply is only trimmed;
+if it contains none, every backtick is removed from the reply and the result is
+trimmed again.
+
+Command, run in the checkout with `CARGO_BUILD_JOBS=6`:
+
+```sh
+cargo test rewrite::http -- --nocapture
+```
+
+Result: `test result: ok. 49 passed; 0 failed`. The tests that pin this change, all
+`ok`:
+
+| test | what it asserts |
+|---|---|
+| `a_term_wrapped_in_backticks_is_unwrapped` | ``run `cargo test` `` for the take `run cargo test` is `run cargo test` |
+| `a_run_of_backticks_around_several_words_is_removed` | a backticked run of three words loses only the backticks |
+| `a_fence_is_removed_and_the_edges_are_trimmed` | a triple-backtick fence around `foo` is delivered as `foo` |
+| `a_take_with_a_backtick_leaves_the_reply_as_it_is` | take containing a backtick: the reply keeps its backticks and is only trimmed |
+| `a_take_that_is_only_a_backtick_leaves_the_reply_as_it_is` | the same for a take that is a single backtick |
+| `only_the_backtick_is_removed` | quotes, asterisks, tildes, underscores and hyphens in the reply are unchanged |
+| `cyrillic_stays_whole_around_a_backticked_latin_term` | Cyrillic around a backticked Latin term comes back whole |
+| `a_reply_of_only_backticks_is_empty`, `a_reply_of_backticks_and_whitespace_is_empty` | the result is the empty string |
+| `a_backticked_reply_is_delivered_without_them`, `a_fenced_reply_is_delivered_as_its_text`, `a_reply_for_a_take_with_a_backtick_is_delivered_with_them` | the same through `HttpEngine::rewrite` against a listener on a real socket |
+| `the_engine_the_daemon_holds_strips_the_backticks` | the engine `rewrite::resolve` builds from `engine = "http"`, called through the `Engine` trait, strips them |
+
+Before the function was wired in, three tests failed (`3 failed; 46 passed` for the
+module at that point): the two socket-served tests that need the strip,
+`a_backticked_reply_is_delivered_without_them` and
+`a_fenced_reply_is_delivered_as_its_text`, and the test through `rewrite::resolve`.
+The socket-served take-with-a-backtick test passed before the wiring as well,
+because it needs only the trim. After the wiring all pass. The whole suite: `1039 passed;
+0 failed; 1 ignored`.
+
+What this does not establish. The defect was reported on `google/gemma-4-e4b` on
+2026-09-14. That model was not loaded on this machine on 2026-10-21 and no request
+naming it was sent, so no reply from it is recorded here. On the model that was
+loaded, `google/gemma-4-e2b`, a take with three mangled terms came back with no
+backtick, with and without a bias string, two requests each; the defect did not
+appear there. No run in a herdr pane was made: it needs a microphone and a herdr
+session. The series on `google/gemma-4-e4b`, and a take through a pane, are pending.
