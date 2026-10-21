@@ -3041,7 +3041,7 @@ Command, run in the checkout with `CARGO_BUILD_JOBS=6`:
 cargo test rewrite::http -- --nocapture
 ```
 
-Result: `test result: ok. 49 passed; 0 failed`. The tests that pin this change, all
+Result: `test result: ok. 50 passed; 0 failed`. The tests that pin this change, all
 `ok`:
 
 | test | what it asserts |
@@ -3054,6 +3054,7 @@ Result: `test result: ok. 49 passed; 0 failed`. The tests that pin this change, 
 | `only_the_backtick_is_removed` | quotes, asterisks, tildes, underscores and hyphens in the reply are unchanged |
 | `cyrillic_stays_whole_around_a_backticked_latin_term` | Cyrillic around a backticked Latin term comes back whole |
 | `a_reply_of_only_backticks_is_empty`, `a_reply_of_backticks_and_whitespace_is_empty` | the result is the empty string |
+| `interior_newlines_survive_the_strip` | line breaks inside the reply are kept; only the edges are trimmed |
 | `a_backticked_reply_is_delivered_without_them`, `a_fenced_reply_is_delivered_as_its_text`, `a_reply_for_a_take_with_a_backtick_is_delivered_with_them` | the same through `HttpEngine::rewrite` against a listener on a real socket |
 | `the_engine_the_daemon_holds_strips_the_backticks` | the engine `rewrite::resolve` builds from `engine = "http"`, called through the `Engine` trait, strips them |
 
@@ -3062,13 +3063,13 @@ module at that point): the two socket-served tests that need the strip,
 `a_backticked_reply_is_delivered_without_them` and
 `a_fenced_reply_is_delivered_as_its_text`, and the test through `rewrite::resolve`.
 The socket-served take-with-a-backtick test passed before the wiring as well,
-because it needs only the trim. After the wiring all pass. The whole suite: `1039 passed;
+because it needs only the trim. After the wiring all pass. The whole suite: `1040 passed;
 0 failed; 1 ignored`.
 
 The whole output of that command, filtered to the lines that name a test or a result (single-threaded so the order is stable):
 
 ```
-running 49 tests
+running 50 tests
 test rewrite::http::tests::a_2xx_body_that_is_empty_is_noted_as_empty ... ok
 test rewrite::http::tests::a_2xx_body_that_is_not_json_is_quoted ... ok
 test rewrite::http::tests::a_2xx_body_without_choices_is_quoted ... ok
@@ -3106,6 +3107,7 @@ test rewrite::http::tests::an_empty_token_sends_no_authorization_header ... ok
 test rewrite::http::tests::an_unreadable_body_is_named_as_such ... ok
 test rewrite::http::tests::another_status_is_reported_with_its_own_status_and_body ... ok
 test rewrite::http::tests::cyrillic_stays_whole_around_a_backticked_latin_term ... ok
+test rewrite::http::tests::interior_newlines_survive_the_strip ... ok
 test rewrite::http::tests::only_the_backtick_is_removed ... ok
 test rewrite::http::tests::the_engine_delivers_what_the_model_answered ... ok
 test rewrite::http::tests::the_engine_the_daemon_holds_strips_the_backticks ... ok
@@ -3118,7 +3120,7 @@ test rewrite::http::tests::the_request_carries_temperature_zero_and_no_token_lim
 test rewrite::http::tests::the_rewritten_text_is_read_back ... ok
 test rewrite::http::tests::the_shipped_engine_holds_the_thirty_second_bound ... ok
 test rewrite::http::tests::the_transcript_is_sent_fenced ... ok
-test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 991 filtered out; finished in 0.25s
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 991 filtered out; finished in 0.25s
 running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
 running 0 tests

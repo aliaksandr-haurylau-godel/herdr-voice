@@ -143,3 +143,32 @@ not the output, so the filtered output of the whole module run is now beside the
 claim; and a doc comment said "carried one first" where the rule is "contains
 one", now corrected. It also noted that a fence with a language tag leaves the tag
 in the reply, which `AC_51.md` records under "Out of scope / noticed".
+
+Mutation test of the lines the diff adds or changes, by a tester that did not write
+the code, in a scratch copy with its own target directory: 24 mutations, one at a
+time, every one compiled. 22 were killed, among them removing or inverting the
+take's backtick check, checking the reply instead of the take, stripping only the
+first backtick, only pairs, only leading and trailing ones, stripping `'` instead,
+dropping or halving either trim, swapping the arguments at the call site and
+reverting the call site to a bare trim. One survived as equivalent (removing every
+three-backtick run and then every backtick gives the same string as removing every
+backtick). One survived with a real change of behaviour: turning line breaks inside
+the reply into spaces in the strip branch, because no test had a newline inside
+the text. It is killed by the new test `interior_newlines_survive_the_strip`, and
+that was confirmed by applying the mutation to a scratch copy and watching the
+test fail (49 passed, 1 failed), then watching it pass on the real code (50
+passed). Two of the claimed kills (`trim_matches`, `trim_start` only) were also
+re-run by the author of this run and failed the named tests. The other mutations
+are the tester's report and were not re-run.
+
+All gates pass again after the added test: `1040 passed; 0 failed; 1 ignored`,
+clippy, `cargo fmt --check`, `scripts/check_manifest.py` and the Windows dead-code
+check.
+
+### S5 Verify
+
+`docs/evidence.md`, section "Repaired terms and backticks, for issue #51":
+the module's tests with their whole output, on macOS, this machine. No run in a
+herdr pane and no series on `google/gemma-4-e4b` were made; the section says so.
+Verdict: recorded as a result with that limit, not as a claim that the defect is
+fixed on the model the issue names.

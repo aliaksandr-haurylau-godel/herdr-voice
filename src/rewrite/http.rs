@@ -1109,4 +1109,10 @@ mod tests {
         handle.join().expect("server thread");
         assert_eq!(out, "run cargo test");
     }
+
+    #[test]
+    fn interior_newlines_survive_the_strip() {
+        assert_eq!(without_added_backticks("x", "a\nb `c`"), "a\nb c");
+        assert_eq!(without_added_backticks("x", "```\na\nb\n```"), "a\nb");
+    }
 }
