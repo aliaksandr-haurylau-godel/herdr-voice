@@ -125,3 +125,21 @@ gate:
 
 The reviewer confirmed that T4 gives commands and a pass condition, that the two
 small defects are gone, and that every symbol the plan names exists.
+
+### S4 Implement
+
+Tests first, in the order of `PLAN_51.md`: the nine direct tests failed to compile
+(function not found), then passed with `without_added_backticks`; the four tests
+that need the wiring failed (`3 failed; 46 passed` for the module), then passed
+with it. The four gates and the Windows dead-code check on a scratch copy pass;
+the full suite is `1039 passed; 0 failed; 1 ignored`.
+
+Code review of the diff by a reviewer that did not write it (no cargo, read-only):
+no real defect. It checked that no dictated character can be removed, that the
+evidence matches the tests, that each test fails against a wrong implementation,
+that there is no panic path and that the command engine is untouched. It raised two
+items, both taken: `docs/evidence.md` gave the command and a one-line result but
+not the output, so the filtered output of the whole module run is now beside the
+claim; and a doc comment said "carried one first" where the rule is "contains
+one", now corrected. It also noted that a fence with a language tag leaves the tag
+in the reply, which `AC_51.md` records under "Out of scope / noticed".

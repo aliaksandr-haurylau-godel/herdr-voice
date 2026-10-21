@@ -88,11 +88,10 @@ fn user_message(transcript: &str) -> String {
     format!("{OPEN}\n{}\n{CLOSE}", escape_markers(transcript))
 }
 
-/// A backtick in the reply is the model's own unless the take carried one
-/// first: with none in the take, every backtick is removed and the edges are
-/// trimmed again; with one in the take the engine cannot tell the speaker's
-/// from the model's, so the reply is only trimmed (`tasks/51/DESIGN_51.md`,
-/// section 2).
+/// A backtick in the reply is the model's own unless the take contains one:
+/// with none in the take, every backtick is removed and the edges are trimmed
+/// again; with one in the take the engine cannot tell the speaker's from the
+/// model's, so the reply is only trimmed (`tasks/51/DESIGN_51.md`, section 2).
 fn without_added_backticks(transcript: &str, reply: &str) -> String {
     if transcript.contains('`') {
         return reply.trim().to_string();
