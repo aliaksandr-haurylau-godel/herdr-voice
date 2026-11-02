@@ -72,6 +72,12 @@ microphone takes effect when herdr is restarted, and the popup says so. Tokens a
 never shown, only whether they are set, and the two `command` lists are changed in
 the file.
 
+A rewrite model that reasons before it answers (some local models do by default) can
+take several seconds for a short transcript. For `[rewrite] engine = "http"`, set
+`thinking = false` in `[rewrite]` and the request carries `"reasoning_effort": "none"`;
+the default, `true`, sends no such field and the server decides. A server that does not
+know the field ignores it.
+
 If you used this plugin before its id became `herdr-voice`, your bindings name
 an id that no longer exists and the keys do nothing. The daemon says so once
 when herdr starts it, naming the keys, and `setup` offers to repair them: it

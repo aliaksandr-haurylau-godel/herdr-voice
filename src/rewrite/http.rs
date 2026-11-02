@@ -96,6 +96,9 @@ pub struct HttpEngine {
     url: String,
     token: String,
     model: String,
+    /// `false` adds `"reasoning_effort": "none"` to the request body; `true`
+    /// sends nothing, so the server keeps its own default.
+    thinking: bool,
     /// The bound the agent below was built with, kept so a timeout's message can
     /// name it. `new` passes `TIMEOUT`; a test passes a shorter one.
     timeout: Duration,
@@ -125,9 +128,17 @@ impl HttpEngine {
             url,
             token,
             model,
+            thinking: true,
             timeout,
             agent,
         }
+    }
+
+    /// Sets whether the model may reason before it answers. The default is
+    /// `true`, which sends no reasoning field at all.
+    pub fn with_thinking(mut self, thinking: bool) -> HttpEngine {
+        self.thinking = thinking;
+        self
     }
 }
 
@@ -165,7 +176,7 @@ impl HttpEngine {
         } else {
             format!("{PROMPT}\n\nRecent context: {bias}")
         };
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -173,6 +184,12 @@ impl HttpEngine {
             ],
             "temperature": 0,
         });
+        if !self.thinking {
+            // The one spelling LM Studio honours for a model that reasons by
+            // default; `chat_template_kwargs` and `reasoning.effort` are
+            // accepted and ignored there (`docs/evidence.md`).
+            body["reasoning_effort"] = serde_json::json!("none");
+        }
 
         let mut request = self.agent.post(&self.url);
         if !self.token.is_empty() {
@@ -631,6 +648,29 @@ mod tests {
         // empty content with finish_reason "length". The plugin sends none,
         // and that is load-bearing.
         assert!(body.get("max_tokens").is_none(), "got {body}");
+    }
+
+    #[test]
+    fn the_request_asks_for_no_reasoning_only_when_thinking_is_turned_off() {
+        let (url, handle) = respond_once(r#"{"choices":[{"message":{"content":"x"}}]}"#);
+        let engine = HttpEngine::new(url, String::new(), "local-model".to_string());
+        engine.rewrite("x", "").expect("text");
+        let body = body_of(&handle.join().expect("server thread"));
+        assert!(body.get("reasoning_effort").is_none(), "got {body}");
+
+        let (url, handle) = respond_once(r#"{"choices":[{"message":{"content":"x"}}]}"#);
+        let engine =
+            HttpEngine::new(url, String::new(), "local-model".to_string()).with_thinking(false);
+        engine.rewrite("x", "").expect("text");
+        let body = body_of(&handle.join().expect("server thread"));
+        assert_eq!(body["reasoning_effort"], "none", "got {body}");
+
+        let (url, handle) = respond_once(r#"{"choices":[{"message":{"content":"x"}}]}"#);
+        let engine =
+            HttpEngine::new(url, String::new(), "local-model".to_string()).with_thinking(true);
+        engine.rewrite("x", "").expect("text");
+        let body = body_of(&handle.join().expect("server thread"));
+        assert!(body.get("reasoning_effort").is_none(), "got {body}");
     }
 
     #[test]
