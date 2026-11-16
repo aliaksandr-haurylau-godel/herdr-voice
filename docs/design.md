@@ -318,16 +318,18 @@ with a blank — herdr trims whitespace off either end of a token value, and the
 width would change with it.
 
 Each animation changes one character for another of the same width: `●` and `○`,
-the braille cells, the colon and the space. The braille cells and the colon are
-Narrow by East Asian Width; `●` and `○` are Ambiguous, which a terminal draws one
-cell wide unless it is set to draw Ambiguous characters wide, in which case both
-widen together. The text after the mark never moves.
+the braille cells, the colon and the space. By East Asian Width the colon and the
+space are Narrow and the braille cells and `⋯` are Neutral, all drawn one cell
+wide; `●` and `○` are Ambiguous, which a terminal draws one cell wide unless it is
+set to draw Ambiguous characters wide, in which case both widen together. The text
+after the mark never moves.
 
 The clock is minutes and seconds with the minutes uncapped, so a take nobody
 ended reads as `43:11` instead of reading as though it had just begun. Recording
 counts from the start of the recording; transcribing and fixing count from the
 moment that stage began, because each publication of a stage carries its own
-time stamp.
+time stamp. Transcribing begins when the recording stops, so its clock includes
+collecting the context that recognition is given.
 
 **`auto` is the default.** It gives the glyph look when herdr's configuration file
 contains the line herdr-radar opens its managed sidebar block with,
@@ -349,6 +351,7 @@ rows = [["state_icon", "workspace", "tab"], [
   { token = "$voice", rules = [
     { starts_with = "●", fg = "#c04a4a" },
     { starts_with = "○", fg = "#c04a4a" },
+    { starts_with = "REC", fg = "#c04a4a" },
     { contains = "TRANSCR", fg = "#c78a1f" },
     { contains = "FIX", fg = "#907aa9" },
   ] },
@@ -381,9 +384,10 @@ any suffix this plugin can have written. No form carries a marker, so a suffix i
 recognised by its shape, which is closed: an optional `● ` or `⋯ `, then `REC`,
 `TRANSCR` or `FIX`, a space and a clock, at the very end of the label and either
 the whole label or after a space. Labels left by older daemons, whose forms all
-began with `🎙️`, are cut from that marker as before. The price of having no
-marker is that a tab a person named, say, `release FIX 1:00` is cleaned up once at
-daemon start as though a take had left it. The start-up sweep runs whether or not
+began with `🎙️`, are cut from that marker. The price of having no marker is that
+a tab a person named, say, `release FIX 1:00`, or a name ending in a lone `●` or
+`⋯` that then carried a text-look suffix, is cleaned up once at daemon start as
+though a take had left it. The start-up sweep runs whether or not
 the tab indicator is switched on: the key says that this plugin does not decorate,
 and it cannot mean that decorations it left earlier stay forever.
 

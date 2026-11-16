@@ -137,7 +137,8 @@ pub fn strip(label: &str) -> String {
 /// `FIX`, a space, one or more digits, a colon and exactly two digits, at the
 /// very end. The suffix is the whole label or follows a space. The price of
 /// having no marker is that a tab a person named, say, `release FIX 1:00` is
-/// cleaned up once at daemon start as though a take had left it.
+/// cleaned up once at daemon start as though a take had left it, and so is a
+/// name ending in a lone `●` or `⋯` that then carried a text-look suffix.
 fn suffix_start(label: &str) -> Option<usize> {
     // The clock, read from the end: two digits, a colon, one or more digits.
     let bytes = label.as_bytes();

@@ -4,7 +4,7 @@
 |---|---|
 | issue | none yet — the issue text is prepared in this run and filed by the owner; the directory and branch carry no number until then |
 | input | the owner's decision relayed by another session on 2026-11-16, not a GitHub issue |
-| stage | S4 |
+| stage | S5 |
 | branch | feat/indicator-glyphs |
 | opened | 2026-11-16 |
 
@@ -102,3 +102,41 @@ gate:
 
 ### S4 Implement
 - started: 2026-11-16, executed inline from the plan, test first per task.
+- code committed as `be32710`; diff `d68b2a2..be32710` reviewed by an independent subagent with `superpowers:requesting-code-review`.
+
+```yaml
+gate:
+  stage: S4
+  artifact: diff d68b2a2..be32710
+  reviewer: code (superpowers:requesting-code-review, independent subagent)
+  verdict: READY with fixes
+  date: 2026-11-16
+  blocker: null
+```
+
+Review findings, as returned, and what was done:
+- Important 1 — the colour snippet in `docs/design.md` coloured recording only in the glyph look, while herdr's own panel gets the text look under `auto`: fixed, a `starts_with = "REC"` rule added; the snippet passes `herdr config check`, and a misspelled rule key fails it, so the check does validate rule keys.
+- Important 2 — the evidence entry is missing: that is S5, below.
+- Minor 1 — a label ending in a lone `●` or `⋯` that then carried a text-look suffix is stripped by the sweep: documented beside the `release FIX 1:00` cost in `docs/design.md` and the `suffix_start` comment.
+- Minor 2 — the legacy branch cuts any label containing `🎙️`, decorated or not: behaviour unchanged from before this run; not changed here.
+- Minor 3 — no daemon-level test asserts the `since` values: not added; covered by reading the three publish sites and by the indicator's per-stage clock test.
+- Minor 4 — the transcribing clock includes context collection: documented in `docs/design.md`.
+- Minor 5 — two takes with less than one `blink_ms` between them and no tab change share a look and frame count: not changed; noted here.
+- Minor 6 — braille and `⋯` are Neutral, not Narrow, and one sentence used change-history wording: both fixed in `docs/design.md`.
+- Minor 7 — `radar_owns_sidebar` requires the exact start line: accepted as written in AC-2.
+
+### S5 Verify
+- section: `docs/evidence.md`, "The glyph look and the text look of the indicator, by hand on macOS"
+- platform: macOS 27.2, arm64, herdr 0.9.5, release build of this branch with its own configuration and state directories; a scratch tab created for the check and closed afterwards.
+- checks: `cargo test` (1031 + 4 + 4 + 9 passed, 1 ignored), `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --check` clean, `python3 scripts/check_manifest.py` "13 entries, all commands known".
+
+```yaml
+verdict:
+  stage: S5
+  result: PASS
+  date: 2026-11-16
+  not_verified:
+    - how the forms look to a person on screen (values read from herdr, not seen)
+    - real recognition and rewrite engines
+    - Linux and Windows
+```
