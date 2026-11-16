@@ -23,8 +23,11 @@ submitted for you.
   Whisper-compatible endpoint, or through a command you name. The rewrite stage uses
   a coding-agent command-line tool found in `PATH`, an OpenAI-compatible endpoint, or
   a command you name.
-- **Says what it is doing.** A blinking indicator with elapsed time shows in the
-  sidebar and in the tab label, so a collapsed sidebar does not hide the state.
+- **Says what it is doing.** An indicator with the elapsed time of every stage
+  shows in the sidebar and in the tab label, so a collapsed sidebar does not hide
+  the state. It has a glyph look (`● REC 0:05`, `⣷ TRANSCR 0:03`) and a text look
+  (`REC 0:05`), chosen by `[ui] style`; the default picks the glyphs when the
+  herdr-radar plugin draws the agents panel.
 
 ## Why it exists
 

@@ -161,6 +161,27 @@ pub struct Ui {
     ///
     /// Read through `load`, which raises anything under `MIN_BLINK_MS` to it.
     pub blink_ms: u64,
+    /// How the indicator looks: one-cell marks in front of the word, or the
+    /// word and the clock alone. `auto` picks the marks when herdr's agents
+    /// panel is drawn by the herdr-radar plugin, whose rows use marks of the
+    /// same kind, and the text otherwise (`indicator::resolve`).
+    pub style: Style,
+}
+
+/// The values of `[ui] style`. A value outside these fails the file, the way
+/// any other value of the wrong shape does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Style {
+    #[default]
+    Auto,
+    Glyphs,
+    Text,
+}
+
+impl Style {
+    /// The spellings the file accepts, for the settings popup's list.
+    pub const VALUES: &'static [&'static str] = &["auto", "glyphs", "text"];
 }
 
 impl Ui {
@@ -183,6 +204,7 @@ impl Default for Ui {
             sidebar_token: true,
             tab_indicator: true,
             blink_ms: 600,
+            style: Style::Auto,
         }
     }
 }
@@ -777,6 +799,33 @@ mod tests {
         assert!(ui.sidebar_token);
         assert!(ui.tab_indicator);
         assert_eq!(ui.blink_ms, 600);
+        assert_eq!(ui.style, Style::Auto);
+    }
+
+    #[test]
+    fn the_style_key_takes_its_three_values_and_refuses_any_other() {
+        for (text, style) in [
+            ("auto", Style::Auto),
+            ("glyphs", Style::Glyphs),
+            ("text", Style::Text),
+        ] {
+            let directory = scratch(&format!("style-{text}"));
+            std::fs::write(
+                directory.join("config.toml"),
+                format!("[ui]\nstyle = \"{text}\"\n"),
+            )
+            .unwrap();
+            assert_eq!(load(Some(&directory)).config.ui.style, style, "{text}");
+        }
+        let directory = scratch("style-absent");
+        std::fs::write(directory.join("config.toml"), "[ui]\ntoasts = true\n").unwrap();
+        assert_eq!(load(Some(&directory)).config.ui.style, Style::Auto);
+        let directory = scratch("style-wrong");
+        std::fs::write(directory.join("config.toml"), "[ui]\nstyle = \"neon\"\n").unwrap();
+        assert!(
+            matches!(load(Some(&directory)).source, Source::Invalid { .. }),
+            "a value outside the three must not load"
+        );
     }
 
     #[test]

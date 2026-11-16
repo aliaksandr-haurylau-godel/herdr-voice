@@ -1,0 +1,130 @@
+# AC_indicator-glyphs
+
+## as-is
+
+The indicator has three states and two surfaces (`src/indicator.rs`).
+
+- `value` (`src/indicator.rs:41`) builds every form from the marker `🎙️`
+  (`MARKER`, `src/indicator.rs:15`), a coloured emoji and a word:
+  `🎙️🔴 REC 0:05`, `🎙️📝 TRANSCR`, `🎙️🪄 FIX`. Only recording carries a clock.
+- The blink form replaces the emoji with U+3000 IDEOGRAPHIC SPACE
+  (`BLANK`, `src/indicator.rs:38`). The token on the pane alternates between the
+  steady and the blink form on every tick of `[ui] blink_ms` (default 600 ms,
+  `src/config.rs:185`). The tab label always carries the steady form and is
+  renamed only when that form changes (`paint_tab`, `src/indicator.rs:484`).
+- The start-up sweep renames every tab whose label contains `MARKER` and cuts the
+  marker and everything after it (`sweep_tabs`, `src/indicator.rs:590`;
+  `strip`, `src/indicator.rs:76`).
+- `Activity::Working` (`src/daemon.rs:73`) carries the stage but no time stamp,
+  so a clock for transcribing and fixing cannot be computed today.
+- `[ui]` has `toasts`, `sidebar_token`, `tab_indicator`, `blink_ms`
+  (`src/config.rs:148-164`). There is no key that chooses how the indicator looks.
+
+Where the owner meets it: with the herdr-radar plugin installed, the radar owns
+herdr's `[ui.sidebar.agents]` table through a managed block that starts with the
+line `# >>> herdr-radar sidebar block`; its rows have no `$voice` cell, so the
+token is not shown on its panel. With its `show_tab = true` the radar prints the
+tab label in front of each row's title, so the visible part is the tab suffix,
+whose colour emoji sit two cells wide among the radar's one-cell monochrome marks
+(`✓`, `?`, braille spinner `⣷⣯⣟⡿⢿⣻⣽⣾`). The radar refreshes tab labels at most
+every 5 seconds. Facts about the radar come from reading its source at commit
+`1869b06`; nothing in this repository depends on it.
+
+## input
+
+No GitHub issue yet. The request is the owner's decision, relayed by another
+session on 2026-11-16, on a report that proposed the glyph set. The issue text is
+prepared at the end of this run and filed by the owner.
+
+## to-be
+
+The indicator has two looks, chosen per take:
+
+- **glyphs** — one-cell monochrome marks in front of the word, no emoji;
+- **text** — the word and the clock only, no marks and no emoji.
+
+Every state shows its own elapsed clock in both looks. The information shown — the
+state word and the time — is the same in both looks.
+
+## requirements
+
+1. **The key.** `[ui] style = "auto" | "glyphs" | "text"`, default `auto`. An
+   absent key or an absent file means `auto`.
+2. **auto.** `glyphs` when herdr's configuration file contains the radar's managed
+   sidebar block (its start line `# >>> herdr-radar sidebar block`), `text`
+   otherwise — including when the file is absent or unreadable. herdr's
+   configuration file is found the way `doctor` finds it.
+3. **Forms, glyphs look.** Token steady forms and their alternate:
+   - recording `● REC 0:05`, alternating with `○ REC 0:05`;
+   - transcribing `⣷ TRANSCR 0:03`, the first cell walking through
+     `⣷ ⣯ ⣟ ⡿ ⢿ ⣻ ⣽ ⣾`, one frame per tick;
+   - fixing `⣷ FIX 0:02`, the same spinner.
+   Tab suffix (never animated): `● REC 0:05`, `⋯ TRANSCR 0:03`, `⋯ FIX 0:02`.
+4. **Forms, text look.** Token: `REC 0:05` alternating with `REC 0 05` (the colon
+   replaced by a space of the same width); likewise `TRANSCR 0:03` and `FIX 0:02`.
+   Tab suffix: `REC 0:05`, `TRANSCR 0:03`, `FIX 0:02`, never alternating.
+5. **Width.** Within one state and one look, every form the token alternates
+   between has the same character count and the same display width, and starts
+   with a non-blank character. No form contains an emoji, `🎙️` or U+3000.
+6. **Clock per stage.** Recording counts from the start of the recording, as now.
+   Transcribing counts from the moment transcription starts; fixing from the
+   moment fixing starts. Minutes uncapped, `m:ss`, as now.
+7. **When `auto` is decided.** Once per take, before its first paint; a take keeps
+   its look to the end.
+8. **Sweep.** At start the sweep takes off any suffix this plugin can have written:
+   the new forms in both looks, and the old forms that begin with `🎙️`. A label
+   none of those match is left alone.
+9. **Unchanged.** Three states, the word for each, the tab is renamed only when its
+   steady form changes, the token time to live of three ticks, `blink_ms` and its
+   floor, `sidebar_token` and `tab_indicator`, the restore at the end of a take.
+10. **Tests without herdr.** Unit tests cover AC-1 to AC-8 through the existing
+   recording painter and a test-supplied configuration text; no live herdr.
+
+## acceptance criteria
+
+- **AC-1** `[ui] style` parses `auto`, `glyphs`, `text`; absent means `auto`; any
+  other value is reported the way other invalid values in the file are.
+- **AC-2** With `auto`, a herdr configuration containing the line
+  `# >>> herdr-radar sidebar block` gives `glyphs`; one without it, an absent one
+  and an unreadable one give `text`.
+- **AC-3** In the glyphs look the token forms are exactly those of requirement 3,
+  and successive ticks of one state produce the alternation or the spinner order
+  given there.
+- **AC-4** In the text look the token forms are exactly those of requirement 4,
+  alternating on successive ticks.
+- **AC-5** In both looks the tab suffix is the steady form of requirements 3 and 4,
+  and a tab is renamed only when that form changes.
+- **AC-6** Requirement 5 holds for every state, both looks, every frame: equal
+  character count, equal display width, first character not whitespace, and none
+  of `🎙`, U+FE0F, U+3000, `🔴`, `📝`, `🪄` present.
+- **AC-7** Transcribing and fixing show a clock counted from the start of that
+  stage; recording shows a clock counted from the start of the recording.
+- **AC-8** The look is resolved once per take: a configuration change in the middle
+  of a take does not change that take's forms.
+- **AC-9** The sweep strips a suffix in every new form and in every old `🎙️` form,
+  restoring the label before it, and does not rename a tab whose label carries
+  none of them.
+- **AC-10** `cargo test`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo fmt --check` and `python3 scripts/check_manifest.py` pass.
+- **AC-11** `docs/design.md` sections 6 and 7 and the README describe the two looks
+  and the key; `docs/evidence.md` records the by-hand check of both looks.
+
+## chosen readings
+
+- "Blink in the text look": the owner allowed either keeping or dropping it,
+  provided no marks and no jump. Kept, as the colon turning into a space: both are
+  one narrow cell, the form never starts or ends with a blank (herdr trims
+  surrounding whitespace off token values), so nothing moves.
+- "Spinner on the own panel": the spinner steps once per tick of `blink_ms`. A
+  separate faster interval would raise the rate of herdr subprocesses, which
+  `blink_ms` exists to bound; a person who wants a faster spinner lowers `blink_ms`.
+- "Clocks for transcribing and fixing in the glyphs look, if width allows": width
+  allows; the clock is added in both looks.
+
+## out of scope / noticed
+
+- An error state in the indicator (the owner declined it).
+- Any change to the radar or a proposal to it (the owner declined it).
+- Colouring the token: herdr colours it through the person's own sidebar rows; a
+  copyable rules snippet goes into the README, nothing in the binary.
+- Sending tokens over herdr's socket instead of a subprocess.

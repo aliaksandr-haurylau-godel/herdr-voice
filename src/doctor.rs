@@ -482,7 +482,7 @@ fn models_directory() -> Option<PathBuf> {
 
 /// Where herdr's own configuration file is expected to be.
 #[derive(Debug, PartialEq, Eq)]
-enum Location {
+pub(crate) enum Location {
     Path(PathBuf),
     Unknown,
 }
@@ -693,7 +693,7 @@ fn warning(
     )
 }
 
-fn herdr_config_location() -> Location {
+pub(crate) fn herdr_config_location() -> Location {
     herdr_config_location_from(|key| std::env::var(key).ok(), cfg!(windows))
 }
 

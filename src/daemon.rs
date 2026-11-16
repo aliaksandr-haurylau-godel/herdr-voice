@@ -69,11 +69,14 @@ pub enum Activity {
         tab: Option<String>,
         since: crate::ptt::Stamp,
     },
-    /// The recording is over and the take is in the pipeline.
+    /// The recording is over and the take is in the pipeline. `since` is
+    /// stamped from `Runtime.clock` when this stage is published, so each stage
+    /// counts its own time.
     Working {
         target: String,
         tab: Option<String>,
         stage: Stage,
+        since: crate::ptt::Stamp,
     },
 }
 
@@ -431,6 +434,7 @@ fn dictate(
                         target: take.target.clone(),
                         tab: take.tab.clone(),
                         stage: Stage::Transcribing,
+                        since: runtime.clock.now(),
                     },
                 );
                 // Assembled here, where the take has just finished and
@@ -784,6 +788,7 @@ fn end_take(recorder: &Recorder, runtime: &Runtime, hold: &crate::ptt::Hold) {
                     target: take.target.clone(),
                     tab: take.tab.clone(),
                     stage: Stage::Transcribing,
+                    since: runtime.clock.now(),
                 },
             );
             let collected = take_bias(
@@ -1086,6 +1091,7 @@ fn transcribe_take(
             target: take.target.clone(),
             tab: take.tab.clone(),
             stage: Stage::Fixing,
+            since: runtime.clock.now(),
         },
     );
     let rewrite = resolve_rewrite(runtime, &text, bias);
@@ -3787,6 +3793,7 @@ mod tests {
             target: "w1:p2".to_string(),
             tab: None,
             stage: Stage::Transcribing,
+            since: 0,
         };
         publish(&runtime, working.clone());
         publish_idle_if_recording(&runtime, "w1:p2");
@@ -3851,6 +3858,7 @@ mod tests {
             target: "w1:p9".to_string(),
             tab: None,
             stage: Stage::Transcribing,
+            since: 0,
         };
         publish(&runtime, working.clone());
         answer(&request("cancel", b""), &recorder, &runtime);
@@ -4000,6 +4008,7 @@ mod tests {
             target: "w1:p9".to_string(),
             tab: None,
             stage: Stage::Transcribing,
+            since: 0,
         };
         publish(&runtime, working.clone());
         let (reply, _) = answer(&request("cancel", b""), &recorder, &runtime);
@@ -5472,7 +5481,9 @@ mod tests {
         let fake = crate::delivery::tests_support::FakeDeliverer::ok();
         let pipeline = a_take_in_the_pipeline_from("activity-transcr", &fake, PANE_1_IN_TAB);
         match activity_of(&pipeline.runtime) {
-            Activity::Working { target, tab, stage } => {
+            Activity::Working {
+                target, tab, stage, ..
+            } => {
                 assert_eq!(target, "w1:p1");
                 assert_eq!(
                     tab.as_deref(),
@@ -5532,7 +5543,9 @@ mod tests {
         };
         gate.wait_until_entered();
         match activity_of(&runtime) {
-            Activity::Working { target, tab, stage } => {
+            Activity::Working {
+                target, tab, stage, ..
+            } => {
                 assert_eq!(target, "w1:p2");
                 assert_eq!(tab.as_deref(), Some("w1:t2"));
                 assert_eq!(
@@ -5545,8 +5558,11 @@ mod tests {
         }
         // And the string that state is drawn as is the one the indicator has.
         assert_eq!(
-            crate::indicator::value(&crate::indicator::State::Fixing, false),
-            "🎙️🪄 FIX"
+            crate::indicator::label(
+                &crate::indicator::State::Fixing { elapsed_ms: 0 },
+                crate::indicator::Look::Text
+            ),
+            "FIX 0:00"
         );
         gate.open();
         second.join().expect("the second keypress ended badly");

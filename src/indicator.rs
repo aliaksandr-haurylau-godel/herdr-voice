@@ -1,53 +1,100 @@
 //! What the indicator says.
 //!
-//! Three states, two forms each: the steady form and the blink form, which is
-//! the steady form with its second glyph replaced by a blank of the same width.
-//! The token alternates between them on every tick — that is the blink — and
-//! the tab label always carries the steady form, because a tab bar that flashes
-//! a character twice a second is noise where nobody chose to look.
+//! Three states, two looks. The glyph look puts a one-cell mark in front of
+//! the word — a pulsing dot while recording, a braille spinner while the take
+//! is transcribed or fixed; the text look is the word and the clock alone,
+//! with the colon blinking. The token animates on every tick; the tab label
+//! carries the steady form, because a tab bar that changes a character twice a
+//! second is noise where nobody chose to look.
 //!
-//! Every form begins with `MARKER`, which is what the start-up sweep cuts from
-//! when a previous daemon was killed with a tab still decorated.
+//! No form carries a marker. The start-up sweep recognises a suffix this
+//! plugin wrote by its shape (`strip`), and also the older forms that began
+//! with a microphone.
 
-/// The glyph every value begins with, and the one the sweep looks for. Not
-/// something a person types into a tab name by accident — which matters,
-/// because the sweep renames every tab whose label contains it.
-pub const MARKER: &str = "🎙️";
+/// What every form began with before the two looks existed. The sweep still
+/// cuts from it, so a tab left decorated by an older daemon is cleaned up by a
+/// newer one.
+const LEGACY_MARKER: &str = "🎙️";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
     Recording { elapsed_ms: u64 },
-    Transcribing,
-    Fixing,
+    Transcribing { elapsed_ms: u64 },
+    Fixing { elapsed_ms: u64 },
 }
 
-/// What stands in for the coloured glyph in the blink form: the position is
-/// kept, only the ink goes.
-///
-/// U+3000 IDEOGRAPHIC SPACE, not an ordinary space. A terminal lays its cells
-/// out by East Asian Width: the three icons are Wide and cover two columns, and
-/// U+3000 is the one blank that is Wide as well, so it lands exactly on the two
-/// columns the icon left and nothing to the right of it moves. U+2007 FIGURE
-/// SPACE is Neutral and covers one column, which would move the text by half a
-/// cell — half of the defect this replaces. Two ordinary spaces measure two
-/// columns as well, but they are two characters where the steady form has one,
-/// and anything that trims or collapses a run of spaces takes the width back; a
-/// single wide character cannot be collapsed. This is reasoned from the width
-/// tables, not measured in a terminal: if the text still moves, this constant
-/// is the one thing to change.
-const BLANK: &str = "\u{3000}";
+/// Which of the two looks a take is drawn in (`resolve` decides it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    /// A one-cell mark in front of the word, the kind of mark herdr-radar puts
+    /// in front of an agent's title.
+    Glyphs,
+    /// The word and the clock, nothing else.
+    Text,
+}
 
-/// The value for a state, in the steady form or the blink form.
-pub fn value(state: &State, blink: bool) -> String {
-    let (icon, text) = match state {
-        State::Recording { elapsed_ms } => ("🔴", format!("REC {}", elapsed(*elapsed_ms))),
-        State::Transcribing => ("📝", "TRANSCR".to_string()),
-        State::Fixing => ("🪄", "FIX".to_string()),
-    };
-    if blink {
-        format!("{MARKER}{BLANK} {text}")
-    } else {
-        format!("{MARKER}{icon} {text}")
+/// The working spinner: eight-dot braille with the gap walking round the
+/// cell. Every frame is one Narrow cell, so the text after it never moves.
+const SPIN: [&str; 8] = ["⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽", "⣾"];
+
+/// The word a state is shown as, and how long it has been in it.
+fn word_and_elapsed(state: &State) -> (&'static str, u64) {
+    match state {
+        State::Recording { elapsed_ms } => ("REC", *elapsed_ms),
+        State::Transcribing { elapsed_ms } => ("TRANSCR", *elapsed_ms),
+        State::Fixing { elapsed_ms } => ("FIX", *elapsed_ms),
+    }
+}
+
+/// What the token carries on tick `frame` of a take.
+///
+/// Every frame of one state has the same characters in the same places except
+/// one, and the two that alternate are always of one width: `●` and `○`, the
+/// braille cells, `:` and a space. No frame begins or ends with a blank,
+/// because herdr trims whitespace off either end of a token value and the
+/// width would change with it.
+pub fn token(state: &State, look: Look, frame: u64) -> String {
+    let (word, elapsed_ms) = word_and_elapsed(state);
+    let clock = elapsed(elapsed_ms);
+    let odd = frame % 2 == 1;
+    match look {
+        Look::Glyphs => {
+            let mark = match state {
+                State::Recording { .. } => {
+                    if odd {
+                        "○"
+                    } else {
+                        "●"
+                    }
+                }
+                // `frame % 8` is below eight, so the index is in range.
+                _ => SPIN[(frame % SPIN.len() as u64) as usize],
+            };
+            format!("{mark} {word} {clock}")
+        }
+        Look::Text => {
+            let clock = if odd { clock.replace(':', " ") } else { clock };
+            format!("{word} {clock}")
+        }
+    }
+}
+
+/// What the tab suffix carries: the steady form, never animated, because a tab
+/// bar that changes a character twice a second is noise where nobody chose to
+/// look. In the glyph look the working states carry `⋯` rather than a frozen
+/// spinner frame.
+pub fn label(state: &State, look: Look) -> String {
+    let (word, elapsed_ms) = word_and_elapsed(state);
+    let clock = elapsed(elapsed_ms);
+    match look {
+        Look::Glyphs => {
+            let mark = match state {
+                State::Recording { .. } => "●",
+                _ => "⋯",
+            };
+            format!("{mark} {word} {clock}")
+        }
+        Look::Text => format!("{word} {clock}"),
     }
 }
 
@@ -70,13 +117,61 @@ pub fn decorate(label: &str, value: &str) -> String {
 
 /// The label with our decoration cut off, or unchanged if it carries none.
 ///
-/// Cuts from the first `MARKER` and takes the space before it with it. A label
-/// nobody decorated is returned as it is — including one that happens to
-/// contain a lone microphone that is not `MARKER`.
+/// Two shapes are ours. A label carrying `LEGACY_MARKER` is cut from it, with
+/// the space before it — that is what daemons before the two looks wrote. A
+/// label that ends in a steady form of either look (`suffix_start`) loses that
+/// form and the space before it. Anything else is returned as it is.
 pub fn strip(label: &str) -> String {
-    match label.find(MARKER) {
-        None => label.to_string(),
+    if let Some(at) = label.find(LEGACY_MARKER) {
+        return label[..at].trim_end().to_string();
+    }
+    match suffix_start(label) {
         Some(at) => label[..at].trim_end().to_string(),
+        None => label.to_string(),
+    }
+}
+
+/// Where a suffix this plugin writes on a tab begins, if the label ends in one.
+///
+/// The shape is closed: an optional `● ` or `⋯ `, then `REC`, `TRANSCR` or
+/// `FIX`, a space, one or more digits, a colon and exactly two digits, at the
+/// very end. The suffix is the whole label or follows a space. The price of
+/// having no marker is that a tab a person named, say, `release FIX 1:00` is
+/// cleaned up once at daemon start as though a take had left it.
+fn suffix_start(label: &str) -> Option<usize> {
+    // The clock, read from the end: two digits, a colon, one or more digits.
+    let bytes = label.as_bytes();
+    let n = bytes.len();
+    if n < 4 || !bytes[n - 1].is_ascii_digit() || !bytes[n - 2].is_ascii_digit() {
+        return None;
+    }
+    if bytes[n - 3] != b':' {
+        return None;
+    }
+    let mut minutes = n - 3;
+    while minutes > 0 && bytes[minutes - 1].is_ascii_digit() {
+        minutes -= 1;
+    }
+    if minutes == n - 3 || minutes == 0 || bytes[minutes - 1] != b' ' {
+        return None;
+    }
+    // Everything before the clock's space ends with the word.
+    let before = &label[..minutes - 1];
+    let word = ["TRANSCR", "REC", "FIX"]
+        .into_iter()
+        .find(|word| before.ends_with(word))?;
+    let mut start = before.len() - word.len();
+    // An optional mark and its space in front of the word.
+    for mark in ["● ", "⋯ "] {
+        if label[..start].ends_with(mark) {
+            start -= mark.len();
+            break;
+        }
+    }
+    if start == 0 || label[..start].ends_with(' ') {
+        Some(start)
+    } else {
+        None
     }
 }
 
@@ -133,6 +228,33 @@ pub trait Painter: Send + Sync {
     fn rename(&self, tab: &str, label: &str) -> Result<(), PaintError>;
     /// Every tab herdr knows about, as (tab_id, label).
     fn tabs(&self) -> Result<Vec<(String, String)>, PaintError>;
+    /// The text of herdr's configuration file, or nothing when it cannot be
+    /// located or read. Read once per take, by `resolve`.
+    fn herdr_configuration(&self) -> Option<String>;
+}
+
+/// The line herdr-radar opens its managed sidebar block with. The block is in
+/// herdr's configuration exactly while the radar draws the agents panel: its
+/// switch back to herdr's own panel removes the block and reloads.
+pub const RADAR_BLOCK: &str = "# >>> herdr-radar sidebar block";
+
+fn radar_owns_sidebar(text: &str) -> bool {
+    text.lines().any(|line| line.trim() == RADAR_BLOCK)
+}
+
+/// The look a take is drawn in. `auto` gives the glyph look beside the radar's
+/// rows, which carry marks of the same kind, and the text look everywhere else
+/// — including where herdr's configuration cannot be found or read, since the
+/// text look is the one that reads correctly on any panel.
+pub fn resolve(style: crate::config::Style, painter: &dyn Painter) -> Look {
+    match style {
+        crate::config::Style::Glyphs => Look::Glyphs,
+        crate::config::Style::Text => Look::Text,
+        crate::config::Style::Auto => match painter.herdr_configuration() {
+            Some(text) if radar_owns_sidebar(&text) => Look::Glyphs,
+            _ => Look::Text,
+        },
+    }
 }
 
 /// The name the token is reported under, and the name the sidebar shows it as.
@@ -296,6 +418,13 @@ impl Painter for HerdrPainter {
             ))),
         }
     }
+
+    fn herdr_configuration(&self) -> Option<String> {
+        match crate::doctor::herdr_config_location() {
+            crate::doctor::Location::Path(path) => std::fs::read_to_string(path).ok(),
+            crate::doctor::Location::Unknown => None,
+        }
+    }
 }
 
 /// How many renewal intervals a token outlives. Three gives an ordinary
@@ -392,8 +521,12 @@ struct Drawn {
     /// herdr does not answer would spend its second attempt immediately and on
     /// nothing.
     answered: bool,
-    /// Which form the next token takes. The tab never carries the blink form.
-    blink: bool,
+    /// How many ticks of this take have been drawn: which frame the next token
+    /// takes. The tab never carries an animated frame.
+    frame: u64,
+    /// The look this take is drawn in, settled on its first tick and kept to
+    /// its end, so a change to herdr's configuration mid-take cannot switch it.
+    look: Option<Look>,
     /// A paint has already failed for this take and been recorded. Renewal
     /// carries on: a token that stopped being renewed because one call failed
     /// would say the take was over while it was still running, and the
@@ -441,14 +574,19 @@ impl Drawn {
                     elapsed_ms: runtime.clock.now().saturating_sub(since),
                 },
             ),
-            crate::daemon::Activity::Working { target, tab, stage } => (
+            crate::daemon::Activity::Working {
                 target,
                 tab,
+                stage,
+                since,
+            } => (target, tab, {
+                // The take's clock, for the same reason as above.
+                let elapsed_ms = runtime.clock.now().saturating_sub(since);
                 match stage {
-                    crate::daemon::Stage::Transcribing => State::Transcribing,
-                    crate::daemon::Stage::Fixing => State::Fixing,
-                },
-            ),
+                    crate::daemon::Stage::Transcribing => State::Transcribing { elapsed_ms },
+                    crate::daemon::Stage::Fixing => State::Fixing { elapsed_ms },
+                }
+            }),
         };
         // A take in a different tab than the one still decorated: that take is
         // over, whether or not anything ever said so, and its tab goes back
@@ -460,33 +598,38 @@ impl Drawn {
         {
             self.finish(painter, runtime);
         }
+        // After the check above: a take that moved to another tab went through
+        // `finish`, which forgets the look, so it is settled again here.
+        let look = *self
+            .look
+            .get_or_insert_with(|| resolve(runtime.ui.style, painter));
         if runtime.ui.sidebar_token {
-            let value = value(&state, self.blink);
+            let value = token(&state, look, self.frame);
             let ttl = interval.saturating_mul(TTL_INTERVALS);
             if let Err(why) = self.answered(painter.token(&target, &value, ttl)) {
                 self.report(runtime, &why);
             }
         }
-        // Flipped whether or not the token was written, so that switching the
-        // sidebar off does not also decide what the blink would have been.
-        self.blink = !self.blink;
+        // Advanced whether or not the token was written, so that switching the
+        // sidebar off does not also decide which frame would have been drawn.
+        self.frame = self.frame.wrapping_add(1);
         if runtime.ui.tab_indicator {
             if let Some(tab) = tab.as_deref() {
-                self.paint_tab(painter, runtime, tab, &state);
+                self.paint_tab(painter, runtime, tab, &state, look);
             }
         }
     }
 
     /// The tab carries the steady form, and is renamed only when that form
-    /// differs from the one last written. In `REC` that comes out as once a
-    /// second, because the clock is in the string; in the other two states as
-    /// once, on entering them.
+    /// differs from the one last written. Every state carries a clock, so that
+    /// comes out as once a second.
     fn paint_tab(
         &mut self,
         painter: &dyn Painter,
         runtime: &crate::daemon::Runtime,
         tab: &str,
         state: &State,
+        look: Look,
     ) {
         if self.decorated.is_none() {
             match self.answered(painter.tabs()) {
@@ -511,7 +654,7 @@ impl Drawn {
         let Some(held) = self.decorated.as_ref() else {
             return;
         };
-        let steady = decorate(&held.original, &value(state, false));
+        let steady = decorate(&held.original, &label(state, look));
         if held.written.as_deref() == Some(steady.as_str()) {
             return;
         }
@@ -538,7 +681,8 @@ impl Drawn {
     /// forever.
     fn finish(&mut self, painter: &dyn Painter, runtime: &crate::daemon::Runtime) {
         self.reported = false;
-        self.blink = false;
+        self.frame = 0;
+        self.look = None;
         let Some(held) = self.decorated.take() else {
             return;
         };
@@ -590,10 +734,11 @@ impl Drawn {
     fn sweep_tabs(&mut self, painter: &dyn Painter) -> Result<(), PaintError> {
         let mut refused = None;
         for (tab, label) in self.answered(painter.tabs())? {
-            if !label.contains(MARKER) {
+            let stripped = strip(&label);
+            if stripped == label {
                 continue;
             }
-            if let Err(why) = self.answered(painter.rename(&tab, &strip(&label))) {
+            if let Err(why) = self.answered(painter.rename(&tab, &stripped)) {
                 refused.get_or_insert(why);
             }
         }
@@ -672,6 +817,8 @@ pub mod tests_support {
         tabs_failing: bool,
         /// Renaming any tab named here fails; the rest succeed.
         refused_renames: Vec<String>,
+        /// What `herdr_configuration()` answers.
+        configuration: Option<String>,
     }
 
     /// Records every call in order and answers what it was told to.
@@ -732,6 +879,12 @@ pub mod tests_support {
         /// among tabs it will.
         pub fn refuse_rename_of(&self, tab: &str) {
             self.0.lock().unwrap().refused_renames.push(tab.to_string());
+        }
+
+        /// What herdr's configuration file says from now on; `None` is a file
+        /// that cannot be found or read.
+        pub fn set_configuration(&self, text: Option<&str>) {
+            self.0.lock().unwrap().configuration = text.map(str::to_string);
         }
 
         /// Change a label behind the painter's back, as a person renaming a tab
@@ -823,6 +976,12 @@ pub mod tests_support {
             }
             Ok(inner.labels.clone())
         }
+
+        /// Not a call to herdr, so not recorded: the drawing tests count the
+        /// calls that paint or list.
+        fn herdr_configuration(&self) -> Option<String> {
+            self.0.lock().unwrap().configuration.clone()
+        }
     }
 }
 
@@ -831,88 +990,138 @@ mod tests {
     use super::*;
     use crate::ptt::Clock;
 
-    #[test]
-    fn the_three_states_read_as_the_owner_settled_them() {
-        assert_eq!(
-            value(&State::Recording { elapsed_ms: 5_000 }, false),
-            "🎙️🔴 REC 0:05"
-        );
-        assert_eq!(value(&State::Transcribing, false), "🎙️📝 TRANSCR");
-        assert_eq!(value(&State::Fixing, false), "🎙️🪄 FIX");
+    fn rec(seconds: u64) -> State {
+        State::Recording {
+            elapsed_ms: seconds * 1_000,
+        }
     }
 
-    /// The columns a value occupies in a terminal grid.
-    ///
-    /// No width crate is in the tree and this does not need one: a value is
-    /// made of ASCII text, the pictographs in U+1F300..=U+1FAFF, the variation
-    /// selector U+FE0F that follows the marker, and the blank the blink form
-    /// puts where the icon was. A terminal lays out a fixed grid by East Asian
-    /// Width: the pictographs and U+3000 are Wide and cover two columns, ASCII
-    /// is Narrow and covers one, and a variation selector is a combining mark
-    /// and covers none. Which table herdr's own renderer consults has not been
-    /// established; East Asian Width is the rule a terminal grid follows, and
-    /// it is the rule asserted here.
-    fn columns(value: &str) -> usize {
-        value
-            .chars()
+    fn transcr(seconds: u64) -> State {
+        State::Transcribing {
+            elapsed_ms: seconds * 1_000,
+        }
+    }
+
+    fn fix(seconds: u64) -> State {
+        State::Fixing {
+            elapsed_ms: seconds * 1_000,
+        }
+    }
+
+    #[test]
+    fn the_glyph_look_pulses_the_recording_mark_and_spins_the_working_ones() {
+        let frames = |state: &State| -> Vec<String> {
+            (0..9).map(|n| token(state, Look::Glyphs, n)).collect()
+        };
+        assert_eq!(
+            frames(&rec(5)),
+            [
+                "● REC 0:05",
+                "○ REC 0:05",
+                "● REC 0:05",
+                "○ REC 0:05",
+                "● REC 0:05",
+                "○ REC 0:05",
+                "● REC 0:05",
+                "○ REC 0:05",
+                "● REC 0:05"
+            ]
+        );
+        assert_eq!(
+            frames(&transcr(3)),
+            [
+                "⣷ TRANSCR 0:03",
+                "⣯ TRANSCR 0:03",
+                "⣟ TRANSCR 0:03",
+                "⡿ TRANSCR 0:03",
+                "⢿ TRANSCR 0:03",
+                "⣻ TRANSCR 0:03",
+                "⣽ TRANSCR 0:03",
+                "⣾ TRANSCR 0:03",
+                "⣷ TRANSCR 0:03"
+            ]
+        );
+        assert_eq!(frames(&fix(2))[0], "⣷ FIX 0:02");
+        assert_eq!(frames(&fix(2))[7], "⣾ FIX 0:02");
+        assert_eq!(label(&rec(5), Look::Glyphs), "● REC 0:05");
+        assert_eq!(label(&transcr(3), Look::Glyphs), "⋯ TRANSCR 0:03");
+        assert_eq!(label(&fix(2), Look::Glyphs), "⋯ FIX 0:02");
+    }
+
+    #[test]
+    fn auto_draws_glyphs_only_where_the_radar_owns_the_agents_panel() {
+        use crate::config::Style;
+        let painter = RecordingPainter::ok();
+        // An explicit style never reads herdr's configuration.
+        painter.set_configuration(Some(RADAR_BLOCK));
+        assert_eq!(resolve(Style::Text, &painter), Look::Text);
+        painter.set_configuration(None);
+        assert_eq!(resolve(Style::Glyphs, &painter), Look::Glyphs);
+        // `auto` follows the radar's managed block.
+        for (configuration, look) in [
+            (
+                Some("[ui]\n# >>> herdr-radar sidebar block\n[ui.sidebar.agents]\n"),
+                Look::Glyphs,
+            ),
+            (Some("  # >>> herdr-radar sidebar block  \n"), Look::Glyphs),
+            (Some("[ui]\nstatus_indicators = \"dots\"\n"), Look::Text),
+            (Some("# >>> herdr-radar tab-bar block\n"), Look::Text),
+            (None, Look::Text),
+        ] {
+            painter.set_configuration(configuration);
+            assert_eq!(resolve(Style::Auto, &painter), look, "{configuration:?}");
+        }
+    }
+
+    #[test]
+    fn the_text_look_is_the_word_and_the_clock_and_blinks_the_colon() {
+        for (state, steady, dark) in [
+            (rec(5), "REC 0:05", "REC 0 05"),
+            (transcr(3), "TRANSCR 0:03", "TRANSCR 0 03"),
+            (fix(62), "FIX 1:02", "FIX 1 02"),
+        ] {
+            let frames: Vec<String> = (0..4).map(|n| token(&state, Look::Text, n)).collect();
+            assert_eq!(frames, [steady, dark, steady, dark], "{state:?}");
+            assert_eq!(label(&state, Look::Text), steady, "{state:?}");
+        }
+    }
+
+    /// No width crate is in the tree and this needs none: every character a
+    /// form may contain is listed here, and each covers one column of a
+    /// terminal grid — ASCII is Narrow, the braille cells are Narrow, and `●`,
+    /// `○` and `⋯` are Ambiguous, which a terminal draws one column wide unless
+    /// it is set to treat Ambiguous as Wide, in which case all three widen
+    /// together and every pair below still matches. Anything else fails the
+    /// test, so a new character cannot slip in unmeasured.
+    fn cells(form: &str) -> usize {
+        form.chars()
             .map(|glyph| match glyph {
-                '\u{fe0f}' => 0,
-                '\u{3000}' => 2,
-                '\u{1f300}'..='\u{1faff}' => 2,
-                _ => 1,
+                ' '..='~' => 1,
+                '●' | '○' | '⋯' => 1,
+                '⣷' | '⣯' | '⣟' | '⡿' | '⢿' | '⣻' | '⣽' | '⣾' => 1,
+                other => panic!("a character this test has not measured: {other:?}"),
             })
             .sum()
     }
 
     #[test]
-    fn the_blink_form_keeps_the_width_of_the_steady_form_and_loses_only_the_ink() {
-        assert_eq!(
-            value(&State::Recording { elapsed_ms: 5_000 }, true),
-            "🎙️　 REC 0:05"
-        );
-        assert_eq!(value(&State::Transcribing, true), "🎙️　 TRANSCR");
-        assert_eq!(value(&State::Fixing, true), "🎙️　 FIX");
-
-        // What the sidebar sees is a grid of cells. The blink must change what
-        // is in the second cell pair and nothing else: same width, so nothing
-        // to the right of it moves, and the same text after it.
-        for state in [
-            State::Recording { elapsed_ms: 5_000 },
-            State::Transcribing,
-            State::Fixing,
-        ] {
-            let steady = value(&state, false);
-            let blink = value(&state, true);
-            assert_ne!(steady, blink, "the blink must show: {state:?}");
-            assert_eq!(
-                columns(&steady),
-                columns(&blink),
-                "the forms differ in width, so the text moves on every tick: \
-                 {steady:?} against {blink:?}"
-            );
-            let after_the_glyph =
-                |form: &str| form[MARKER.len()..].chars().skip(1).collect::<String>();
-            assert_eq!(
-                after_the_glyph(&steady),
-                after_the_glyph(&blink),
-                "only the glyph may differ: {steady:?} against {blink:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn both_forms_begin_with_the_marker_the_sweep_cuts_from() {
-        for blink in [false, true] {
-            for state in [
-                State::Recording { elapsed_ms: 0 },
-                State::Transcribing,
-                State::Fixing,
-            ] {
-                assert!(
-                    value(&state, blink).starts_with(MARKER),
-                    "the sweep finds nothing without it: {:?} blink={blink}",
-                    state
-                );
+    fn no_frame_moves_the_text_and_no_form_carries_an_emoji() {
+        for look in [Look::Glyphs, Look::Text] {
+            for state in [rec(5), transcr(3), fix(2), rec(600)] {
+                let frames: Vec<String> = (0..8).map(|n| token(&state, look, n)).collect();
+                let tab = label(&state, look);
+                for form in frames.iter().chain(std::iter::once(&tab)) {
+                    assert_eq!(form.chars().count(), frames[0].chars().count(), "{form:?}");
+                    assert_eq!(cells(form), cells(&frames[0]), "{form:?}");
+                    assert!(
+                        !form.starts_with(char::is_whitespace)
+                            && !form.ends_with(char::is_whitespace),
+                        "herdr trims a blank off either end: {form:?}"
+                    );
+                    for banned in ["🎙", "\u{fe0f}", "\u{3000}", "🔴", "📝", "🪄"] {
+                        assert!(!form.contains(banned), "{banned:?} in {form:?}");
+                    }
+                }
             }
         }
     }
@@ -929,21 +1138,41 @@ mod tests {
 
     #[test]
     fn decorating_and_stripping_are_inverses() {
-        for original in ["1", "", "review", "a name with spaces", "1 🎙 not ours"] {
-            let decorated = decorate(original, "🎙️🔴 REC 0:05");
-            assert_eq!(
-                strip(&decorated),
-                original,
-                "round trip failed for {original:?}"
-            );
+        let mut suffixes = vec!["🎙️🔴 REC 0:05".to_string(), "🎙️📝 TRANSCR".to_string()];
+        for look in [Look::Glyphs, Look::Text] {
+            for state in [rec(5), transcr(3), fix(2), rec(3_725)] {
+                suffixes.push(label(&state, look));
+            }
+        }
+        for suffix in &suffixes {
+            for original in ["1", "", "review", "a name with spaces", "1 🎙 not ours"] {
+                let decorated = decorate(original, suffix);
+                assert_eq!(
+                    strip(&decorated),
+                    original,
+                    "round trip failed for {original:?} with {suffix:?}"
+                );
+            }
         }
     }
 
     #[test]
     fn stripping_a_label_nobody_decorated_leaves_it_alone() {
-        assert_eq!(strip("1"), "1");
-        assert_eq!(strip(""), "");
-        assert_eq!(strip("[thing] name"), "[thing] name");
+        for label in [
+            "1",
+            "",
+            "[thing] name",
+            "REC notes",
+            "build 1:05",
+            "xREC 0:05",
+            "api REC 0:5",
+            "api REC 0:055",
+            "api FIX 0:02 later",
+            "api FIX :02",
+            "api ⋯TRANSCR 0:03",
+        ] {
+            assert_eq!(strip(label), label, "{label:?}");
+        }
     }
 
     #[test]
@@ -1498,20 +1727,15 @@ mod tests {
             })
             .collect();
         assert_eq!(values.len(), 4, "one token per tick: {values:?}");
-        assert!(
-            values[0].contains('🔴') != values[1].contains('🔴'),
-            "it alternates: {values:?}"
-        );
-        assert!(
-            values[0].contains('🔴') == values[2].contains('🔴'),
-            "and alternates back: {values:?}"
-        );
+        assert!(values[0] != values[1], "it alternates: {values:?}");
+        assert!(values[0] == values[2], "and alternates back: {values:?}");
         for value in &values {
             assert!(
-                value.starts_with(MARKER),
-                "every form carries the marker: {value:?}"
+                !value.starts_with(char::is_whitespace),
+                "no form begins with a blank herdr would trim: {value:?}"
             );
         }
+        assert_eq!(values, ["REC 0:00", "REC 0 00", "REC 0:00", "REC 0 00"]);
         d.stop();
     }
 
@@ -1600,31 +1824,111 @@ mod tests {
         d.tick(1);
         let renames = d.painter.renames();
         assert_eq!(renames.len(), 2, "{renames:?}");
-        assert!(
-            renames[1].1.ends_with("REC 0:01"),
-            "the clock moved: {:?}",
-            renames[1].1
+        assert_eq!(
+            renames[1].1, "1 REC 0:01",
+            "the clock moved, in the steady form, as a suffix"
         );
-        assert!(
-            renames[1].1.starts_with("1 🎙️🔴"),
-            "steady form, and a suffix: {:?}",
-            renames[1].1
+        d.stop();
+    }
+
+    fn working(stage: crate::daemon::Stage) -> crate::daemon::Activity {
+        crate::daemon::Activity::Working {
+            target: "w1:p1".into(),
+            tab: Some("w1:t1".into()),
+            stage,
+            since: 0,
+        }
+    }
+
+    #[test]
+    fn the_sweep_takes_off_a_suffix_in_the_new_forms_and_leaves_other_tabs_alone() {
+        let d = Drawing::start(RecordingPainter::with_tabs(&[
+            ("w1:t1", "1 REC 0:12"),
+            ("w1:t2", "review ⋯ TRANSCR 0:03"),
+            ("w1:t3", "notes"),
+        ]));
+        d.tick_quiet(1);
+        assert_eq!(
+            d.painter.renames(),
+            [
+                ("w1:t1".to_string(), "1".to_string()),
+                ("w1:t2".to_string(), "review".to_string())
+            ]
         );
         d.stop();
     }
 
     #[test]
-    fn a_state_with_no_clock_renames_the_tab_once_and_then_leaves_it() {
+    fn the_glyph_look_pulses_while_recording_and_spins_while_working() {
+        let ui = Ui {
+            style: crate::config::Style::Glyphs,
+            ..Ui::default()
+        };
+        let d = Drawing::with_ui(RecordingPainter::with_tabs(&[("w1:t1", "1")]), ui);
+        d.set(recording("w1:p1", "w1:t1", 0));
+        d.tick(2);
+        assert_eq!(d.painter.tokens(), ["● REC 0:00", "○ REC 0:00"]);
+        assert_eq!(d.painter.renames()[0].1, "1 ● REC 0:00");
+        // A take goes from recording to transcribing with no idle between; the
+        // spinner carries on from the take's frame count.
+        d.set(working(crate::daemon::Stage::Transcribing));
+        d.tick(3);
+        assert_eq!(
+            d.painter.tokens()[2..],
+            ["⣟ TRANSCR 0:00", "⡿ TRANSCR 0:00", "⢿ TRANSCR 0:00"]
+        );
+        assert_eq!(d.painter.renames().last().unwrap().1, "1 ⋯ TRANSCR 0:00");
+        d.stop();
+    }
+
+    #[test]
+    fn auto_settles_the_look_once_per_take() {
+        let painter = RecordingPainter::with_tabs(&[("w1:t1", "1")]);
+        painter.set_configuration(Some(RADAR_BLOCK));
+        let d = Drawing::start(painter);
+        d.set(working(crate::daemon::Stage::Transcribing));
+        d.tick(1);
+        // The radar's block goes away in the middle of the take.
+        d.painter.set_configuration(None);
+        d.tick(2);
+        assert_eq!(
+            d.painter.tokens(),
+            ["⣷ TRANSCR 0:00", "⣯ TRANSCR 0:00", "⣟ TRANSCR 0:00"],
+            "the take keeps the look it began with"
+        );
+        d.set(crate::daemon::Activity::Idle);
+        d.tick(1);
+        d.set(working(crate::daemon::Stage::Fixing));
+        d.tick(1);
+        assert_eq!(
+            d.painter.tokens().last().unwrap(),
+            "FIX 0:00",
+            "the next take reads the configuration again"
+        );
+        d.stop();
+    }
+
+    #[test]
+    fn the_tab_is_renamed_when_a_working_stages_clock_moves() {
         let d = Drawing::start(RecordingPainter::with_tabs(&[("w1:t1", "1")]));
         d.set(crate::daemon::Activity::Working {
             target: "w1:p1".into(),
             tab: Some("w1:t1".into()),
             stage: crate::daemon::Stage::Transcribing,
+            since: 0,
         });
         d.tick(5);
         let renames = d.painter.renames();
-        assert_eq!(renames.len(), 1, "nothing in TRANSCR changes: {renames:?}");
-        assert_eq!(renames[0].1, "1 🎙️📝 TRANSCR");
+        assert_eq!(renames.len(), 1, "the clock has not moved: {renames:?}");
+        assert_eq!(renames[0].1, "1 TRANSCR 0:00");
+        d.take_clock.advance(1_000);
+        d.tick(1);
+        let renames = d.painter.renames();
+        assert_eq!(renames.len(), 2, "{renames:?}");
+        assert_eq!(
+            renames[1].1, "1 TRANSCR 0:01",
+            "the stage counts its own time"
+        );
         d.stop();
     }
 
@@ -1658,7 +1962,7 @@ mod tests {
             painter
                 .renames()
                 .last()
-                .is_some_and(|(_, label)| label.contains(MARKER)),
+                .is_some_and(|(_, label)| strip(label) != *label),
             "the tab is decorated before the daemon stops: {:?}",
             painter.renames()
         );
@@ -1724,11 +2028,7 @@ mod tests {
         let d = Drawing::start(RecordingPainter::with_tabs(&[("w1:t1", "")]));
         d.set(recording("w1:p1", "w1:t1", 0));
         d.tick(1);
-        assert_eq!(
-            d.painter.renames()[0].1,
-            "🎙️🔴 REC 0:00",
-            "no leading space"
-        );
+        assert_eq!(d.painter.renames()[0].1, "REC 0:00", "no leading space");
         d.set(crate::daemon::Activity::Idle);
         d.tick(1);
         assert_eq!(
@@ -1784,9 +2084,12 @@ mod tests {
         d.set(recording("w1:p1", "w1:t1", 0));
         // Five drawing ticks, no time passing for the take: the number must not move.
         d.tick(5);
+        // The colon blinks in the text look, so the clock is compared with the
+        // colon read as a space.
+        let clock = |call: &str| call.replace(':', " ");
         for call in d.painter.tokens() {
             assert!(
-                call.contains("0:00"),
+                clock(&call).contains("0 00"),
                 "the drawing clock must not be the elapsed clock: {call:?}"
             );
         }
@@ -1794,7 +2097,7 @@ mod tests {
         d.take_clock.advance(7_000);
         d.tick(1);
         assert!(
-            d.painter.tokens().last().unwrap().contains("0:07"),
+            clock(d.painter.tokens().last().unwrap()).contains("0 07"),
             "and the take's clock must be: {:?}",
             d.painter.tokens().last()
         );
@@ -2047,7 +2350,7 @@ mod tests {
             d.painter
                 .renames()
                 .iter()
-                .all(|(_, label)| label.contains(MARKER)),
+                .all(|(_, label)| strip(label) != *label),
             "a sweep during a take strips its own fresh decoration: {:?}",
             d.painter.renames()
         );
