@@ -3027,6 +3027,25 @@ the check above confirms the fix on the real binary.
    is written, that a running daemon reports `needs a restart: rewrite`, and that the model list is
    fetched with one `GET`.
 
+## The `[rewrite] thinking` key
+
+Checked on macOS against a local OpenAI-compatible server (LM Studio) serving a Gemma 4 model that
+reasons by default. Request: the plugin's own `HttpEngine::rewrite` with its shipped system prompt, the
+transcript "привет как дела что нового у нас в проекте cargo test упал на clippy" and the bias
+"cargo clippy", run from a throwaway test against the live server.
+
+| `thinking` | Request carries | Seconds | Result |
+|---|---|---|---|
+| `true` (default) | no reasoning field | 4.78 | `Ok`, text returned unchanged |
+| `false` | `"reasoning_effort": "none"` | 0.25 | `Ok`, text returned with the capital letter |
+
+With a bare `curl` on the same server and a 300-token limit, `"reasoning_effort": "none"` brought the
+reasoning tokens from 297 to 0. `chat_template_kwargs.enable_thinking = false`, `reasoning.effort = "none"`,
+`enable_thinking = false` at the top level and `"reasoning_effort": "low"` left them at 297.
+
+Not verified: a take through the installed plugin and herdr; the plugin was not rebuilt or restarted
+for this check. Other servers and models were not tried.
+
 ## The glyph look and the text look of the indicator, by hand on macOS
 
 Run on 2026-11-16 on macOS 27.2, arm64, herdr 0.9.5, with the release binary built

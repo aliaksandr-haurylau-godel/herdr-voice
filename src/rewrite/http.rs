@@ -96,6 +96,9 @@ pub struct HttpEngine {
     url: String,
     token: String,
     model: String,
+    /// `false` adds `"reasoning_effort": "none"` to the request body; `true`
+    /// sends nothing, so the server keeps its own default.
+    thinking: bool,
     /// The bound the agent below was built with, kept so a timeout's message can
     /// name it. `new` passes `TIMEOUT`; a test passes a shorter one.
     timeout: Duration,
@@ -125,9 +128,17 @@ impl HttpEngine {
             url,
             token,
             model,
+            thinking: true,
             timeout,
             agent,
         }
+    }
+
+    /// Sets whether the model may reason before it answers. The default is
+    /// `true`, which sends no reasoning field at all.
+    pub fn with_thinking(mut self, thinking: bool) -> HttpEngine {
+        self.thinking = thinking;
+        self
     }
 }
 
@@ -142,12 +153,28 @@ pub enum HttpError {
         url: String,
         detail: String,
     },
+    /// The server refused, with a 4xx status, a request that carried
+    /// `"reasoning_effort": "none"` because `[rewrite] thinking = false`. Kept
+    /// apart from `Failed` so the message can name the key as a likely cause:
+    /// the field is verified against one server only, and a stricter one may
+    /// reject it.
+    RefusedWithoutReasoning {
+        url: String,
+        cause: Cause,
+    },
 }
 
 impl fmt::Display for HttpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             HttpError::Failed { url, cause } => write!(f, "{}", cause.describe(url)),
+            HttpError::RefusedWithoutReasoning { url, cause } => write!(
+                f,
+                "{}; the request carried \"reasoning_effort\": \"none\" because \
+                 [rewrite] thinking = false, and a server that does not accept that \
+                 field refuses the request — set thinking = true if this persists",
+                cause.describe(url)
+            ),
             HttpError::Unreadable { url, detail } => write!(
                 f,
                 "{url:?} answered with something this could not read: {detail}"
@@ -165,7 +192,7 @@ impl HttpEngine {
         } else {
             format!("{PROMPT}\n\nRecent context: {bias}")
         };
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -173,15 +200,30 @@ impl HttpEngine {
             ],
             "temperature": 0,
         });
+        if !self.thinking {
+            // The one spelling LM Studio honours for a model that reasons by
+            // default; `chat_template_kwargs` and `reasoning.effort` are
+            // accepted and ignored there (`docs/evidence.md`, "The
+            // `[rewrite] thinking` key").
+            body["reasoning_effort"] = serde_json::json!("none");
+        }
 
         let mut request = self.agent.post(&self.url);
         if !self.token.is_empty() {
             request = request.set("Authorization", &format!("Bearer {}", self.token));
         }
 
-        let response = request.send_json(body).map_err(|e| HttpError::Failed {
-            url: self.url.clone(),
-            cause: Cause::from_ureq(e, self.timeout),
+        let response = request.send_json(body).map_err(|e| {
+            let cause = Cause::from_ureq(e, self.timeout);
+            let url = self.url.clone();
+            match cause {
+                Cause::Answered { status, .. }
+                    if !self.thinking && (400..500).contains(&status) =>
+                {
+                    HttpError::RefusedWithoutReasoning { url, cause }
+                }
+                cause => HttpError::Failed { url, cause },
+            }
         })?;
 
         // Unbounded, as `into_json` was: `into_string` would stop at 10 MB.
@@ -435,6 +477,31 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_of_a_request_without_reasoning_names_the_key() {
+        // A server that does not accept `reasoning_effort` answers 4xx; the
+        // message must say which key put the field there and what to set.
+        let (url, handle) =
+            respond_once_with_status("400 Bad Request", r#"{"error":"unknown field"}"#);
+        let engine =
+            HttpEngine::new(url.clone(), String::new(), String::new()).with_thinking(false);
+        let said = engine.rewrite("x", "").expect_err("must fail").to_string();
+        assert!(said.contains(&url), "got {said}");
+        assert!(
+            said.contains("[rewrite] thinking = false") && said.contains("thinking = true"),
+            "got {said}"
+        );
+        handle.join().expect("server thread");
+
+        // The same refusal with the default sends no such field, so says nothing of it.
+        let (url, handle) =
+            respond_once_with_status("400 Bad Request", r#"{"error":"unknown field"}"#);
+        let engine = HttpEngine::new(url, String::new(), String::new());
+        let said = engine.rewrite("x", "").expect_err("must fail").to_string();
+        assert!(!said.contains("thinking"), "got {said}");
+        handle.join().expect("server thread");
+    }
+
+    #[test]
     fn a_response_with_no_readable_content_is_a_failure() {
         // Well-formed JSON, but no choices — one of the shapes an
         // OpenAI-compatible server can send back on top of a 200 without
@@ -631,6 +698,29 @@ mod tests {
         // empty content with finish_reason "length". The plugin sends none,
         // and that is load-bearing.
         assert!(body.get("max_tokens").is_none(), "got {body}");
+    }
+
+    #[test]
+    fn the_request_asks_for_no_reasoning_only_when_thinking_is_turned_off() {
+        let (url, handle) = respond_once(r#"{"choices":[{"message":{"content":"x"}}]}"#);
+        let engine = HttpEngine::new(url, String::new(), "local-model".to_string());
+        engine.rewrite("x", "").expect("text");
+        let body = body_of(&handle.join().expect("server thread"));
+        assert!(body.get("reasoning_effort").is_none(), "got {body}");
+
+        let (url, handle) = respond_once(r#"{"choices":[{"message":{"content":"x"}}]}"#);
+        let engine =
+            HttpEngine::new(url, String::new(), "local-model".to_string()).with_thinking(false);
+        engine.rewrite("x", "").expect("text");
+        let body = body_of(&handle.join().expect("server thread"));
+        assert_eq!(body["reasoning_effort"], "none", "got {body}");
+
+        let (url, handle) = respond_once(r#"{"choices":[{"message":{"content":"x"}}]}"#);
+        let engine =
+            HttpEngine::new(url, String::new(), "local-model".to_string()).with_thinking(true);
+        engine.rewrite("x", "").expect("text");
+        let body = body_of(&handle.join().expect("server thread"));
+        assert!(body.get("reasoning_effort").is_none(), "got {body}");
     }
 
     #[test]

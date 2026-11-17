@@ -88,11 +88,14 @@ pub fn resolve(rewrite: &crate::config::Rewrite) -> Resolution {
              post to."
                 .to_string(),
         ),
-        "http" => Resolution::Engine(Box::new(http::HttpEngine::new(
-            rewrite.url.clone(),
-            rewrite.token.clone(),
-            rewrite.model.clone(),
-        ))),
+        "http" => Resolution::Engine(Box::new(
+            http::HttpEngine::new(
+                rewrite.url.clone(),
+                rewrite.token.clone(),
+                rewrite.model.clone(),
+            )
+            .with_thinking(rewrite.thinking),
+        )),
         "command" if rewrite.command.is_empty() => Resolution::Unavailable(
             "[rewrite] engine = \"command\" but [rewrite] command is empty, so there is \
              nothing to run."
