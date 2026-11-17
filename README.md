@@ -75,8 +75,10 @@ the file.
 A rewrite model that reasons before it answers (some local models do by default) can
 take several seconds for a short transcript. For `[rewrite] engine = "http"`, set
 `thinking = false` in `[rewrite]` and the request carries `"reasoning_effort": "none"`;
-the default, `true`, sends no such field and the server decides. A server that does not
-know the field ignores it.
+the default, `true`, sends no such field and the server decides. The field has been
+checked against LM Studio only; a server that does not accept it refuses the request,
+the take falls back to the unrewritten text, and the message names this key — set it
+back to `true`.
 
 If you used this plugin before its id became `herdr-voice`, your bindings name
 an id that no longer exists and the keys do nothing. The daemon says so once
