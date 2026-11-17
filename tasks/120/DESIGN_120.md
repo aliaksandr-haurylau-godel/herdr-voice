@@ -1,6 +1,6 @@
-# DESIGN_indicator-glyphs
+# DESIGN_120
 
-Built from `AC_indicator-glyphs.md`. Each decision: context, problem, decision, why.
+Built from `AC_120.md`. Each decision: context, problem, decision, why.
 
 ## 1. Two looks, one key
 

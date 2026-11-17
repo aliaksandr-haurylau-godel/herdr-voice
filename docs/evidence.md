@@ -3030,7 +3030,7 @@ the check above confirms the fix on the real binary.
 ## The glyph look and the text look of the indicator, by hand on macOS
 
 Run on 2026-11-16 on macOS 27.2, arm64, herdr 0.9.5, with the release binary built
-from branch `feat/indicator-glyphs` (commit `be32710` plus the documentation fixes of
+from branch `feat/120-indicator-glyphs` (commit `be32710` plus the documentation fixes of
 its review, which change no code). Nothing of the machine's own installation was
 touched: the checkout was not linked, the plugin in use was not restarted, and each
 run used a configuration directory and a state directory of its own. The daemon was
@@ -3121,7 +3121,7 @@ read the rule keys; `starts_with` and `contains` are accepted by herdr 0.9.5.
 ## The glyph look with one mark per stage, by hand on macOS
 
 Run on 2026-11-17 on macOS 27.2, arm64, herdr 0.9.5, with the release binary built
-from branch `feat/indicator-glyphs` at `7d1d43b` plus its review fixes (two test cases
+from branch `feat/120-indicator-glyphs` at `7d1d43b` plus its review fixes (two test cases
 and two rewrapped comments). The method is the one of the section above: a daemon
 started by hand with its own configuration and state directories, two `dictate`
 requests naming a pane in a tab opened for the check and closed afterwards, `command`

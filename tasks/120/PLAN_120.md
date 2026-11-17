@@ -1,7 +1,7 @@
-# PLAN_indicator-glyphs
+# PLAN_120
 
-Built from `DESIGN_indicator-glyphs.md`. Work in the worktree `worktrees/glyphs` on
-branch `feat/indicator-glyphs`. Each task: write the failing test first, see it
+Built from `DESIGN_120.md`. Work in the worktree `worktrees/glyphs` on
+branch `feat/120-indicator-glyphs`. Each task: write the failing test first, see it
 fail, make it pass, then `cargo test` for the touched module. One cargo at a time,
 `CARGO_BUILD_JOBS=6`.
 
