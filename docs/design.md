@@ -303,24 +303,26 @@ looks, chosen by `[ui] style`:
 
 | state | glyphs: token | glyphs: tab | text: token | text: tab |
 |---|---|---|---|---|
-| recording | `● REC 0:05` ↔ `○ REC 0:05` | `● REC 0:05` | `REC 0:05` ↔ `REC 0 05` | `REC 0:05` |
-| transcribing | `⣷ TRANSCR 0:03`, spinning | `⋯ TRANSCR 0:03` | `TRANSCR 0:03` ↔ `TRANSCR 0 03` | `TRANSCR 0:03` |
-| fixing | `⣷ FIX 0:02`, spinning | `⋯ FIX 0:02` | `FIX 0:02` ↔ `FIX 0 02` | `FIX 0:02` |
+| recording | `● 0:05` ↔ `○ 0:05` | `● 0:05` | `REC 0:05` ↔ `REC 0 05` | `REC 0:05` |
+| transcribing | `✎ 0:03` ↔ `✐ 0:03` | `✎ 0:03` | `TRANSCR 0:03` ↔ `TRANSCR 0 03` | `TRANSCR 0:03` |
+| fixing | `✦ 0:02` ↔ `✧ 0:02` | `✦ 0:02` | `FIX 0:02` ↔ `FIX 0 02` | `FIX 0:02` |
 
-The glyph look puts a one-cell mark in front of the word: a dot that pulses
-between `●` and `○` while recording, and an eight-dot braille spinner
-(`⣷ ⣯ ⣟ ⡿ ⢿ ⣻ ⣽ ⣾`) while the take is transcribed or fixed. These are marks of
-the kind the herdr-radar plugin draws in front of an agent's title, and none of
-them is an emoji: an emoji is drawn in its own colours, two cells wide, while
-these take the colour the row gives them. The text look is the word and the clock
+The glyph look says the state with a mark instead of the word: a dot while
+recording, a pencil while transcribing, a star while fixing, each followed by the
+clock. On the token the mark alternates with its hollow twin — `●`/`○`, `✎`/`✐`,
+`✦`/`✧` — so the row shows that the take is alive; the tab carries the filled mark.
+These are marks of the kind the herdr-radar plugin draws in front of an agent's
+title, and none of them has an emoji presentation: an emoji is drawn in its own
+colours, two cells wide, while these take the colour the row gives them. The text
+look is the word and the clock
 alone. Its blink is the colon turning into a space, so no form begins or ends
 with a blank — herdr trims whitespace off either end of a token value, and the
 width would change with it.
 
-Each animation changes one character for another of the same width: `●` and `○`,
-the braille cells, the colon and the space. By East Asian Width the colon and the
-space are Narrow and the braille cells and `⋯` are Neutral, all drawn one cell
-wide; `●` and `○` are Ambiguous, which a terminal draws one cell wide unless it is
+Each animation changes one character for another of the same width: a filled mark
+for its hollow twin, or the colon for a space. By East Asian Width the colon and
+the space are Narrow and `✎ ✐ ✦ ✧` are Neutral, all drawn one cell wide; `●` and
+`○` are Ambiguous, which a terminal draws one cell wide unless it is
 set to draw Ambiguous characters wide, in which case both widen together. The text
 after the mark never moves.
 
@@ -352,8 +354,12 @@ rows = [["state_icon", "workspace", "tab"], [
     { starts_with = "●", fg = "#c04a4a" },
     { starts_with = "○", fg = "#c04a4a" },
     { starts_with = "REC", fg = "#c04a4a" },
-    { contains = "TRANSCR", fg = "#c78a1f" },
-    { contains = "FIX", fg = "#907aa9" },
+    { starts_with = "✎", fg = "#c78a1f" },
+    { starts_with = "✐", fg = "#c78a1f" },
+    { starts_with = "TRANSCR", fg = "#c78a1f" },
+    { starts_with = "✦", fg = "#907aa9" },
+    { starts_with = "✧", fg = "#907aa9" },
+    { starts_with = "FIX", fg = "#907aa9" },
   ] },
 ]]
 ```
@@ -361,8 +367,8 @@ rows = [["state_icon", "workspace", "tab"], [
 A thread of its own does all the drawing. It wakes every `blink_ms`, reads what
 the take path published, and paints; nothing that runs herdr sits between the
 key and the recording. The token is written on every tick, and every tick of a
-take advances its frame by one: the pulse and the colon alternate on it, and the
-spinner steps on it, so the spinner's speed is `blink_ms` too. The tab is renamed
+take advances its frame by one: the marks and the colon alternate on it, so the
+alternation's speed is `blink_ms` too. The tab is renamed
 only when its steady form differs from the one last written there, which, with a
 clock in every state, is once a second.
 
@@ -381,12 +387,12 @@ it is, and that is recorded.
 A daemon that was killed puts nothing back, and the label would otherwise keep a
 recording suffix forever. At start the next daemon lists every tab and takes off
 any suffix this plugin can have written. No form carries a marker, so a suffix is
-recognised by its shape, which is closed: an optional `● ` or `⋯ `, then `REC`,
-`TRANSCR` or `FIX`, a space and a clock, at the very end of the label and either
-the whole label or after a space. Labels left by older daemons, whose forms all
-began with `🎙️`, are cut from that marker. The price of having no marker is that
-a tab a person named, say, `release FIX 1:00`, or a name ending in a lone `●` or
-`⋯` that then carried a text-look suffix, is cleaned up once at daemon start as
+recognised by its shape, which is closed: one of the words `REC`, `TRANSCR`,
+`FIX` or one of the filled marks `●`, `✎`, `✦`, then a space and a clock, at the
+very end of the label and either the whole label or after a space. Labels left by
+older daemons, whose forms all began with `🎙️`, are cut from that marker. The
+price of having no marker is that a tab a person named so that it ends that way —
+say `release FIX 1:00` or `notes ● 1:00` — is cleaned up once at daemon start as
 though a take had left it. The start-up sweep runs whether or not
 the tab indicator is switched on: the key says that this plugin does not decorate,
 and it cannot mean that decorations it left earlier stay forever.

@@ -146,3 +146,26 @@ one-line description of the indicator (`README.md:26-27`) names the two looks.
 - AC-8 change the recording painter's configuration text mid-take; forms stay.
 - AC-9 `strip` on every tab form of both looks, with and without a label before it,
   legacy forms, and labels that merely contain `REC` or end in a time.
+
+## Revision 2 — the glyph look without the word
+
+**Context.** `token` and `label` (section 2) compose a mark, the word and the clock in
+the glyph look; transcribing and fixing share the braille spinner on the token and `⋯`
+on the tab.
+
+**Problem.** Mark and word say the same thing twice, and without the word the two
+working stages would look alike.
+
+**Decision.** In the glyph look each state has a pair of marks, filled and hollow:
+recording `●`/`○`, transcribing `✎`/`✐` (U+270E, U+2710), fixing `✦`/`✧` (U+2726,
+U+2727). The token is `{mark} {clock}` with the filled mark on even frames and the
+hollow one on odd frames; the tab is `{filled} {clock}`. The spinner and `⋯` go. The
+sweep's grammar (section 6) accepts, before the clock's space, either a word (`REC`,
+`TRANSCR`, `FIX`) or one of the filled marks; the suffix is still the whole label or
+follows a space. The colour snippet in `docs/design.md` matches the marks.
+
+**Why.** One sign per state, as the owner asked; the pairs keep the alternation that
+shows the take is alive, and each pair is one width class (`●`/`○` Ambiguous, the four
+dingbats Neutral) with no emoji presentation, so nothing moves and nothing turns into
+a colour picture. The cost added to the sweep: a tab a person named ending in, say,
+`● 1:00` is cleaned up once at daemon start.

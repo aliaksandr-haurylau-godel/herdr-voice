@@ -1,9 +1,9 @@
 //! What the indicator says.
 //!
-//! Three states, two looks. The glyph look puts a one-cell mark in front of
-//! the word — a pulsing dot while recording, a braille spinner while the take
-//! is transcribed or fixed; the text look is the word and the clock alone,
-//! with the colon blinking. The token animates on every tick; the tab label
+//! Three states, two looks. The glyph look is a one-cell mark and the clock —
+//! a dot while recording, a pencil while transcribing, a star while fixing,
+//! each alternating with its hollow twin on the token; the text look is the
+//! word and the clock, with the colon blinking. The token animates on every tick; the tab label
 //! carries the steady form, because a tab bar that changes a character twice a
 //! second is noise where nobody chose to look.
 //!
@@ -33,9 +33,18 @@ pub enum Look {
     Text,
 }
 
-/// The working spinner: eight-dot braille with the gap walking round the
-/// cell. Every frame is one Narrow cell, so the text after it never moves.
-const SPIN: [&str; 8] = ["⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽", "⣾"];
+/// The glyph look's pair of marks for a state: the filled one the tab carries,
+/// and the hollow twin the token alternates with. Each pair is one width class
+/// — `●`/`○` East Asian Ambiguous, the four dingbats Neutral — and none of the
+/// six has an emoji presentation, so a terminal draws them as text in the
+/// row's colour and nothing moves when they alternate.
+fn marks(state: &State) -> (&'static str, &'static str) {
+    match state {
+        State::Recording { .. } => ("●", "○"),
+        State::Transcribing { .. } => ("✎", "✐"),
+        State::Fixing { .. } => ("✦", "✧"),
+    }
+}
 
 /// The word a state is shown as, and how long it has been in it.
 fn word_and_elapsed(state: &State) -> (&'static str, u64) {
@@ -48,9 +57,10 @@ fn word_and_elapsed(state: &State) -> (&'static str, u64) {
 
 /// What the token carries on tick `frame` of a take.
 ///
-/// Every frame of one state has the same characters in the same places except
-/// one, and the two that alternate are always of one width: `●` and `○`, the
-/// braille cells, `:` and a space. No frame begins or ends with a blank,
+/// The glyph look is the stage's mark and the clock, the mark filled on even
+/// frames and hollow on odd ones; the text look is the word and the clock, the
+/// colon turning into a space on odd frames. Either way one character changes
+/// for another of the same width, and no frame begins or ends with a blank,
 /// because herdr trims whitespace off either end of a token value and the
 /// width would change with it.
 pub fn token(state: &State, look: Look, frame: u64) -> String {
@@ -59,18 +69,9 @@ pub fn token(state: &State, look: Look, frame: u64) -> String {
     let odd = frame % 2 == 1;
     match look {
         Look::Glyphs => {
-            let mark = match state {
-                State::Recording { .. } => {
-                    if odd {
-                        "○"
-                    } else {
-                        "●"
-                    }
-                }
-                // `frame % 8` is below eight, so the index is in range.
-                _ => SPIN[(frame % SPIN.len() as u64) as usize],
-            };
-            format!("{mark} {word} {clock}")
+            let (filled, hollow) = marks(state);
+            let mark = if odd { hollow } else { filled };
+            format!("{mark} {clock}")
         }
         Look::Text => {
             let clock = if odd { clock.replace(':', " ") } else { clock };
@@ -81,19 +82,12 @@ pub fn token(state: &State, look: Look, frame: u64) -> String {
 
 /// What the tab suffix carries: the steady form, never animated, because a tab
 /// bar that changes a character twice a second is noise where nobody chose to
-/// look. In the glyph look the working states carry `⋯` rather than a frozen
-/// spinner frame.
+/// look. In the glyph look that is the filled mark and the clock.
 pub fn label(state: &State, look: Look) -> String {
     let (word, elapsed_ms) = word_and_elapsed(state);
     let clock = elapsed(elapsed_ms);
     match look {
-        Look::Glyphs => {
-            let mark = match state {
-                State::Recording { .. } => "●",
-                _ => "⋯",
-            };
-            format!("{mark} {word} {clock}")
-        }
+        Look::Glyphs => format!("{} {clock}", marks(state).0),
         Look::Text => format!("{word} {clock}"),
     }
 }
@@ -133,12 +127,12 @@ pub fn strip(label: &str) -> String {
 
 /// Where a suffix this plugin writes on a tab begins, if the label ends in one.
 ///
-/// The shape is closed: an optional `● ` or `⋯ `, then `REC`, `TRANSCR` or
-/// `FIX`, a space, one or more digits, a colon and exactly two digits, at the
-/// very end. The suffix is the whole label or follows a space. The price of
-/// having no marker is that a tab a person named, say, `release FIX 1:00` is
-/// cleaned up once at daemon start as though a take had left it, and so is a
-/// name ending in a lone `●` or `⋯` that then carried a text-look suffix.
+/// The shape is closed: one of the words `REC`, `TRANSCR`, `FIX` or one of the
+/// filled marks `●`, `✎`, `✦`, then a space, one or more digits, a colon and
+/// exactly two digits, at the very end. The suffix is the whole label or
+/// follows a space. The price of having no marker is that a tab a person named
+/// so that it ends that way — say `release FIX 1:00` or `notes ● 1:00` — is
+/// cleaned up once at daemon start as though a take had left it.
 fn suffix_start(label: &str) -> Option<usize> {
     // The clock, read from the end: two digits, a colon, one or more digits.
     let bytes = label.as_bytes();
@@ -156,19 +150,12 @@ fn suffix_start(label: &str) -> Option<usize> {
     if minutes == n - 3 || minutes == 0 || bytes[minutes - 1] != b' ' {
         return None;
     }
-    // Everything before the clock's space ends with the word.
+    // Everything before the clock's space ends with the word or the mark.
     let before = &label[..minutes - 1];
-    let word = ["TRANSCR", "REC", "FIX"]
+    let sign = ["TRANSCR", "REC", "FIX", "●", "✎", "✦"]
         .into_iter()
-        .find(|word| before.ends_with(word))?;
-    let mut start = before.len() - word.len();
-    // An optional mark and its space in front of the word.
-    for mark in ["● ", "⋯ "] {
-        if label[..start].ends_with(mark) {
-            start -= mark.len();
-            break;
-        }
-    }
+        .find(|sign| before.ends_with(sign))?;
+    let start = before.len() - sign.len();
     if start == 0 || label[..start].ends_with(' ') {
         Some(start)
     } else {
@@ -1010,43 +997,19 @@ mod tests {
     }
 
     #[test]
-    fn the_glyph_look_pulses_the_recording_mark_and_spins_the_working_ones() {
+    fn the_glyph_look_is_a_mark_and_the_clock_and_the_mark_breathes() {
         let frames = |state: &State| -> Vec<String> {
-            (0..9).map(|n| token(state, Look::Glyphs, n)).collect()
+            (0..4).map(|n| token(state, Look::Glyphs, n)).collect()
         };
-        assert_eq!(
-            frames(&rec(5)),
-            [
-                "● REC 0:05",
-                "○ REC 0:05",
-                "● REC 0:05",
-                "○ REC 0:05",
-                "● REC 0:05",
-                "○ REC 0:05",
-                "● REC 0:05",
-                "○ REC 0:05",
-                "● REC 0:05"
-            ]
-        );
+        assert_eq!(frames(&rec(5)), ["● 0:05", "○ 0:05", "● 0:05", "○ 0:05"]);
         assert_eq!(
             frames(&transcr(3)),
-            [
-                "⣷ TRANSCR 0:03",
-                "⣯ TRANSCR 0:03",
-                "⣟ TRANSCR 0:03",
-                "⡿ TRANSCR 0:03",
-                "⢿ TRANSCR 0:03",
-                "⣻ TRANSCR 0:03",
-                "⣽ TRANSCR 0:03",
-                "⣾ TRANSCR 0:03",
-                "⣷ TRANSCR 0:03"
-            ]
+            ["✎ 0:03", "✐ 0:03", "✎ 0:03", "✐ 0:03"]
         );
-        assert_eq!(frames(&fix(2))[0], "⣷ FIX 0:02");
-        assert_eq!(frames(&fix(2))[7], "⣾ FIX 0:02");
-        assert_eq!(label(&rec(5), Look::Glyphs), "● REC 0:05");
-        assert_eq!(label(&transcr(3), Look::Glyphs), "⋯ TRANSCR 0:03");
-        assert_eq!(label(&fix(2), Look::Glyphs), "⋯ FIX 0:02");
+        assert_eq!(frames(&fix(62)), ["✦ 1:02", "✧ 1:02", "✦ 1:02", "✧ 1:02"]);
+        assert_eq!(label(&rec(5), Look::Glyphs), "● 0:05");
+        assert_eq!(label(&transcr(3), Look::Glyphs), "✎ 0:03");
+        assert_eq!(label(&fix(2), Look::Glyphs), "✦ 0:02");
     }
 
     #[test]
@@ -1089,17 +1052,17 @@ mod tests {
 
     /// No width crate is in the tree and this needs none: every character a
     /// form may contain is listed here, and each covers one column of a
-    /// terminal grid — ASCII is Narrow, the braille cells are Narrow, and `●`,
-    /// `○` and `⋯` are Ambiguous, which a terminal draws one column wide unless
-    /// it is set to treat Ambiguous as Wide, in which case all three widen
-    /// together and every pair below still matches. Anything else fails the
-    /// test, so a new character cannot slip in unmeasured.
+    /// terminal grid — ASCII is Narrow, `✎ ✐ ✦ ✧` are Neutral, and `●` and `○`
+    /// are Ambiguous, which a terminal draws one column wide unless it is set
+    /// to treat Ambiguous as Wide, in which case both widen together and every
+    /// pair below still matches. Anything else fails the test, so a new
+    /// character cannot slip in unmeasured.
     fn cells(form: &str) -> usize {
         form.chars()
             .map(|glyph| match glyph {
                 ' '..='~' => 1,
-                '●' | '○' | '⋯' => 1,
-                '⣷' | '⣯' | '⣟' | '⡿' | '⢿' | '⣻' | '⣽' | '⣾' => 1,
+                '●' | '○' => 1,
+                '✎' | '✐' | '✦' | '✧' => 1,
                 other => panic!("a character this test has not measured: {other:?}"),
             })
             .sum()
@@ -1170,7 +1133,9 @@ mod tests {
             "api REC 0:055",
             "api FIX 0:02 later",
             "api FIX :02",
-            "api ⋯TRANSCR 0:03",
+            "api ✎0:03",
+            "api ●0:05",
+            "api ◆ 0:05",
         ] {
             assert_eq!(strip(label), label, "{label:?}");
         }
@@ -1845,7 +1810,7 @@ mod tests {
     fn the_sweep_takes_off_a_suffix_in_the_new_forms_and_leaves_other_tabs_alone() {
         let d = Drawing::start(RecordingPainter::with_tabs(&[
             ("w1:t1", "1 REC 0:12"),
-            ("w1:t2", "review ⋯ TRANSCR 0:03"),
+            ("w1:t2", "review ✎ 0:03"),
             ("w1:t3", "notes"),
         ]));
         d.tick_quiet(1);
@@ -1860,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn the_glyph_look_pulses_while_recording_and_spins_while_working() {
+    fn the_glyph_look_breathes_each_stages_mark() {
         let ui = Ui {
             style: crate::config::Style::Glyphs,
             ..Ui::default()
@@ -1868,17 +1833,14 @@ mod tests {
         let d = Drawing::with_ui(RecordingPainter::with_tabs(&[("w1:t1", "1")]), ui);
         d.set(recording("w1:p1", "w1:t1", 0));
         d.tick(2);
-        assert_eq!(d.painter.tokens(), ["● REC 0:00", "○ REC 0:00"]);
-        assert_eq!(d.painter.renames()[0].1, "1 ● REC 0:00");
+        assert_eq!(d.painter.tokens(), ["● 0:00", "○ 0:00"]);
+        assert_eq!(d.painter.renames()[0].1, "1 ● 0:00");
         // A take goes from recording to transcribing with no idle between; the
-        // spinner carries on from the take's frame count.
+        // alternation carries on from the take's frame count.
         d.set(working(crate::daemon::Stage::Transcribing));
         d.tick(3);
-        assert_eq!(
-            d.painter.tokens()[2..],
-            ["⣟ TRANSCR 0:00", "⡿ TRANSCR 0:00", "⢿ TRANSCR 0:00"]
-        );
-        assert_eq!(d.painter.renames().last().unwrap().1, "1 ⋯ TRANSCR 0:00");
+        assert_eq!(d.painter.tokens()[2..], ["✎ 0:00", "✐ 0:00", "✎ 0:00"]);
+        assert_eq!(d.painter.renames().last().unwrap().1, "1 ✎ 0:00");
         d.stop();
     }
 
@@ -1894,7 +1856,7 @@ mod tests {
         d.tick(2);
         assert_eq!(
             d.painter.tokens(),
-            ["⣷ TRANSCR 0:00", "⣯ TRANSCR 0:00", "⣟ TRANSCR 0:00"],
+            ["✎ 0:00", "✐ 0:00", "✎ 0:00"],
             "the take keeps the look it began with"
         );
         d.set(crate::daemon::Activity::Idle);

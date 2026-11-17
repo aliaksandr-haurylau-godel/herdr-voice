@@ -173,3 +173,30 @@ File: `src/indicator.rs`.
 
 `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`,
 `python3 scripts/check_manifest.py`. All four pass before S4 review.
+
+## Revision 2 — tasks
+
+All in `src/indicator.rs` unless named. Tests first.
+
+1. Tests: replace `the_glyph_look_pulses_the_recording_mark_and_spins_the_working_ones`
+   with exact frames 0..4 for each state per design revision 2 and the three `label`
+   forms; in `cells`, drop the braille cells and `⋯` and add `✎ ✐ ✦ ✧`; add the three
+   glyph tab forms (decorated onto `"api"` and `""`) to
+   `decorating_and_stripping_are_inverses` (it already loops over `label` of both
+   looks, so this needs no change beyond the new forms) and add `"api ●0:05"`,
+   `"api ◆ 0:05"` to the unchanged list; update the drawing tests
+   `the_glyph_look_pulses_while_recording_and_spins_while_working` (expect `● 0:00`,
+   `○ 0:00`, tab `1 ● 0:00`, then `✎ 0:00`, `✐ 0:00`, `✎ 0:00`, tab `1 ✎ 0:00` — the
+   frame count carries on from recording, two ticks there, so the first working frame
+   is frame 2, even) and
+   `auto_settles_the_look_once_per_take` (expect `✎ 0:00`, `✐ 0:00`, `✎ 0:00`), and the
+   new-form sweep test (`"review ✎ 0:03"` instead of `"review ⋯ TRANSCR 0:03"`).
+2. Code: a `fn marks(state) -> (&str, &str)` giving the filled and hollow mark; `token`
+   glyph arm `format!("{mark} {clock}")`; `label` glyph arm `format!("{filled} {clock}")`;
+   remove `SPIN`. `suffix_start`: before the clock's space accept a word or one of `●`,
+   `✎`, `✦`; drop the optional-mark-before-word step.
+3. Docs: `docs/design.md` section 6 table, the paragraphs on the glyph look, width and
+   the sweep, and the snippet (`starts_with` `●`/`○` red, `✎`/`✐` amber, `✦`/`✧`
+   violet, plus the text-look words); `README.md` examples.
+4. Checks: `cargo test`, clippy `-D warnings`, `fmt --check`, `check_manifest.py`,
+   `herdr config check` on the snippet.

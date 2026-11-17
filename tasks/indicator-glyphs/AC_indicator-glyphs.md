@@ -128,3 +128,24 @@ state word and the time — is the same in both looks.
 - Colouring the token: herdr colours it through the person's own sidebar rows; a
   copyable rules snippet goes into the README, nothing in the binary.
 - Sending tokens over herdr's socket instead of a subprocess.
+
+## revision 2 — the glyph look without the word
+
+Input: the owner watched both looks live on 2026-11-17 and asked for the glyph look
+to carry a mark or a word, not both, and for transcribing and fixing to have marks of
+their own, since `⋯` does not tell the two apart; a mark that does not move is
+acceptable while the clock moves. The owner chose the filled/hollow pairs below.
+
+These replace requirement 3, AC-3 and the glyph-look half of AC-5 and AC-6; the text
+look, the key, `auto`, the clocks and everything else stand.
+
+- **R3'.** Glyph look, token: the stage's mark and the clock, the mark alternating
+  with its hollow twin on every tick — recording `● 0:05` ↔ `○ 0:05`, transcribing
+  `✎ 0:03` ↔ `✐ 0:03`, fixing `✦ 0:02` ↔ `✧ 0:02`. Tab: the filled form only,
+  `● 0:05`, `✎ 0:03`, `✦ 0:02`. No word in either.
+- **AC-3'.** In the glyph look the token forms are exactly those of R3' and alternate
+  on successive ticks; the tab carries the filled form.
+- **AC-6'.** AC-6 holds for the new marks; none of `✎ ✐ ✦ ✧ ● ○` is drawn as an emoji
+  by default (no emoji presentation in Unicode).
+- **AC-9'.** The sweep also strips the glyph-look tab forms `● m:ss`, `✎ m:ss`,
+  `✦ m:ss` written as a suffix.

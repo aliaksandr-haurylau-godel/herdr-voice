@@ -140,3 +140,47 @@ verdict:
     - real recognition and rewrite engines
     - Linux and Windows
 ```
+
+## Revision 2 — the glyph look without the word (2026-11-17)
+
+Input: the owner watched the live demonstration and asked for a mark or a word, not
+both, and distinct marks for transcribing and fixing; the owner chose the
+filled/hollow pairs `●/○`, `✎/✐`, `✦/✧`. AC, DESIGN and PLAN each gained a revision
+section; the three gates below review those sections.
+
+```yaml
+gate:
+  stage: S1
+  artifact: AC_indicator-glyphs.md, revision 2
+  reviewer: designer
+  verdict: READY
+  date: 2026-11-17
+  blocker: null
+```
+
+Reviewer notes (not gate questions): AC-9' does not list the revision-1 glyph forms, which only this unreleased branch ever wrote — the design should say so; a hand-named label ending in a mark and a clock is now stripped too; the colour snippet must change, which AC-11 covers.
+
+```yaml
+gate:
+  stage: S2
+  artifact: DESIGN_indicator-glyphs.md, revision 2
+  reviewer: planner
+  verdict: READY
+  date: 2026-11-17
+  blocker: null
+```
+
+Reviewer notes (not gate questions): the forms table, width paragraph and sweep paragraph in `docs/design.md` and the README example also show the old glyph forms and are rewritten under AC-11; read literally, the grammar drops the optional mark before a word, so a revision-1 tab such as `x ● REC 0:05` would strip to `x ●` — those forms were never released.
+
+```yaml
+gate:
+  stage: S3
+  artifact: PLAN_indicator-glyphs.md, revision 2
+  reviewer: implementer
+  verdict: READY
+  date: 2026-11-17
+  blocker: null
+```
+
+### S4 Implement, revision 2
+- started: 2026-11-17.
