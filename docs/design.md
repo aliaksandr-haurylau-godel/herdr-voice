@@ -384,6 +384,8 @@ agent  = "auto"
 model  = "sonnet"
 args   = []
 skip_if_plain = true
+thinking = true           # http only; false sends "reasoning_effort": "none" so a
+                          # reasoning model answers at once
 prompt_file = ""
 
 [context]

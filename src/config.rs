@@ -105,6 +105,10 @@ pub struct Rewrite {
     /// Whether a short transcript with no foreign term and no name from the
     /// collected bias string skips the engine entirely.
     pub skip_if_plain: bool,
+    /// For `engine = "http"`: `false` sends `"reasoning_effort": "none"` so a
+    /// model that reasons by default answers at once. `true`, the default,
+    /// sends no such field and the server decides.
+    pub thinking: bool,
 }
 
 impl Default for Stt {
@@ -141,6 +145,7 @@ impl Default for Rewrite {
             model: String::new(),
             command: Vec::new(),
             skip_if_plain: true,
+            thinking: true,
         }
     }
 }
@@ -444,6 +449,7 @@ mod tests {
         assert_eq!(config.rewrite.model, "");
         assert!(config.rewrite.command.is_empty());
         assert!(config.rewrite.skip_if_plain);
+        assert!(config.rewrite.thinking);
     }
 
     #[test]
