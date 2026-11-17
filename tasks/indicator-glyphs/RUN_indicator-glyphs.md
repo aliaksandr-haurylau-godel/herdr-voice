@@ -184,3 +184,31 @@ gate:
 
 ### S4 Implement, revision 2
 - started: 2026-11-17.
+- code committed as `7d1d43b`; diff `c7eed6d..7d1d43b` reviewed by an independent subagent.
+
+```yaml
+gate:
+  stage: S4
+  artifact: diff c7eed6d..7d1d43b
+  reviewer: code (superpowers:requesting-code-review, independent subagent)
+  verdict: READY with fixes
+  date: 2026-11-17
+  blocker: null
+```
+
+Review findings and what was done: no code issues; the process gap (snippet check and S5 for revision 2 not recorded) is closed below; Minor 1 — a revision-1 leftover such as `x ● REC 0:01` strips to `x ●`: accepted, those forms were never released; Minor 2 — two negative sweep cases added (`api ○ 0:05`, `api x✦ 0:05`); Minor 3 — the module comment and one design paragraph rewrapped; Minor 4 — more hand-named labels can match the sweep: documented, a conscious choice.
+
+### S5 Verify, revision 2
+- section: `docs/evidence.md`, "The glyph look with one mark per stage, by hand on macOS"
+- checks: `cargo test` 1031 + 4 + 4 + 9 passed, 1 ignored; clippy `-D warnings` clean; `fmt --check` clean; `check_manifest.py` "13 entries, all commands known"; snippet `herdr config check` ok.
+
+```yaml
+verdict:
+  stage: S5
+  result: PASS
+  date: 2026-11-17
+  not_verified:
+    - how the new marks look on screen to a person
+    - real recognition and rewrite engines
+    - Linux and Windows
+```

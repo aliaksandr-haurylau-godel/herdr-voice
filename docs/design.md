@@ -314,10 +314,9 @@ clock. On the token the mark alternates with its hollow twin — `●`/`○`, `�
 These are marks of the kind the herdr-radar plugin draws in front of an agent's
 title, and none of them has an emoji presentation: an emoji is drawn in its own
 colours, two cells wide, while these take the colour the row gives them. The text
-look is the word and the clock
-alone. Its blink is the colon turning into a space, so no form begins or ends
-with a blank — herdr trims whitespace off either end of a token value, and the
-width would change with it.
+look is the word and the clock alone. Its blink is the colon turning into a space,
+so no form begins or ends with a blank — herdr trims whitespace off either end of
+a token value, and the width would change with it.
 
 Each animation changes one character for another of the same width: a filled mark
 for its hollow twin, or the colon for a space. By East Asian Width the colon and

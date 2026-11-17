@@ -3,9 +3,9 @@
 //! Three states, two looks. The glyph look is a one-cell mark and the clock —
 //! a dot while recording, a pencil while transcribing, a star while fixing,
 //! each alternating with its hollow twin on the token; the text look is the
-//! word and the clock, with the colon blinking. The token animates on every tick; the tab label
-//! carries the steady form, because a tab bar that changes a character twice a
-//! second is noise where nobody chose to look.
+//! word and the clock, with the colon blinking. The token animates on every
+//! tick; the tab label carries the steady form, because a tab bar that changes
+//! a character twice a second is noise where nobody chose to look.
 //!
 //! No form carries a marker. The start-up sweep recognises a suffix this
 //! plugin wrote by its shape (`strip`), and also the older forms that began
@@ -1136,6 +1136,8 @@ mod tests {
             "api ✎0:03",
             "api ●0:05",
             "api ◆ 0:05",
+            "api ○ 0:05",
+            "api x✦ 0:05",
         ] {
             assert_eq!(strip(label), label, "{label:?}");
         }
