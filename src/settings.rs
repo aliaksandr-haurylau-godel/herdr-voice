@@ -80,6 +80,7 @@ fn allowed(section: &str, key: &str) -> Option<Vec<&'static str>> {
         ("stt", "engine") => Some(crate::stt::ENGINES.to_vec()),
         ("rewrite", "engine") => Some(REWRITE_ENGINES.to_vec()),
         ("context", "source") => Some(crate::bias::source::VALUES.to_vec()),
+        ("ui", "style") => Some(crate::config::Style::VALUES.to_vec()),
         _ => None,
     }
 }
@@ -699,7 +700,7 @@ mod tests {
         let table: toml::Table = toml::from_str("[ui]\ntoasts = false\n").unwrap();
         let rendered = render_sections(&sections(), Some(&table));
         let ui = rendered.lines().find(|l| l.contains("ui")).unwrap();
-        assert!(ui.contains("1 of 4 keys set"), "{ui}");
+        assert!(ui.contains("1 of 5 keys set"), "{ui}");
         let audio = rendered.lines().find(|l| l.contains("audio")).unwrap();
         assert!(audio.contains("0 of 2 keys set"), "{audio}");
     }

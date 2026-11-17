@@ -298,30 +298,78 @@ because one rename paints two of them.
 | the sidebar's tab row | the tab's label — the same rename paints both |
 | the sidebar's agent row | a token on the pane |
 
-There are three states, and their text is fixed:
+There are three states, each shown as a word and the time spent in it, and two
+looks, chosen by `[ui] style`:
 
-| state | steady form | blink form |
-|---|---|---|
-| recording | `🎙️🔴 REC 0:05` | `🎙️　 REC 0:05` |
-| transcribing | `🎙️📝 TRANSCR` | `🎙️　 TRANSCR` |
-| fixing | `🎙️🪄 FIX` | `🎙️　 FIX` |
+| state | glyphs: token | glyphs: tab | text: token | text: tab |
+|---|---|---|---|---|
+| recording | `● 0:05` ↔ `○ 0:05` | `● 0:05` | `REC 0:05` ↔ `REC 0 05` | `REC 0:05` |
+| transcribing | `✎ 0:03` ↔ `✐ 0:03` | `✎ 0:03` | `TRANSCR 0:03` ↔ `TRANSCR 0 03` | `TRANSCR 0:03` |
+| fixing | `✦ 0:02` ↔ `✧ 0:02` | `✦ 0:02` | `FIX 0:02` ↔ `FIX 0 02` | `FIX 0:02` |
+
+The glyph look says the state with a mark instead of the word: a dot while
+recording, a pencil while transcribing, a star while fixing, each followed by the
+clock. On the token the mark alternates with its hollow twin — `●`/`○`, `✎`/`✐`,
+`✦`/`✧` — so the row shows that the take is alive; the tab carries the filled mark.
+These are marks of the kind the herdr-radar plugin draws in front of an agent's
+title, and none of them has an emoji presentation: an emoji is drawn in its own
+colours, two cells wide, while these take the colour the row gives them. The text
+look is the word and the clock alone. Its blink is the colon turning into a space,
+so no form begins or ends with a blank — herdr trims whitespace off either end of
+a token value, and the width would change with it.
+
+Each animation changes one character for another of the same width: a filled mark
+for its hollow twin, or the colon for a space. By East Asian Width the colon and
+the space are Narrow and `✎ ✐ ✦ ✧` are Neutral, all drawn one cell wide; `●` and
+`○` are Ambiguous, which a terminal draws one cell wide unless it is
+set to draw Ambiguous characters wide, in which case both widen together. The text
+after the mark never moves.
 
 The clock is minutes and seconds with the minutes uncapped, so a take nobody
-ended reads as `43:11` instead of reading as though it had just begun. The blink
-form is the steady form with its second glyph replaced by U+3000 IDEOGRAPHIC
-SPACE, a blank of the same width, so the label keeps its shape while the glyph
-goes dark: the token alternates between the two forms on every renewal, and that
-alternation is the blink. A terminal lays its cells out by East Asian Width, the
-icons are Wide there and so is U+3000, which is why an ordinary space is not
-used — it is Narrow, and the text would move by half a cell. The tab label
-always carries the steady form, because a tab bar that flashes a character twice
-a second is noise where nobody chose to look.
+ended reads as `43:11` instead of reading as though it had just begun. Recording
+counts from the start of the recording; transcribing and fixing count from the
+moment that stage began, because each publication of a stage carries its own
+time stamp. Transcribing begins when the recording stops, so its clock includes
+collecting the context that recognition is given.
+
+**`auto` is the default.** It gives the glyph look when herdr's configuration file
+contains the line herdr-radar opens its managed sidebar block with,
+`# >>> herdr-radar sidebar block`, and the text look otherwise — including when
+the file cannot be found or read. The block is there exactly while the radar draws
+the agents panel: the radar's own switch back to herdr's panel removes it. The file
+is found the way `doctor` finds it, and it is read once per take, before the take's
+first paint; the take keeps that look to its end.
+
+The radar's rows have no cell for this plugin's token, so beside the radar the
+visible part is the tab suffix, which the radar prints in front of each title when
+its `show_tab` setting is on. On herdr's own panel the token is shown by the
+person's sidebar rows, and its colour comes from their `rules`, for example:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace", "tab"], [
+  "agent",
+  { token = "$voice", rules = [
+    { starts_with = "●", fg = "#c04a4a" },
+    { starts_with = "○", fg = "#c04a4a" },
+    { starts_with = "REC", fg = "#c04a4a" },
+    { starts_with = "✎", fg = "#c78a1f" },
+    { starts_with = "✐", fg = "#c78a1f" },
+    { starts_with = "TRANSCR", fg = "#c78a1f" },
+    { starts_with = "✦", fg = "#907aa9" },
+    { starts_with = "✧", fg = "#907aa9" },
+    { starts_with = "FIX", fg = "#907aa9" },
+  ] },
+]]
+```
 
 A thread of its own does all the drawing. It wakes every `blink_ms`, reads what
 the take path published, and paints; nothing that runs herdr sits between the
-key and the recording. The token is written on every tick. The tab is renamed
-only when its steady form differs from the one last written there — once a
-second while a clock is running in it, once on entering a state that has none.
+key and the recording. The token is written on every tick, and every tick of a
+take advances its frame by one: the marks and the colon alternate on it, so the
+alternation's speed is `blink_ms` too. The tab is renamed
+only when its steady form differs from the one last written there, which, with a
+clock in every state, is once a second.
 
 **The token is never cleared.** It is written with a time to live of three
 renewals and stays alive only because it keeps being renewed, so when a take
@@ -336,12 +384,17 @@ the thread last wrote, somebody renamed the tab during the take: it is left as
 it is, and that is recorded.
 
 A daemon that was killed puts nothing back, and the label would otherwise keep a
-recording prefix forever. The decoration is a suffix and every form begins with
-`🎙️`, so at start the next daemon lists every tab and cuts that marker, and
-everything after it, off any label that carries one. The start-up sweep runs
-whether or not the tab indicator is switched on: the key says that this plugin
-does not decorate, and it cannot mean that decorations it left earlier stay
-forever.
+recording suffix forever. At start the next daemon lists every tab and takes off
+any suffix this plugin can have written. No form carries a marker, so a suffix is
+recognised by its shape, which is closed: one of the words `REC`, `TRANSCR`,
+`FIX` or one of the filled marks `●`, `✎`, `✦`, then a space and a clock, at the
+very end of the label and either the whole label or after a space. Labels left by
+older daemons, whose forms all began with `🎙️`, are cut from that marker. The
+price of having no marker is that a tab a person named so that it ends that way —
+say `release FIX 1:00` or `notes ● 1:00` — is cleaned up once at daemon start as
+though a take had left it. The start-up sweep runs whether or not
+the tab indicator is switched on: the key says that this plugin does not decorate,
+and it cannot mean that decorations it left earlier stay forever.
 
 A draw that fails — herdr absent, slow, or refusing — is recorded once per take,
 and drawing carries on being attempted; the take itself is untouched, and the
@@ -401,7 +454,8 @@ min_hold_ms = 300
 [ui]
 sidebar_token = true      # the token on the sidebar's agent row
 tab_indicator = true      # the suffix on the tab label
-blink_ms = 600            # the renewal interval, and so the blink rate; floor 100
+blink_ms = 600            # the renewal interval, and so the animation rate; floor 100
+style = "auto"            # auto | glyphs | text; auto means glyphs beside herdr-radar
 toasts = true
 
 [delivery]

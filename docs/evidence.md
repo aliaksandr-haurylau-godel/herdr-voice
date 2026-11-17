@@ -3045,3 +3045,140 @@ reasoning tokens from 297 to 0. `chat_template_kwargs.enable_thinking = false`, 
 
 Not verified: a take through the installed plugin and herdr; the plugin was not rebuilt or restarted
 for this check. Other servers and models were not tried.
+
+## The glyph look and the text look of the indicator, by hand on macOS
+
+Run on 2026-11-16 on macOS 27.2, arm64, herdr 0.9.5, with the release binary built
+from branch `feat/120-indicator-glyphs` (commit `be32710` plus the documentation fixes of
+its review, which change no code). Nothing of the machine's own installation was
+touched: the checkout was not linked, the plugin in use was not restarted, and each
+run used a configuration directory and a state directory of its own. The daemon was
+started by hand and driven with two `dictate` requests whose
+`HERDR_PLUGIN_CONTEXT_JSON` named a pane in a tab opened for the check and closed
+afterwards. Recognition and rewrite were `command` engines that sleep four and three
+seconds and print a fixed sentence, so each state lasted long enough to be seen.
+herdr's own configuration file, read by `auto`, holds the herdr-radar managed sidebar
+block on this machine.
+
+A script polled `herdr pane get` for the pane's `voice` token and `herdr tab list` for
+the tab's label every 150 ms and printed each change. Times are seconds since the
+poll started.
+
+### `style = "auto"`, beside herdr-radar: the glyph look
+
+```
+  0.71s token='● REC 0:00' tab='voice-check ● REC 0:00'
+  1.23s token='○ REC 0:00' tab='voice-check ● REC 0:00'
+  1.78s token='● REC 0:01' tab='voice-check ● REC 0:01'
+  2.51s token='○ REC 0:02' tab='voice-check ● REC 0:02'
+  3.69s token='⣻ TRANSCR 0:00' tab='voice-check ⋯ TRANSCR 0:00'
+  4.22s token='⣽ TRANSCR 0:00' tab='voice-check ⋯ TRANSCR 0:00'
+  4.93s token='⣾ TRANSCR 0:01' tab='voice-check ⋯ TRANSCR 0:01'
+  7.27s token='⡿ TRANSCR 0:04' tab='voice-check ⋯ TRANSCR 0:04'
+  7.81s token='⢿ FIX 0:00' tab='voice-check ⋯ FIX 0:00'
+  8.53s token='⣻ FIX 0:00' tab='voice-check ⋯ FIX 0:00'
+ 10.90s token='⣯ FIX 0:03' tab='voice-check ⋯ FIX 0:03'
+ 11.45s token='⣯ FIX 0:03' tab='voice-check'
+ 12.78s token=None tab='voice-check'
+```
+
+(lines elided where only the frame and the clock advanced). `auto` chose the glyph
+look from herdr's configuration. The dot pulses on every renewal, the spinner carries
+on from the take's frame count across the change of stage, and the tab carries the
+steady form only. Each stage starts its own clock at `0:00`. At the end the tab got
+its label back at once and the token lapsed 1.3 s later, by its time to live.
+
+### `style = "text"`: the text look
+
+```
+  0.21s token='REC 0:00' tab='voice-check REC 0:00'
+  0.74s token='REC 0 00' tab='voice-check REC 0:00'
+  1.47s token='REC 0:01' tab='voice-check REC 0:01'
+  3.78s token='TRANSCR 0:00' tab='voice-check TRANSCR 0:00'
+  4.35s token='TRANSCR 0 01' tab='voice-check TRANSCR 0:01'
+  7.39s token='FIX 0:00' tab='voice-check FIX 0:00'
+  8.08s token='FIX 0 00' tab='voice-check FIX 0:00'
+  9.93s token='FIX 0:02' tab='voice-check FIX 0:02'
+ 10.44s token='FIX 0:02' tab='voice-check'
+ 11.70s token=None tab='voice-check'
+```
+
+No mark and no emoji on either surface; the colon alternates with a space on the
+token; the tab never alternates.
+
+### A daemon killed in the middle of a take
+
+| when | tab label |
+|---|---|
+| two seconds into a take, glyph look | `voice-check ● REC 0:01` |
+| 2.5 s after `kill -9` of the daemon | `voice-check ● REC 0:01` |
+| 1.5 s after the next daemon started | `voice-check` |
+
+The killed daemon left its suffix, and the next one took it off by its shape, with no
+marker in the label.
+
+### The colour snippet
+
+The sidebar snippet in `docs/design.md`, section 6, was checked with
+`HERDR_CONFIG_PATH=<file> herdr config check`, which answered `config: ok`. The same
+check with the rule key misspelled as `starts_wit` answered
+`data did not match any variant of untagged enum RawSidebarToken`, so the check does
+read the rule keys; `starts_with` and `contains` are accepted by herdr 0.9.5.
+
+### Not verified
+
+1. **How the forms look to a person.** The values above are what herdr holds; nobody
+   looked at the sidebar during these runs. Whether `●`, `○`, `⋯` and the braille
+   cells keep the text still in herdr's renderer rests on their East Asian Width class
+   (`docs/design.md`, section 6), not on a look at the screen. One step settles it:
+   with this build the one herdr runs, hold the push-to-talk key in a tab with
+   herdr-radar's `show_tab = true` and watch the radar row and herdr's own panel.
+2. **A real recognition engine and rewrite engine.** Both were commands that sleep;
+   the stages and their clocks do not depend on which engine runs.
+3. **Linux and Windows.**
+
+## The glyph look with one mark per stage, by hand on macOS
+
+Run on 2026-11-17 on macOS 27.2, arm64, herdr 0.9.5, with the release binary built
+from branch `feat/120-indicator-glyphs` at `7d1d43b` plus its review fixes (two test cases
+and two rewrapped comments). The method is the one of the section above: a daemon
+started by hand with its own configuration and state directories, two `dictate`
+requests naming a pane in a tab opened for the check and closed afterwards, `command`
+engines that sleep, and a script printing every change of the pane's `voice` token and
+the tab's label. `[audio] silence_db` was set to -200 in the check's configuration,
+because a quiet room measured under the default floor and the take was otherwise
+discarded before transcription.
+
+`style = "auto"`, beside herdr-radar:
+
+```
+  0.46s token='● 0:00' tab='voice-check ● 0:00'
+  1.16s token='○ 0:00' tab='voice-check ● 0:00'
+  1.69s token='● 0:01' tab='voice-check ● 0:01'
+  3.45s token='✐ 0:00' tab='voice-check ✎ 0:00'
+  4.15s token='✎ 0:00' tab='voice-check ✎ 0:00'
+  7.31s token='✐ 0:03' tab='voice-check ✎ 0:03'
+  7.66s token='✦ 0:00' tab='voice-check ✦ 0:00'
+  8.39s token='✧ 0:00' tab='voice-check ✦ 0:00'
+ 10.25s token='✦ 0:02' tab='voice-check ✦ 0:02'
+ 10.78s token='✦ 0:02' tab='voice-check'
+ 11.92s token=None tab='voice-check'
+```
+
+(lines elided where only the mark and the clock advanced). Each stage shows its own
+mark and no word; the token alternates the filled and the hollow mark, carrying the
+take's frame count across the change of stage; the tab carries the filled mark. The
+text look, run the same way, was unchanged from the section above: `REC 0:00` ↔
+`REC 0 00`, `TRANSCR 0:00` ↔ `TRANSCR 0 00`, `FIX 0:00` ↔ `FIX 0 00`.
+
+A daemon killed with `kill -9` six seconds into a recording left the tab as
+`voice-check ● 0:06`; 1.5 s after the next daemon started the label was `voice-check`.
+
+The colour snippet in `docs/design.md`, section 6, now with `starts_with` rules for
+`✎ ✐ ✦ ✧`, passes `HERDR_CONFIG_PATH=<file> herdr config check` (`config: ok`).
+
+### Not verified
+
+The same three points as the section above: how the marks look on screen to a person
+(the owner watched an earlier demonstration of the revision-1 forms, not these), real
+engines, and Linux and Windows.
